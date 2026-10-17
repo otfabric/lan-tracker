@@ -134,7 +134,7 @@ func AddDHCPServers(t testing.TB, st *store.Store) {
 	err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO dhcp_servers (context_id, server_id, relay, mac, ip, status, config_json, first_seen, last_seen)
 			SELECT id, '192.168.110.1', '', '00:00:5e:00:01:01', '192.168.110.1', 'allowed',
-				'{"router":"192.168.110.1","dns":"192.168.110.1","subnet_mask":"255.255.255.0"}', ?, ? FROM network_contexts WHERE interface = 'eth1'
+				'{"router":"192.168.110.1","dns":"192.168.110.1","subnet_mask":"255.255.255.0","domain":"plant.local","search":"plant.local"}', ?, ? FROM network_contexts WHERE interface = 'eth1'
 			UNION ALL
 			SELECT id, '', '', '02:00:00:00:00:66', '192.168.110.66', 'unexpected', '{}', ?, ? FROM network_contexts WHERE interface = 'eth1'`,
 			T0.UnixMilli(), T0.Add(4*time.Hour).UnixMilli(), T0.Add(2*time.Hour).UnixMilli(), T0.Add(2*time.Hour).UnixMilli())

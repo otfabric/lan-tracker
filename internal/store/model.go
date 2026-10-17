@@ -197,7 +197,8 @@ type DHCPServer struct {
 	// Status is the allowlist verdict at the last reply: allowed,
 	// unexpected, or unchecked (no allowlist on the interface).
 	Status string `json:"status"`
-	// Config is what the server last advertised: router, dns, subnet_mask.
+	// Config is what the server last advertised: router, dns, subnet_mask,
+	// domain, search.
 	Config    map[string]string `json:"config"`
 	FirstSeen time.Time         `json:"first_seen"`
 	LastSeen  time.Time         `json:"last_seen"`

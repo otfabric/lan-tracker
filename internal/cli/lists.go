@@ -260,7 +260,7 @@ func (a *app) dhcpCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				header := []string{"SERVER ID", "RELAY", "MAC", "IP", "IFACE", "STATUS", "ROUTER", "DNS", "MASK", "LAST SEEN"}
+				header := []string{"SERVER ID", "RELAY", "MAC", "IP", "IFACE", "STATUS", "ROUTER", "DNS", "MASK", "DOMAIN", "LAST SEEN"}
 				rows := make([][]string, 0, len(servers))
 				for _, s := range servers {
 					id := s.ServerID
@@ -272,7 +272,7 @@ func (a *app) dhcpCmd() *cobra.Command {
 						last = s.LastSeen.UTC().Format(time.RFC3339)
 					}
 					rows = append(rows, []string{id, dash(s.Relay), s.MAC, dash(s.IP), s.Interface, s.Status,
-						dash(s.Config["router"]), dash(s.Config["dns"]), dash(s.Config["subnet_mask"]), last})
+						dash(s.Config["router"]), dash(s.Config["dns"]), dash(s.Config["subnet_mask"]), dash(s.Config["domain"]), last})
 				}
 				return a.listOut(header, rows, servers, func() error { return writeJSONL(a.output(), servers) })
 			})

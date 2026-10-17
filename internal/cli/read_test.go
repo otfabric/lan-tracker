@@ -160,12 +160,13 @@ func TestReadCommands(t *testing.T) {
 		{"services csv", []string{"-o", "csv", "services", "list", "--state", "open"}, 0, []string{"IP,PORT,LAST RESULT,CHECKED,LAST DEFINITE,MAC,IFACE\n192.168.110.50,502/tcp,OPEN,2026-10-01T14:00:00Z,OPEN 2026-10-01T14:00:00Z,"}},
 		{"interfaces", []string{"interfaces", "list"}, 0, []string{"eth1", "192.168.110.0/24", "on", "unknown"}},
 		{"dhcp servers", []string{"dhcp", "servers"}, 0, []string{
-			"SERVER ID      RELAY  MAC                IP              IFACE  STATUS      ROUTER         DNS            MASK           LAST SEEN",
-			"192.168.110.1  -      00:00:5e:00:01:01  192.168.110.1   eth1   allowed     192.168.110.1  192.168.110.1  255.255.255.0  1h ago",
-			"unknown        -      02:00:00:00:00:66  192.168.110.66  eth1   unexpected  -              -              -              3h ago"}},
+			"SERVER ID      RELAY  MAC                IP              IFACE  STATUS      ROUTER         DNS            MASK           DOMAIN       LAST SEEN",
+			"192.168.110.1  -      00:00:5e:00:01:01  192.168.110.1   eth1   allowed     192.168.110.1  192.168.110.1  255.255.255.0  plant.local  1h ago",
+			"unknown        -      02:00:00:00:00:66  192.168.110.66  eth1   unexpected  -              -              -              -            3h ago"}},
 		{"dhcp servers csv", []string{"-o", "csv", "dhcp", "servers", "--status", "unexpected"}, 0, []string{
-			"SERVER ID,RELAY,MAC,IP,IFACE,STATUS,ROUTER,DNS,MASK,LAST SEEN\nunknown,,02:00:00:00:00:66,192.168.110.66,eth1,unexpected,,,,2026-10-01T12:00:00Z"}},
-		{"dhcp servers json", []string{"-o", "json", "dhcp", "servers", "--interface", "eth1"}, 0, []string{`"server_id": "192.168.110.1"`, `"status": "unexpected"`}},
+			"SERVER ID,RELAY,MAC,IP,IFACE,STATUS,ROUTER,DNS,MASK,DOMAIN,LAST SEEN\nunknown,,02:00:00:00:00:66,192.168.110.66,eth1,unexpected,,,,,2026-10-01T12:00:00Z"}},
+		{"dhcp servers json", []string{"-o", "json", "dhcp", "servers", "--interface", "eth1"}, 0, []string{`"server_id": "192.168.110.1"`, `"status": "unexpected"`,
+			`"domain": "plant.local"`, `"search": "plant.local"`}},
 		{"dhcp servers bad status", []string{"dhcp", "servers", "--status", "rogue"}, ExitUsage, nil},
 		{"dhcp leases", []string{"dhcp", "leases"}, 0, []string{
 			"CLIENT             IP              SERVER ID      RELAY  IFACE  FIRST ACK            LAST ACK             ACKS  LEASE     EXPIRES              GATEWAY        DNS                          STATE",

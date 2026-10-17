@@ -56,7 +56,7 @@ The daemon runs as root with `UMask=0027` and the data directory is `0750 root:r
 | `observations list` | Raw observations within retention; hourly roll-ups with `--rollups` | `--host`, `--interface`, `--mac`, `--ip`, `--source`, `--unbound`, `--since`, `--until`, `--limit`, `--rollups` |
 | `events list` | Events on this box, the latest `--limit` (default 1000) in time order | `--since`, `--until`, `--type`, `--interface`, `--mac`, `--ip`, `--limit` |
 | `services list` | TCP endpoint results per interface, address and port: the last result, the last definite answer (OPEN or REFUSED) and the MAC that alone held the address | `--interface`, `--ip`, `--port`, `--state`, `--at` |
-| `dhcp servers` | DHCP servers seen: identity (option 54), relay, sender MAC and IP, allowlist verdict, advertised router, DNS servers and mask, last seen | `--interface`, `--status` |
+| `dhcp servers` | DHCP servers seen: identity (option 54), relay, sender MAC and IP, allowlist verdict, advertised router, DNS servers, mask and domain, last seen | `--interface`, `--status` |
 | `dhcp leases` | Lease history: each address and configuration a server acknowledged for a client, newest first | `--interface`, `--mac`, `--ip`, `--open`, `--limit` |
 | `dhcp exchanges` | DHCP transactions: each client's messages, the offers, the server it selected and the outcome, newest first | `--interface`, `--mac`, `--since`, `--limit` |
 | `interfaces list` | State, MAC, current prefixes, passive/active per interface (`replay` for a replayed one), host count | |
@@ -164,7 +164,7 @@ Online, the daemon answers from what its single writer has committed, at most on
 
 ### `dhcp servers`
 
-One row per DHCP server identity, relay and sender seen in a reply on an interface (`DATA_MODEL.md` §5.6): `SERVER ID` is option 54 (`unknown` when a reply had none or an invalid one), `RELAY` the `giaddr` of relayed replies, `MAC` and `IP` the sender (the server, or the relay), `STATUS` the allowlist verdict at the last reply (`allowed`, `unexpected`, or `unchecked` when the interface has no `dhcp.servers`), then what the server last advertised. Known identities come first, the latest sender of each first. The allowlist matches the advertised identifier and does not authenticate a server; two senders for one identity show as two rows (`DHCP_SERVER_MAC_CHANGED`). On a switched port many replies are unicast to the client and never seen, so an empty list does not prove there is no DHCP server. Works offline; all four output formats.
+One row per DHCP server identity, relay and sender seen in a reply on an interface (`DATA_MODEL.md` §5.6): `SERVER ID` is option 54 (`unknown` when a reply had none or an invalid one), `RELAY` the `giaddr` of relayed replies, `MAC` and `IP` the sender (the server, or the relay), `STATUS` the allowlist verdict at the last reply (`allowed`, `unexpected`, or `unchecked` when the interface has no `dhcp.servers`), then what the server last advertised (`ROUTER`, `DNS`, `MASK`, `DOMAIN`: option 15; JSON adds the domain search list, option 119, as `search`). Known identities come first, the latest sender of each first. The allowlist matches the advertised identifier and does not authenticate a server; two senders for one identity show as two rows (`DHCP_SERVER_MAC_CHANGED`). On a switched port many replies are unicast to the client and never seen, so an empty list does not prove there is no DHCP server. Works offline; all four output formats.
 
 ### `dhcp leases`
 

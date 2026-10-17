@@ -21,7 +21,7 @@ const (
 
 // reply feeds the sender of a DHCP server reply on eth1, with the message's
 // fields as key/value pairs: dhcp (the type), server_id, relay (giaddr),
-// router, dns (comma lists), subnet_mask and, for the ACK of an INFORM,
+// router, dns, search (comma lists), subnet_mask, domain and, for the ACK of an INFORM,
 // config_only. An ACK otherwise assigns an address; the message has no
 // client, so only the server side is recorded.
 func (h *harness) reply(d time.Duration, mac, ip string, kv ...string) {
@@ -53,6 +53,10 @@ func (h *harness) reply(d time.Duration, mac, ip string, kv ...string) {
 			msg.DNS = list(v)
 		case "subnet_mask":
 			msg.SubnetMask = netip.MustParseAddr(v)
+		case "domain":
+			msg.Domain = v
+		case "search":
+			msg.Search = strings.Split(v, ",")
 		case "config_only":
 			configOnly = true
 		default:
@@ -200,8 +204,9 @@ func TestDHCPServerConfig(t *testing.T) {
 	h := newHarness(t)
 	id := []string{"server_id", "10.1.0.2"}
 	with := func(kv ...string) []string { return append(append([]string{}, id...), kv...) }
-	h.reply(0, dhcpA, "10.1.0.2", with("dhcp", "offer", "router", "10.1.0.1", "dns", "10.1.0.2", "subnet_mask", "255.255.255.0")...)
-	h.reply(time.Hour, dhcpA, "10.1.0.2", with("dhcp", "ack", "router", "10.1.0.1")...)
+	h.reply(0, dhcpA, "10.1.0.2", with("dhcp", "offer", "router", "10.1.0.1", "dns", "10.1.0.2", "subnet_mask", "255.255.255.0",
+		"domain", "plant.local", "search", "plant.local,site.example")...)
+	h.reply(time.Hour, dhcpA, "10.1.0.2", with("dhcp", "ack", "router", "10.1.0.1", "domain", "plant-north.local")...)
 	h.reply(2*time.Hour, dhcpA, "10.1.0.2", with("dhcp", "ack", "router", "10.1.0.254", "dns", "10.1.0.2,9.9.9.9")...)
 	h.reply(3*time.Hour, dhcpA, "10.1.0.2", with("dhcp", "ack", "config_only", "true", "router", "10.1.0.99")...)
 	h.reply(4*time.Hour, dhcpA, "10.1.0.2", with("dhcp", "nak")...)
@@ -210,7 +215,7 @@ func TestDHCPServerConfig(t *testing.T) {
 		"0s DHCP_SERVER_DISCOVERED host-01 >10.1.0.2",
 	})
 	expect(t, "servers", h.servers(), []string{
-		`"10.1.0.2" "" 00:15:5d:00:00:02 10.1.0.2 unchecked {"dns":"10.1.0.2,9.9.9.9","router":"10.1.0.254","subnet_mask":"255.255.255.0"} host-01`,
+		`"10.1.0.2" "" 00:15:5d:00:00:02 10.1.0.2 unchecked {"dns":"10.1.0.2,9.9.9.9","domain":"plant-north.local","router":"10.1.0.254","search":"plant.local,site.example","subnet_mask":"255.255.255.0"} host-01`,
 	})
 	last := h.query(`SELECT last_seen FROM dhcp_servers`, func(r *sql.Rows) string {
 		var v int64

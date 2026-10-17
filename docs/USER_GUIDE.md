@@ -267,10 +267,12 @@ The servers that answered, with the allowlist verdict (`interfaces[].dhcp.server
 
 ```console
 $ sudo lan-tracker dhcp servers
-SERVER ID      RELAY  MAC                IP             IFACE  STATUS      ROUTER         DNS                          MASK           LAST SEEN
-10.0.0.1       -      00:50:56:c0:00:08  10.0.0.1       eth1   unexpected  10.0.0.1       -                            255.255.255.0  23h ago
-192.168.110.2  -      00:15:5d:10:00:02  192.168.110.2  eth1   allowed     192.168.110.1  192.168.110.2,192.168.110.4  255.255.255.0  17h ago
+SERVER ID      RELAY  MAC                IP             IFACE  STATUS      ROUTER         DNS                          MASK           DOMAIN         LAST SEEN
+10.0.0.1       -      00:50:56:c0:00:08  10.0.0.1       eth1   unexpected  10.0.0.1       -                            255.255.255.0  -              23h ago
+192.168.110.2  -      00:15:5d:10:00:02  192.168.110.2  eth1   allowed     192.168.110.1  192.168.110.2,192.168.110.4  255.255.255.0  plant.example  17h ago
 ```
+
+`DOMAIN` is the domain name (option 15) the server last handed out; `-o json` also shows its domain search list (option 119) as `search`. A server that starts handing out another domain shows it here at its next offer or ACK, and each client that receives it gets a `DHCP_CLIENT_CONFIG_CHANGED` event in its lease history.
 
 Each transaction a client went through, with every message, the competing offers and the server the client chose:
 
