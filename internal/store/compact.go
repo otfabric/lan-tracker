@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"lan-sentinel/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/clock"
 )
 
 // CompactBatch is how many rows one compaction step touches. Each step is
@@ -28,6 +28,10 @@ type CompactResult struct {
 	RolledUp      int64 // raw observations folded into roll-ups and deleted
 	RollupsPruned int64
 	EventsPruned  int64
+	// HistoryPruned counts history rows deleted: with the events'
+	// retention endpoint result changes, and name records and DHCP leases
+	// that ended; with the roll-ups' DHCP exchanges.
+	HistoryPruned int64
 	SizeBefore    int64
 	SizeAfter     int64
 }
@@ -35,10 +39,12 @@ type CompactResult struct {
 // Compact runs one retention pass as of now. Raw observations older than
 // their retention are folded into hourly roll-ups (one row per context,
 // host, source, MAC, IP and hour, unbound ones included) and deleted;
-// roll-ups and events older than theirs are deleted. Then, while the data
-// is larger than MaxDBSize, the oldest raw observations are rolled up, then
-// the oldest roll-ups and finally the oldest events are deleted. Current
-// state and binding tables are never pruned. Freed pages are returned to
+// roll-ups and events older than theirs are deleted, and with the events
+// the history that is as old: endpoint result changes, ended name records
+// and ended DHCP leases; DHCP exchanges go with the roll-ups. Then, while the data is larger than MaxDBSize, the oldest raw
+// observations are rolled up, then the oldest roll-ups, the oldest events
+// and that history are deleted. Current state (hosts, open bindings and
+// names, endpoints, open DHCP leases) and address bindings are never pruned. Freed pages are returned to
 // the file system (auto_vacuum=INCREMENTAL).
 func (s *Store) Compact(ctx context.Context, r Retention, now time.Time) (CompactResult, error) {
 	var res CompactResult
@@ -53,6 +59,10 @@ func (s *Store) Compact(ctx context.Context, r Retention, now time.Time) (Compac
 	}{
 		{r.Observations, &res.RolledUp, rollUp},
 		{r.Rollups, &res.RollupsPruned, pruneRollups},
+		// Under the size cap the steps run in this order, so the history
+		// events explain is deleted before the events.
+		{r.Rollups, &res.HistoryPruned, pruneExchanges},
+		{r.Events, &res.HistoryPruned, pruneHistory},
 		{r.Events, &res.EventsPruned, pruneEvents},
 	}
 	for _, st := range steps {
@@ -89,7 +99,7 @@ func (s *Store) Compact(ctx context.Context, r Retention, now time.Time) (Compac
 			}
 		}
 	}
-	if res.RolledUp+res.RollupsPruned+res.EventsPruned > 0 {
+	if res.RolledUp+res.RollupsPruned+res.EventsPruned+res.HistoryPruned > 0 {
 		if err := s.step(ctx, new(int64), func(ctx context.Context, tx *sql.Tx) (int64, error) {
 			_, err := tx.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 			return 0, err
@@ -161,6 +171,32 @@ func pruneEvents(ctx context.Context, tx *sql.Tx, before int64) (int64, error) {
 	return deleteOldest(ctx, tx, `DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ? ORDER BY ts, id LIMIT ?)`, before)
 }
 
+// pruneHistory deletes a batch of endpoint result changes, of ended name
+// records and of ended DHCP leases older than before.
+func pruneHistory(ctx context.Context, tx *sql.Tx, before int64) (int64, error) {
+	var total int64
+	for _, q := range []string{
+		`DELETE FROM endpoint_results WHERE id IN (SELECT id FROM endpoint_results WHERE ts < ? ORDER BY ts, id LIMIT ?)`,
+		`DELETE FROM name_records WHERE id IN (SELECT id FROM name_records WHERE ended_at < ? ORDER BY ended_at, id LIMIT ?)`,
+		`DELETE FROM dhcp_leases WHERE id IN (SELECT id FROM dhcp_leases WHERE ended_at < ? ORDER BY ended_at, id LIMIT ?)`,
+	} {
+		n, err := deleteOldest(ctx, tx, q, before)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// pruneExchanges deletes a batch of DHCP exchanges last seen before
+// before: they are kept as long as the roll-ups of the observations they
+// summarise.
+func pruneExchanges(ctx context.Context, tx *sql.Tx, before int64) (int64, error) {
+	return deleteOldest(ctx, tx, `DELETE FROM dhcp_exchanges WHERE id IN (
+		SELECT id FROM dhcp_exchanges WHERE last_seen < ? ORDER BY last_seen, id LIMIT ?)`, before)
+}
+
 func deleteOldest(ctx context.Context, tx *sql.Tx, query string, before int64) (int64, error) {
 	res, err := tx.ExecContext(ctx, query, before, CompactBatch)
 	if err != nil {
@@ -170,7 +206,7 @@ func deleteOldest(ctx context.Context, tx *sql.Tx, query string, before int64) (
 }
 
 // UsedSize is the size of the data in bytes: the database's pages minus
-// its free pages (lan_sentinel_db_size_bytes).
+// its free pages (lan_tracker_db_size_bytes).
 func (s *Store) UsedSize(ctx context.Context) (int64, error) {
 	var size int64
 	err := s.View(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -197,7 +233,7 @@ func (s *Store) RunCompaction(ctx context.Context, clk clock.Clock, interval tim
 		case err != nil:
 			log.Error("compaction failed", "err", err)
 		case res.RolledUp+res.RollupsPruned+res.EventsPruned > 0:
-			log.Info("compaction", "rolled_up", res.RolledUp, "rollups_pruned", res.RollupsPruned,
+			log.Info("compaction", "rolled_up", res.RolledUp, "rollups_pruned", res.RollupsPruned, "history_pruned", res.HistoryPruned,
 				"events_pruned", res.EventsPruned, "size_before", res.SizeBefore, "size_after", res.SizeAfter,
 				"duration", time.Since(start).Round(time.Millisecond))
 		}

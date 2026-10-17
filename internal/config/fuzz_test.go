@@ -22,7 +22,7 @@ func FuzzLoad(f *testing.F) {
 		f.Add(data)
 	}
 	f.Add([]byte(minimal))
-	f.Add([]byte("version: 1\ninterfaces: [{name: eth0, active: {enabled: true, networks: [10.0.0.0/8]}}]\n"))
+	f.Add([]byte("version: 2\ninterfaces: [{name: eth0, active: {enabled: true, networks: [10.0.0.0/8]}}]\n"))
 	f.Add([]byte("- not\n- a mapping\n"))
 	f.Add([]byte("active: { budgets: { tcp: { connects_per_second: .inf } } }\n"))
 

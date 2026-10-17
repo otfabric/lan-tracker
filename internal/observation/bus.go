@@ -30,7 +30,19 @@ type Message struct {
 	Observation Observation
 	Link        *LinkState
 	Operator    *Operator
+	Collector   *CollectorState
 	Barrier     chan struct{}
+}
+
+// CollectorState is a passive collector changing state on an interface:
+// while it is not running nothing is observed there, which the correlator
+// records as a gap (OBSERVATION_GAP, docs/DATA_MODEL.md §7).
+type CollectorState struct {
+	Time      time.Time
+	Interface string
+	Collector string // capture or neighbor
+	State     string // running, failed, disabled, unsupported
+	Error     string
 }
 
 // OperatorKind is an operator action the correlator records.
@@ -52,7 +64,7 @@ const (
 type Operator struct {
 	Time   time.Time
 	Kind   OperatorKind
-	Actor  string // the Unix user, "env" for LAN_SENTINEL_ACTIVE_DISABLED
+	Actor  string // the Unix user, "env" for LAN_TRACKER_ACTIVE_DISABLED
 	Reason string
 	// Persist writes the kill switch to runtime_state; false for the
 	// environment variable, which is not persisted.
@@ -147,6 +159,19 @@ func (b *Bus) PublishLink(ctx context.Context, l LinkState) error {
 	}
 }
 
+// PublishCollector enqueues a collector state change, blocking while the
+// bus is full: such changes are rare and must not be dropped.
+func (b *Bus) PublishCollector(ctx context.Context, cs CollectorState) error {
+	select {
+	case b.ch <- Message{Collector: &cs}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.done:
+		return ErrBusClosed
+	}
+}
+
 // PublishOperator enqueues an operator action and returns once the
 // consumer has processed it.
 func (b *Bus) PublishOperator(ctx context.Context, op Operator) error {
@@ -185,5 +210,5 @@ func (b *Bus) Barrier(ctx context.Context) error {
 func (b *Bus) C() <-chan Message { return b.ch }
 
 // Dropped is how many observations Publish has dropped
-// (lan_sentinel_bus_dropped_total).
+// (lan_tracker_bus_dropped_total).
 func (b *Bus) Dropped() uint64 { return b.dropped.Load() }

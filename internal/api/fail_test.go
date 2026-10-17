@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 type codedErr int

@@ -1,4 +1,4 @@
-# CLAUDE.md — LAN Sentinel
+# CLAUDE.md — OT Fabric LAN Tracker
 
 @AGENTS.md
 

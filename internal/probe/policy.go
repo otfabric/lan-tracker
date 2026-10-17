@@ -2,14 +2,15 @@ package probe
 
 import (
 	"net/netip"
+	"slices"
 	"sync"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // Switch is the kill switch (FR-CFG-4): the persisted state plus whether
-// LAN_SENTINEL_ACTIVE_DISABLED forces it. Engines see a change at their
+// LAN_TRACKER_ACTIVE_DISABLED forces it. Engines see a change at their
 // next send; the scheduler cancels running probes on Changed.
 type Switch struct {
 	mu      sync.Mutex
@@ -51,21 +52,37 @@ func (s *Switch) Changed() <-chan struct{} {
 // ConfigPolicy is the policy checked before every probe: the kill switch,
 // active discovery enabled on the interface, the target inside the
 // interface's configured networks, IPv4, and not excluded
-// (docs/ARCHITECTURE.md §5).
+// (docs/ARCHITECTURE.md §5). A name query's target is where the question
+// goes: the mDNS group, allowed when mDNS queries are, or a configured
+// resolver; nothing else.
+//
+// mdnsGroup is 224.0.0.251, where one-shot mDNS queries go.
+var mdnsGroup = netip.MustParseAddr("224.0.0.251")
+
 type ConfigPolicy struct {
 	Switch *Switch
 	Config func() *config.Config
 }
 
 // Check implements Policy.
-func (p ConfigPolicy) Check(iface string, _ Protocol, target netip.Addr) error {
+func (p ConfigPolicy) Check(iface string, proto Protocol, target netip.Addr) error {
 	if p.Switch != nil && p.Switch.Disabled() {
 		return ErrDisabled
 	}
-	ic, ok := InterfaceConfig(p.Config(), iface)
+	cfg := p.Config()
+	ic, ok := InterfaceConfig(cfg, iface)
 	switch {
 	case !ok || !ic.Active.Enabled:
 		return refusal("active discovery is disabled on %s", iface)
+	case proto == Name:
+		n := cfg.Active.Names
+		switch {
+		case !n.Enabled:
+			return refusal("name queries are disabled")
+		case target == mdnsGroup && n.MDNS, slices.Contains(n.Resolvers, target):
+			return nil
+		}
+		return refusal("%s is neither the mDNS group nor a configured resolver", target)
 	case !target.Is4():
 		return refusal("%s: v1 probes IPv4 only", target)
 	case !Contains(ic.Active.Networks, target):

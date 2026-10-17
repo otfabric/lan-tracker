@@ -3,16 +3,18 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
-	"lan-sentinel/internal/store"
-	"lan-sentinel/migrations"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/migrations"
 )
 
 func exec(t *testing.T, st *store.Store, q string, args ...any) {
@@ -81,70 +83,34 @@ func TestKnownIPv4(t *testing.T) {
 	}
 }
 
-func TestIdentifyTargets(t *testing.T) {
+// LAN Sentinel's identification rows stay readable as legacy history; the
+// read model no longer has a device type or manufacturer (ADR 0012).
+func TestLegacyIdentificationsReadable(t *testing.T) {
 	st, _, _ := seed(t)
 	r := reader(t, st)
 	ctx := context.Background()
-	got, err := r.IdentifyTargets(ctx, "eth1", "modbus", time.Time{})
-	if err != nil || len(got) == 0 {
-		t.Fatalf("IdentifyTargets = %v, %v", got, err)
+	hosts, err := r.Hosts(ctx, store.HostFilter{})
+	if err != nil || len(hosts) == 0 {
+		t.Fatalf("hosts = %v, %v", hosts, err)
 	}
-	var eligible store.IdentifyCandidate
-	for _, c := range got {
-		if c.Suppress == "" {
-			eligible = c
-			break
-		}
-	}
-	if eligible.HostID == "" {
-		t.Fatal("no eligible host")
-	}
-	if eligible.PreferredName == "" {
-		t.Errorf("preferred_name empty on %+v", eligible)
-	}
-	exec(t, st, `INSERT INTO identify_attempts (host_id, probe, result, attempted_at, trigger) VALUES (?, 'modbus', 'timeout', ?, 'scheduled')`,
-		eligible.HostID, t0.UnixMilli())
-	again, err := r.IdentifyTargets(ctx, "eth1", "modbus", time.Time{})
+	id := hosts[0].HostID
+	exec(t, st, `INSERT INTO identifications (host_id, field, value, confidence, source, evidence_json, first_seen, last_seen, current)
+		VALUES (?, 'device_type', 'PLC', 0.9, 'modbus', '{}', ?, ?, 1)`, id, t0.UnixMilli(), t0.UnixMilli())
+	exec(t, st, `UPDATE hosts SET device_type = 'PLC', manufacturer = 'ACME' WHERE host_id = ?`, id)
+	h, err := r.Host(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range again {
-		if c.HostID == eligible.HostID && (!c.Attempted || c.Suppress != store.IdentifyAttempted) {
-			t.Errorf("after attempt %+v", c)
-		}
+	var found bool
+	for _, i := range h.LegacyIdentifications {
+		found = found || i.Source == "modbus" && i.Value == "PLC"
 	}
-	att, err := r.IdentifyAttemptOf(ctx, eligible.HostID, "modbus")
-	if err != nil || att.Result != "timeout" || att.Trigger != "scheduled" {
-		t.Errorf("IdentifyAttemptOf = %+v, %v", att, err)
+	if !found {
+		t.Errorf("legacy identifications = %+v", h.LegacyIdentifications)
 	}
-	stale, err := r.IdentifyTargets(ctx, "eth1", "modbus", t0.Add(100*time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range stale {
-		if c.Suppress == "" {
-			t.Errorf("expected stale or attempted, got %+v", c)
-		}
-	}
-}
-
-func TestServiceDetail(t *testing.T) {
-	st, _, _ := seed(t)
-	r := reader(t, st)
-	ctx := context.Background()
-	exec(t, st, `UPDATE services SET detail_json = '{"probe":"ntp","stratum":"2"}'`)
-	rows, err := r.Services(ctx, store.ServiceFilter{})
-	if err != nil || len(rows) == 0 || rows[0].Detail["stratum"] != "2" {
-		t.Fatalf("services = %+v, %v", rows, err)
-	}
-	h, err := r.Host(ctx, rows[0].HostID)
-	if err != nil || len(h.Services) == 0 || h.Services[0].Detail["probe"] != "ntp" {
-		t.Fatalf("host services = %+v, %v", h.Services, err)
-	}
-	exec(t, st, `UPDATE services SET detail_json = 'not json'`)
-	rows, err = r.Services(ctx, store.ServiceFilter{})
-	if err != nil || rows[0].Detail != nil {
-		t.Errorf("bad detail = %+v, %v", rows[0].Detail, err)
+	b, _ := json.Marshal(h)
+	if strings.Contains(string(b), `"device_type":`) || strings.Contains(string(b), `"manufacturer":`) {
+		t.Errorf("the read model still reports identification: %s", b)
 	}
 }
 
@@ -244,5 +210,34 @@ func TestClockSyncMigration(t *testing.T) {
 	_ = st.Flush(ctx)
 	if st.OpErrors() != 1 {
 		t.Error("a clock_sync outside synced/unsynced/unknown was accepted")
+	}
+}
+
+// Name queries ask only about what is known, and not about what a record's
+// TTL still covers.
+func TestNameTargets(t *testing.T) {
+	st, _, _ := seed(t)
+	r := reader(t, st)
+	ctx := context.Background()
+	now := t0.Add(5 * time.Hour)
+	exec(t, st, `INSERT INTO name_records (context_id, name, name_type, record_type, address, source, link, first_seen, last_seen, expires_at)
+		SELECT id, 'fresh.local', 'mdns', 'A', '192.168.110.60', 'passive_mdns', 'none', ?, ?, ? FROM network_contexts WHERE interface = 'eth1'
+		UNION ALL SELECT id, 'plc.plant.example', 'dns', 'A', '192.168.110.50', 'passive_dns', 'none', ?, ?, ? FROM network_contexts WHERE interface = 'eth1'
+		UNION ALL SELECT id, 'b.plant.example', 'dns_ptr', 'PTR', '192.168.110.50', 'passive_dns', 'none', ?, ?, ? FROM network_contexts WHERE interface = 'eth1'`,
+		now.UnixMilli(), now.UnixMilli(), now.Add(time.Minute).UnixMilli(),
+		t0.UnixMilli(), t0.UnixMilli(), t0.Add(time.Minute).UnixMilli(),
+		now.UnixMilli(), now.UnixMilli(), now.Add(time.Hour).UnixMilli())
+	got, err := r.NameTargets(ctx, "eth1", now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// plc-b.local has no TTL (the seed's older form): asked; fresh.local's
+	// TTL still covers it. .50 has a PTR in effect; .51 and .52 do not.
+	if !slices.Equal(got.MDNS, []string{"plc-b.local"}) || !slices.Equal(got.DNS, []string{"plc.plant.example"}) ||
+		len(got.PTR) != 2 || got.PTR[0].String() != "192.168.110.51" {
+		t.Errorf("targets = %+v", got)
+	}
+	if got, _ := r.NameTargets(ctx, "eth1", now, 1); len(got.PTR) != 1 {
+		t.Errorf("limit: %+v", got)
 	}
 }

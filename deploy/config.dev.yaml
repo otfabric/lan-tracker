@@ -1,7 +1,7 @@
 # Local development in the dev container: `make run-dev`.
 # Replays the synthetic site capture (test/fixtures, `make fixtures`) through
 # the capture decoders; nothing is captured or sent.
-version: 1
+version: 2
 interfaces:
   - name: eth1
     prefixes: [192.168.110.0/24]

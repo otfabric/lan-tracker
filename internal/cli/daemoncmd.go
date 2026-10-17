@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
 )
 
 func (a *app) daemonCmd() *cobra.Command {
@@ -22,7 +22,7 @@ func (a *app) daemonRunCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "run",
 		Short:   "Run the service in the foreground (systemd owns the process)",
-		Example: "  sudo lan-sentinel daemon run --config /etc/lan-sentinel/config.yaml",
+		Example: "  sudo lan-tracker daemon run --config /etc/lan-tracker/config.yaml",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			err := daemon.Run(cmd.Context(), daemon.Options{

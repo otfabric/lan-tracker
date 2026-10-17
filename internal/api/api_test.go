@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/metrics"
-	"lan-sentinel/internal/store"
-	"lan-sentinel/internal/store/storetest"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/metrics"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store/storetest"
 )
 
 const golden = "../../test/golden/reconstruction/"
@@ -69,6 +69,7 @@ func start(t *testing.T) *fixture {
 	t.Helper()
 	st, _, exp := storetest.Seed(t, golden)
 	storetest.AddDHCPServers(t, st)
+	storetest.AddDHCPLeases(t, st)
 	r, err := st.Reader(time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +87,7 @@ func start(t *testing.T) *fixture {
 		},
 		Config: func() any { return cfg },
 		Metrics: metrics.Handler(func(*http.Request) []metrics.Family {
-			return []metrics.Family{{Name: "lan_sentinel_up", Help: "Up.", Type: metrics.Gauge, Samples: []metrics.Sample{{Value: 1}}}}
+			return []metrics.Family{{Name: "lan_tracker_up", Help: "Up.", Type: metrics.Gauge, Samples: []metrics.Sample{{Value: 1}}}}
 		}),
 	})
 	dir := t.TempDir()
@@ -165,8 +166,9 @@ func TestEndpoints(t *testing.T) {
 	if rs, err := c.Rollups(ctx, store.ObservationFilter{Interface: "eth1"}); err != nil || len(rs) != 0 {
 		t.Errorf("roll-ups: %v %+v", err, rs)
 	}
-	dup, err := c.Events(ctx, store.EventFilter{Types: []string{"duplicate-ip", "DUPLICATE_IP_RESOLVED"}, Interface: "eth1", Limit: 10})
-	if err != nil || len(dup) != 2 {
+	// CLI and spec type names both filter: one detected conflict, none resolved.
+	dup, err := c.Events(ctx, store.EventFilter{Types: []string{"duplicate-ip", "DUPLICATE_IP_RESOLVED", "IP_REMOVED"}, Interface: "eth1", Limit: 10})
+	if err != nil || len(dup) != 2 || dup[0].Type == dup[1].Type {
 		t.Errorf("conflict events: %v %+v", err, dup)
 	}
 	svc, err := c.Services(ctx, store.ServiceFilter{Port: 502, State: "OPEN"})
@@ -179,6 +181,24 @@ func TestEndpoints(t *testing.T) {
 	}
 	if rogue, err := c.DHCPServers(ctx, store.DHCPServerFilter{Status: "unexpected"}); err != nil || len(rogue) != 1 || rogue[0].MAC != "02:00:00:00:00:66" {
 		t.Errorf("unexpected dhcp servers: %v %+v", err, rogue)
+	}
+	if none, err := c.Hosts(ctx, store.HostFilter{Description: "no such description"}); err != nil || len(none) != 0 {
+		t.Errorf("description filter: %v %+v", err, none)
+	}
+	leases, err := c.DHCPLeases(ctx, store.DHCPLeaseFilter{MAC: "00-1B-1B-AA-BB-01"})
+	if err != nil || len(leases) != 2 || leases[0].IP != "192.168.110.52" || leases[0].LeaseSeconds == nil || *leases[0].LeaseSeconds != -1 ||
+		leases[1].EndReason != "superseded" || leases[1].Config["gateway"] != "192.168.110.1" || !leases[1].TDerived {
+		t.Errorf("dhcp leases: %v %+v", err, leases)
+	}
+	if open, err := c.DHCPLeases(ctx, store.DHCPLeaseFilter{Open: true, IP: "192.168.110.52", Interface: "eth1", Limit: 5}); err != nil || len(open) != 1 {
+		t.Errorf("open dhcp leases: %v %+v", err, open)
+	}
+	if _, err := c.DHCPLeases(ctx, store.DHCPLeaseFilter{MAC: "plc"}); err == nil {
+		t.Error("a lease filter with a bad MAC was accepted")
+	}
+	ex, err := c.DHCPExchanges(ctx, store.DHCPExchangeFilter{MAC: "00:1b:1b:aa:bb:01", Since: storetest.T0, Interface: "eth1", Limit: 5})
+	if err != nil || len(ex) != 1 || ex[0].XID != 24158 || ex[0].Outcome != "ack" || ex[0].LeaseID != 2 || ex[0].Offers == nil {
+		t.Errorf("dhcp exchanges: %v %+v", err, ex)
 	}
 	raw, err := c.Config(ctx)
 	if err != nil || !strings.Contains(string(raw), `"name":"eth2"`) {
@@ -198,7 +218,7 @@ func TestEndpoints(t *testing.T) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(b), "lan_sentinel_up 1") {
+	if !strings.Contains(string(b), "lan_tracker_up 1") {
 		t.Errorf("metrics: %s", b)
 	}
 	if resp, err = http.Get("http://" + f.listen + "/v1/status"); err != nil || resp.StatusCode != http.StatusOK {

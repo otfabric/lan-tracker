@@ -3,14 +3,14 @@ package buildinfo
 
 import "runtime"
 
-// Set with -ldflags "-X lan-sentinel/internal/buildinfo.Version=..." etc.
+// Set with -ldflags "-X github.com/otfabric/lan-tracker/internal/buildinfo.Version=..." etc.
 var (
 	Version = "dev"
 	Commit  = "none"
 	Date    = "unknown"
 )
 
-// Info is the build metadata reported by `lan-sentinel version`.
+// Info is the build metadata reported by `lan-tracker version`.
 type Info struct {
 	Version   string `json:"version"`
 	Commit    string `json:"commit"`

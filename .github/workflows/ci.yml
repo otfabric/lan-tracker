@@ -7,11 +7,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Every job runs the same make targets as a developer machine. Go, golangci-lint
 # and govulncheck come from the dev container (build/dev.Dockerfile).
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Codecov OIDC token exchange
     steps:
       - uses: actions/checkout@v7
       - name: mod-verify, fmt-check, tidy-check, vet, lint, vuln, tests with race and coverage
@@ -20,6 +27,14 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          files: coverage.out
+          flags: unittests
+          name: lan-tracker
+          fail_ci_if_error: false
 
   fuzz:
     runs-on: ubuntu-latest

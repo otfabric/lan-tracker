@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform"
 )
 
 func TestCapturer(t *testing.T) {

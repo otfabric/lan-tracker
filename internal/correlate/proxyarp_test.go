@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 const macR = "00:00:5e:00:01:01" // a router
@@ -24,9 +24,12 @@ func (h *harness) arp(d time.Duration, kind, mac, ip string) {
 	h.c.Handle(h.ctx, observation.Message{Observation: o})
 }
 
+// identifications lists the proxy-ARP flags: the hosts flagged in
+// hosts.proxy_arp with their PROXY_ARP_DETECTED event's cause and reason.
 func (h *harness) identifications() []string {
-	return h.query(`SELECT host_id || ' ' || field || '=' || value || ' ' || source || ' ' || json_extract(evidence_json, '$.reason')
-		FROM identifications WHERE field != 'manufacturer' ORDER BY id`, func(r *sql.Rows) string {
+	return h.query(`SELECT h.host_id || ' proxy_arp=true ' || e.cause || ' ' || json_extract(e.evidence_json, '$.reason')
+		FROM hosts h JOIN events e ON e.host_id = h.host_id AND e.type = 'PROXY_ARP_DETECTED'
+		WHERE h.proxy_arp = 1 ORDER BY e.id`, func(r *sql.Rows) string {
 		var s string
 		if err := r.Scan(&s); err != nil {
 			h.t.Fatal(err)
@@ -55,7 +58,7 @@ func TestProxyARPByOverlaps(t *testing.T) {
 		"0s HOST_DISCOVERED host-03 >00:00:5e:00:01:01",
 		"1m0s IP_ADDED host-03 >10.0.0.5",
 		"1m0s DUPLICATE_IP_DETECTED host-03 >10.0.0.5",
-		"2m0s VENDOR_IDENTIFIED host-03 >proxy_arp=true",
+		"2m0s PROXY_ARP_DETECTED host-03 >proxy_arp",
 		"2m0s IP_REMOVED host-03 10.0.0.5>",
 		"2m0s DUPLICATE_IP_RESOLVED host-01 >10.0.0.5",
 		"6m0s HOST_DISCOVERED host-04 >00:1b:1b:00:00:0c",

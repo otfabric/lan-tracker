@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/store"
-	"lan-sentinel/internal/store/storetest"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store/storetest"
 )
 
 var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
@@ -92,7 +92,8 @@ func TestFindGoldenQueries(t *testing.T) {
 	}
 }
 
-// Replaced-by and moved-to: at T0+30m X is A's, later B's, and A moved to Y.
+// Replaced-by and next address: at T0+30m X is A's, taken over by B at
+// T0+2h while A was not live; A's next new address after that is .52.
 func TestFindReplacedBy(t *testing.T) {
 	st, _, exp := seed(t)
 	r := reader(t, st)
@@ -105,8 +106,8 @@ func TestFindReplacedBy(t *testing.T) {
 	if h.ReplacedBy == nil || label(exp, h.ReplacedBy.MAC) != "B" || !h.ReplacedBy.Binding.FirstSeen.Equal(t0.Add(2*time.Hour)) {
 		t.Errorf("replaced by = %+v", h.ReplacedBy)
 	}
-	if h.MovedTo == nil || h.MovedTo.Binding.IP != "192.168.110.51" || !h.MovedTo.Binding.FirstSeen.Equal(t0.Add(time.Hour)) {
-		t.Errorf("moved to = %+v", h.MovedTo)
+	if h.NextAddress == nil || h.NextAddress.Binding.IP != "192.168.110.52" || !h.NextAddress.Binding.FirstSeen.Equal(t0.Add(210*time.Minute)) {
+		t.Errorf("next address = %+v", h.NextAddress)
 	}
 	if len(h.Addresses) != 1 || h.Addresses[0].IP != "192.168.110.50" || len(h.Addresses[0].Sources) == 0 {
 		t.Errorf("addresses in effect at T0+30m = %+v", h.Addresses)
@@ -121,7 +122,8 @@ func TestFindCurrentAndOtherKinds(t *testing.T) {
 	if err != nil || len(res.Hosts) != 1 || label(exp, res.Hosts[0].MAC) != "B" || res.Hosts[0].Binding.EndedAt != nil {
 		t.Fatalf("current holder of X: %v %+v", err, res.Hosts)
 	}
-	if res.Hosts[0].PreferredName != "plc-b.local" || len(res.Hosts[0].Names) != 1 || res.Hosts[0].Names[0].Stale {
+	if res.Hosts[0].PreferredName != "plc-b.local" || len(res.Hosts[0].Names) != 1 || res.Hosts[0].Names[0].Freshness != "fresh" ||
+		res.Hosts[0].Names[0].Link != "address" || res.Hosts[0].Names[0].Address != "192.168.110.50" {
 		t.Errorf("names of B = %q %+v", res.Hosts[0].PreferredName, res.Hosts[0].Names)
 	}
 	// MAC in its dash and dot forms; the addresses in effect at a time.
@@ -129,7 +131,7 @@ func TestFindCurrentAndOtherKinds(t *testing.T) {
 	for _, q := range []string{"00-1b-1b-aa-bb-01", "001b.1baa.bb01"} {
 		res, err = r.Find(ctx, store.FindQuery{Query: q, At: &at})
 		if err != nil || res.Kind != store.KindMAC || len(res.Hosts) != 1 || len(res.Hosts[0].Addresses) != 1 ||
-			res.Hosts[0].Addresses[0].IP != "192.168.110.51" {
+			res.Hosts[0].Addresses[0].IP != "192.168.110.51" { // .50 ended at T0+2h, .52 starts at T0+3h30
 			t.Errorf("find %s at T0+150m: %v %+v", q, err, res)
 		}
 	}
@@ -186,7 +188,7 @@ func TestHistory(t *testing.T) {
 	for _, e := range evs {
 		types = append(types, e.Type)
 	}
-	if !slices.Contains(types, "DUPLICATE_IP_RESOLVED") || !slices.Contains(types, "IP_CHANGED") {
+	if !slices.Contains(types, "DUPLICATE_IP_DETECTED") || !slices.Contains(types, "IP_REMOVED") || slices.Contains(types, "IP_CHANGED") {
 		t.Errorf("history of A = %v", types)
 	}
 	if evs, err := r.History(ctx, store.HistoryQuery{Query: "plc-b.local", Since: t0.Add(4 * time.Hour)}); err != nil ||
@@ -212,7 +214,7 @@ func TestHostsAndHost(t *testing.T) {
 			a = h
 		}
 	}
-	if a.Vendor != "Siemens AG" || !slices.Equal(a.IPs, []string{"192.168.110.52"}) {
+	if a.Vendor != "Siemens AG" || !slices.Equal(a.IPs, []string{"192.168.110.51", "192.168.110.52"}) {
 		t.Errorf("host A = %+v", a)
 	}
 	for _, tt := range []struct {
@@ -239,7 +241,7 @@ func TestHostsAndHost(t *testing.T) {
 		t.Errorf("bad query: %v", err)
 	}
 	h, err := r.Host(ctx, a.HostID)
-	if err != nil || len(h.Addresses) != 3 || h.Addresses[0].EndedAt == nil || len(h.Identifications) != 1 {
+	if err != nil || len(h.Addresses) != 3 || h.Addresses[0].EndedAt == nil || len(h.LegacyIdentifications) != 0 {
 		t.Errorf("full record of A: %v %+v", err, h)
 	}
 }
@@ -295,8 +297,34 @@ func TestEventsObservationsServices(t *testing.T) {
 	}
 
 	svc, err := r.Services(ctx, store.ServiceFilter{Port: 502, State: "open"})
-	if err != nil || len(svc) != 1 || label(exp, svc[0].MAC) != "B" || !slices.Equal(svc[0].IPs, []string{"192.168.110.50"}) {
+	if err != nil || len(svc) != 1 || label(exp, svc[0].MAC) != "B" || svc[0].IP != "192.168.110.50" || svc[0].LastDefiniteResult != "OPEN" {
 		t.Errorf("services: %v %+v", err, svc)
+	}
+	// The refused connect to an address no MAC held is kept, attributed to
+	// nobody; --ip and --at select.
+	eps, _ := r.Services(ctx, store.ServiceFilter{})
+	if len(eps) != 2 || eps[1].IP != "192.168.110.99" || eps[1].MAC != "" || eps[1].LastResult != "REFUSED" {
+		t.Errorf("all endpoints = %+v", eps)
+	}
+	if got, _ := r.Services(ctx, store.ServiceFilter{IP: "192.168.110.99"}); len(got) != 1 {
+		t.Errorf("by ip = %+v", got)
+	}
+	before := t0.Add(time.Hour)
+	if got, _ := r.Services(ctx, store.ServiceFilter{At: &before}); len(got) != 0 {
+		t.Errorf("before the first check = %+v", got)
+	}
+	after := t0.Add(5 * time.Hour)
+	if got, _ := r.Services(ctx, store.ServiceFilter{At: &after, Port: 502, IP: "192.168.110.50"}); len(got) != 1 || got[0].LastResult != "OPEN" {
+		t.Errorf("at T0+5h = %+v", got)
+	}
+	// With its history pruned, an endpoint's result at a past time is
+	// unknown: it is left out rather than shown with today's result.
+	exec(t, st, `DELETE FROM endpoint_results WHERE endpoint_id = (SELECT id FROM endpoints WHERE ip = '192.168.110.99')`)
+	if got, _ := r.Services(ctx, store.ServiceFilter{At: &after}); len(got) != 1 || got[0].IP != "192.168.110.50" {
+		t.Errorf("at T0+5h after pruning = %+v", got)
+	}
+	if _, err := r.Services(ctx, store.ServiceFilter{IP: "x"}); !errors.Is(err, store.ErrBadQuery) {
+		t.Errorf("bad ip: %v", err)
 	}
 	if got, _ := r.Services(ctx, store.ServiceFilter{Interface: "eth0"}); len(got) != 0 {
 		t.Errorf("services on eth0 = %+v", got)
@@ -345,7 +373,7 @@ func TestStaleNames(t *testing.T) {
 	}
 	defer r.Close()
 	res, err := r.Find(context.Background(), store.FindQuery{Query: exp.Hosts["B"]})
-	if err != nil || len(res.Hosts) != 1 || len(res.Hosts[0].Names) != 1 || !res.Hosts[0].Names[0].Stale {
+	if err != nil || len(res.Hosts) != 1 || len(res.Hosts[0].Names) != 1 || res.Hosts[0].Names[0].Freshness != "stale" {
 		t.Errorf("names: %v %+v", err, res)
 	}
 }
@@ -479,17 +507,22 @@ func TestFindReplacedByIsASuccessor(t *testing.T) {
 	st, _, _ := seed(t)
 	r := reader(t, st)
 	ctx := context.Background()
-	at := t0.Add(2 * time.Hour) // A holds Y; C claims Y at T0+3h while A holds it until T0+3h30
-	res, err := r.Find(ctx, store.FindQuery{Query: "192.168.110.51", At: &at})
+	at := t0.Add(30 * time.Minute) // A holds X until B takes it over at T0+2h
+	res, err := r.Find(ctx, store.FindQuery{Query: "192.168.110.50", At: &at})
 	if err != nil || len(res.Hosts) != 1 {
-		t.Fatalf("find Y at T0+2h: %v %+v", err, res)
+		t.Fatalf("find X at T0+30m: %v %+v", err, res)
 	}
-	if h := res.Hosts[0]; h.ReplacedBy != nil || h.MovedTo == nil || h.MovedTo.Binding.IP != "192.168.110.52" {
-		t.Errorf("replaced by %+v, moved to %+v; want no successor and a move to .52", h.ReplacedBy, h.MovedTo)
+	if h := res.Hosts[0]; h.ReplacedBy == nil || h.NextAddress == nil || h.NextAddress.Binding.IP != "192.168.110.52" {
+		t.Errorf("replaced by %+v, next address %+v; want B and .52", h.ReplacedBy, h.NextAddress)
+	}
+	at = t0.Add(2 * time.Hour) // A holds Y, still open; C claims it at T0+3h: a conflict, never a successor
+	if res, err = r.Find(ctx, store.FindQuery{Query: "192.168.110.51", At: &at}); err != nil || len(res.Hosts) != 1 ||
+		res.Hosts[0].ReplacedBy != nil || res.Hosts[0].NextAddress != nil {
+		t.Errorf("open binding with a later claimant: %v %+v", err, res.Hosts)
 	}
 	at = t0.Add(150 * time.Minute) // B's open binding of X
 	if res, err = r.Find(ctx, store.FindQuery{Query: "192.168.110.50", At: &at}); err != nil || len(res.Hosts) != 1 ||
-		res.Hosts[0].ReplacedBy != nil || res.Hosts[0].MovedTo != nil {
+		res.Hosts[0].ReplacedBy != nil || res.Hosts[0].NextAddress != nil {
 		t.Errorf("open binding: %v %+v", err, res.Hosts)
 	}
 	local := time.Date(2026, 10, 1, 12, 30, 0, 0, time.FixedZone("CEST", 2*3600))

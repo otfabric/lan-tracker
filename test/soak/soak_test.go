@@ -24,13 +24,13 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/correlate"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/correlate"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 const (
@@ -78,7 +78,7 @@ var (
 func lan() []*device {
 	var out []*device
 	for i := range 35 {
-		out = append(out, &device{kind: ot, index: i, mac: mac(siemens, i+1), ip: addr(10 + i)})
+		out = append(out, &device{kind: ot, index: i, mac: mac(siemens, i+1), ip: addr(10 + i), name: fmt.Sprintf("plc-%02d", i)})
 	}
 	for i := range 12 {
 		out = append(out, &device{kind: laptop, index: i, mac: mac(dell, i+1), ip: addr(100 + i), name: "DESKTOP-" + strconv.Itoa(1000000+i)})
@@ -125,16 +125,26 @@ func ipOf(d *device, m int) netip.Addr {
 
 // minute returns the observations of minute m, in time order: what the
 // capture decoders pass on (an unchanged observation at most every 2
-// minutes), the kernel neighbour table and the periodic ARP sweep.
+// minutes: mDNS records, DNS answers, DHCP exchanges, LLDP), the kernel
+// neighbour table, the periodic ARP sweep and the TCP checks.
 func minute(lan, day []*device, m int) []observation.Observation {
 	var out []observation.Observation
+	at := func(d *device) time.Time {
+		return t0.Add(time.Duration(m)*time.Minute + time.Duration(d.second)*time.Second)
+	}
 	add := func(d *device, o observation.Observation) {
-		o.Time = t0.Add(time.Duration(m)*time.Minute + time.Duration(d.second)*time.Second)
-		o.Interface, o.MAC = iface, d.mac
+		o.Time, o.Interface, o.MAC = at(d), iface, d.mac
 		out = append(out, o)
 	}
+	// MAC-less: probe results and DNS answers, about an address.
+	about := func(d *device, o observation.Observation) {
+		o.Time, o.Interface = at(d), iface
+		out = append(out, o)
+	}
+	ttl := func(v uint32) *uint32 { return &v }
 	every := func(d *device, period int) bool { return (m+d.second)%period == 0 }
 	arrives := func(d *device) bool { return present(d, m) && !present(d, m-1) }
+	gw := lan[len(lan)-2]
 	for _, d := range append(append([]*device{}, lan...), day...) {
 		if !present(d, m) {
 			continue
@@ -152,31 +162,58 @@ func minute(lan, day []*device, m int) []observation.Observation {
 			if d.index < 5 && every(d, 2) {
 				add(d, observation.Observation{Source: observation.KernelNeighbor, IP: ip, NeighborState: "REACHABLE"})
 			}
+			if every(d, 15) { // the periodic TCP check of 502; every fourth device refuses
+				state := observation.ServiceOpen
+				if d.index%4 == 3 {
+					state = observation.ServiceRefused
+				}
+				about(d, observation.Observation{Source: observation.TCPConnect, IP: ip,
+					Service: &observation.ServiceResult{Proto: "tcp", Port: 502, State: state}})
+			}
+			if every(d, 60) { // a DNS PTR answer the box saw
+				about(d, observation.Observation{Source: observation.PassiveDNS, Records: []observation.Record{{
+					Name: fmt.Sprintf("%d.0.20.10.in-addr.arpa", ip.As4()[3]), Type: observation.RecordPTR, Addr: ip,
+					Value: d.name + ".plant.example", TTL: ttl(3600)}}})
+			}
 		case laptop, phone:
 			if every(d, 5) {
-				services := "_workstation._tcp,_ssh._tcp"
-				if d.kind == phone {
-					services = "_googlecast._tcp"
-				}
 				name := d.name
 				if d.kind == phone { // Android rotates its mDNS name
 					name = fmt.Sprintf("%s%02d", d.name[:12], m/120%100)
 				}
-				add(d, observation.Observation{Source: observation.PassiveMDNS, IP: ip, Hostname: name + ".local", NameType: observation.NameMDNS,
-					Meta: map[string]string{"services": services, "txt": "model=Workstation;vers=1"}})
-			}
-			if arrives(d) {
-				vc := "MSFT 5.0"
+				service := "_workstation._tcp.local"
 				if d.kind == phone {
-					vc = "android-dhcp-14"
+					service = "_googlecast._tcp.local"
 				}
+				add(d, observation.Observation{Source: observation.PassiveMDNS, IP: ip, Records: []observation.Record{
+					{Name: name + ".local", Type: observation.RecordA, Addr: ip, TTL: ttl(120), Flush: true},
+					{Name: service, Type: observation.RecordPTR, Value: name + "." + service, TTL: ttl(4500)},
+				}})
+			}
+			if every(d, 15) && d.kind == laptop { // nobody listens on 80: a timeout and a refusal alternate
+				state := observation.ServiceTimeout
+				if m/15%2 == 0 {
+					state = observation.ServiceRefused
+				}
+				about(d, observation.Observation{Source: observation.TCPConnect, IP: ip,
+					Service: &observation.ServiceResult{Proto: "tcp", Port: 80, State: state}})
+			}
+			if arrives(d) { // a whole exchange, as the decoder reads it
+				xid, ch := uint32(m)<<8|uint32(d.index), d.mac.String()
+				req := &observation.DHCPMessage{Op: 1, Type: observation.DHCPRequest, XID: xid, CHAddr: ch, Hostname: d.name,
+					RequestedIP: ip, ServerID: gw.ip, ParamRequest: []int{1, 3, 6, 15, 119, 121}, Present: []int{12, 50, 53, 54, 55}}
 				add(d, observation.Observation{Source: observation.PassiveDHCP, Hostname: d.name, NameType: observation.NameDHCP,
-					Meta: map[string]string{"dhcp": "request", "vendor_class": vc, "parameter_request_list": "1,3,6,15,31,33,43,44,46,47,119,121,249,252"}})
-				add(d, observation.Observation{Source: observation.PassiveDHCPLease, IP: ip,
-					Meta: map[string]string{"dhcp": "ack", "server_id": "10.20.0.1", "lease_seconds": "86400"}})
-				gw := lan[len(lan)-2]
-				add(gw, observation.Observation{Source: observation.PassiveDHCPServer, IP: gw.ip,
-					Meta: map[string]string{"dhcp": "ack", "server_id": "10.20.0.1", "router": "10.20.0.1", "dns": "10.20.0.1", "subnet_mask": "255.255.255.0"}})
+					DHCP: &observation.DHCPMessage{Op: 1, Type: observation.DHCPDiscover, XID: xid, CHAddr: ch, Hostname: d.name,
+						Present: []int{12, 53}}})
+				lease := uint32(86400)
+				reply := func(typ string) *observation.DHCPMessage {
+					return &observation.DHCPMessage{Op: 2, Type: typ, XID: xid, CHAddr: ch, YIAddr: ip, ServerID: gw.ip,
+						SubnetMask: netip.MustParseAddr("255.255.255.0"), Routers: []netip.Addr{gw.ip}, DNS: []netip.Addr{gw.ip},
+						Domain: "plant.example", Lease: &lease, Present: []int{1, 3, 6, 15, 51, 53, 54}}
+				}
+				add(gw, observation.Observation{Source: observation.PassiveDHCPServer, IP: gw.ip, DHCP: reply(observation.DHCPOffer)})
+				add(d, observation.Observation{Source: observation.PassiveDHCP, Hostname: d.name, NameType: observation.NameDHCP, DHCP: req})
+				add(gw, observation.Observation{Source: observation.PassiveDHCPServer, IP: gw.ip, DHCP: reply(observation.DHCPAck)})
 			}
 		case sw:
 			if every(d, 2) {
@@ -289,7 +326,8 @@ func TestNinetyDays(t *testing.T) {
 			t.Logf("%5d %8.1fMB %6.1fMB %6.1fMB %6d %12d", s.day, mb(s.size), mb(s.heap), mb(s.rss), s.hosts, s.observations)
 		}
 	}
-	for _, table := range []string{"observations", "observation_rollups", "events", "addresses", "names", "identifications", "hosts", "dhcp_servers"} {
+	for _, table := range []string{"observations", "observation_rollups", "events", "addresses", "hosts", "name_records", "endpoints",
+		"endpoint_results", "dhcp_servers", "dhcp_exchanges", "dhcp_leases"} {
 		t.Logf("%-20s %8d rows", table, count(t, st, `SELECT count(*) FROM `+table))
 	}
 

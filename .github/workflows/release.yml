@@ -1,7 +1,9 @@
 name: release
 # Releases a new version from main: Actions → release → Run workflow, pick
 # the bump. The next version follows the highest vMAJOR.MINOR.PATCH tag
-# (build/next-version.sh); the first release is v0.0.1. The workflow runs
+# (build/next-version.sh); LAN Sentinel's tags v0.0.1 to v0.0.8 are kept,
+# so LAN Tracker's first release is a minor bump, v0.1.0. RELEASE.md must
+# have a "## vX.Y.Z" section for the version: it is the release notes. The workflow runs
 # the same gates as CI on the commit, builds one tarball per target twice
 # (the checksums must match), then creates the annotated tag on that commit
 # and publishes the GitHub Release with the tarballs and SHA256SUMS
@@ -10,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: Version bump from the latest release (the first release is v0.0.1)
+        description: Version bump from the latest release (LAN Tracker's first release is minor, v0.1.0)
         type: choice
         options: [patch, minor, major]
         default: patch
@@ -45,6 +47,10 @@ jobs:
           v=$(build/next-version.sh "$BUMP")
           if git rev-parse -q --verify "refs/tags/$v" >/dev/null; then
             echo "::error::Tag $v exists already."
+            exit 1
+          fi
+          if ! grep -q "^## $v\$" RELEASE.md; then
+            echo "::error::RELEASE.md has no '## $v' section; write the release notes first."
             exit 1
           fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
@@ -95,20 +101,22 @@ jobs:
           cat dist/release/SHA256SUMS
       - name: The binaries report the version
         run: |
-          tar -xzf "dist/release/lan-sentinel-$VERSION-linux-amd64.tar.gz" -C "$RUNNER_TEMP"
-          got=$("$RUNNER_TEMP/lan-sentinel-$VERSION-linux-amd64/lan-sentinel" version --quiet)
+          tar -xzf "dist/release/lan-tracker-$VERSION-linux-amd64.tar.gz" -C "$RUNNER_TEMP"
+          got=$("$RUNNER_TEMP/lan-tracker-$VERSION-linux-amd64/lan-tracker" version --quiet)
           [ "$got" = "$VERSION" ] || { echo "::error::the binary reports $got, not $VERSION"; exit 1; }
       - name: Tag the tested commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "LAN Sentinel $VERSION" "$GITHUB_SHA"
+          git tag -a "$VERSION" -m "LAN Tracker $VERSION" "$GITHUB_SHA"
           git push origin "refs/tags/$VERSION"
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$VERSION" --verify-tag --title "LAN Sentinel $VERSION" --generate-notes \
-            "dist/release/lan-sentinel-$VERSION-linux-amd64.tar.gz" \
-            "dist/release/lan-sentinel-$VERSION-linux-arm64.tar.gz" \
+          # The notes are the version's section of RELEASE.md.
+          awk -v h="## $VERSION" '$0 == h { f = 1; next } f && /^## / { exit } f' RELEASE.md >"$RUNNER_TEMP/notes.md"
+          gh release create "$VERSION" --verify-tag --title "LAN Tracker $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "dist/release/lan-tracker-$VERSION-linux-amd64.tar.gz" \
+            "dist/release/lan-tracker-$VERSION-linux-arm64.tar.gz" \
             dist/release/SHA256SUMS

@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // Expected is a scenario's expected outcome.

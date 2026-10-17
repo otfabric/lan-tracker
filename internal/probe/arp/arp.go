@@ -15,9 +15,9 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe"
 )
 
 // Engine sends ARP requests through a platform frame connection.

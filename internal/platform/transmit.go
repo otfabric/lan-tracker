@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -193,6 +194,34 @@ func (socketTransmitter) DialTCP(ctx context.Context, iface string, addr netip.A
 func (socketTransmitter) DialUDP(ctx context.Context, iface string, addr netip.AddrPort) (net.Conn, error) {
 	d := net.Dialer{Control: bindToDevice(iface)}
 	return d.DialContext(ctx, network("udp", addr.Addr()), addr.String())
+}
+
+func (socketTransmitter) ListenUDP(ctx context.Context, iface string) (net.PacketConn, error) {
+	lc := net.ListenConfig{Control: bindToDevice(iface)}
+	return lc.ListenPacket(ctx, "udp4", "0.0.0.0:0")
+}
+
+// Route implements Transmitter with RTM_GETROUTE restricted to iface.
+func (socketTransmitter) Route(iface string, dst netip.Addr) (Route, error) {
+	routes, err := netlink.RouteGetWithOptions(dst.AsSlice(), &netlink.RouteGetOptions{Oif: iface})
+	if err != nil {
+		return Route{}, fmt.Errorf("route to %s via %s: %w", dst, iface, err)
+	}
+	if len(routes) == 0 {
+		return Route{}, fmt.Errorf("route to %s via %s: none", dst, iface)
+	}
+	r := routes[0]
+	var out Route
+	if link, err := netlink.LinkByIndex(r.LinkIndex); err == nil {
+		out.Iface = link.Attrs().Name
+	}
+	if gw, ok := netip.AddrFromSlice(r.Gw); ok {
+		out.Gateway = gw.Unmap()
+	}
+	if src, ok := netip.AddrFromSlice(r.Src); ok && !src.IsUnspecified() {
+		out.Src = src.Unmap()
+	}
+	return out, nil
 }
 
 func network(proto string, ip netip.Addr) string {

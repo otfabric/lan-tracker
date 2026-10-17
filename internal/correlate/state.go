@@ -8,8 +8,7 @@ import (
 	"net/netip"
 	"time"
 
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/events"
 )
 
 // Presence is a host's presence state (docs/DATA_MODEL.md §6).
@@ -42,27 +41,24 @@ type prefixRow struct {
 }
 
 type host struct {
-	id         string
-	ctx        *netContext
-	mac        net.HardwareAddr
-	vendor     string
-	presence   Presence
-	firstSeen  time.Time
-	lastSeen   time.Time
-	lastChange time.Time // latest binding open/close on this host
-	evidence   events.Evidence
-	bindings   map[netip.Addr]*binding // open bindings
-	services   map[string]*serviceRow
-	names      map[observation.NameType]*nameRow // open name per type
-	nameChange map[observation.NameType]time.Time
-	preferred  string
-
-	// Current identification per field and source ("field\x00source") and
-	// its confidence, for VENDOR_IDENTIFIED on a change (§5.5, §5.7), and
-	// the device type chosen from them (hosts.device_type).
-	idents     map[string]string
-	identConf  map[string]float64
-	deviceType string
+	id        string
+	ctx       *netContext
+	mac       net.HardwareAddr
+	vendor    string
+	presence  Presence
+	firstSeen time.Time
+	// lastSeen is the latest presence evidence of any kind; the kinds are
+	// also kept apart (docs/DATA_MODEL.md §2): a frame from the MAC, an
+	// address confirmed at it, an endpoint it held alone that answered.
+	lastSeen, lastFrame, lastAddress, lastAnswer time.Time
+	lastChange                                   time.Time // latest binding open/close on this host
+	evidence                                     events.Evidence
+	bindings                                     map[netip.Addr]*binding // open bindings
+	// names counts the open name records linked to the host per name
+	// ("type:name"): HOSTNAME_ADDED when one appears, HOSTNAME_REMOVED when
+	// the last record of it ends.
+	names     map[string]hostName
+	preferred string
 
 	description string // set by an operator (§5.8)
 
@@ -73,22 +69,24 @@ type host struct {
 	arpOverlaps map[netip.Addr]time.Time
 }
 
-type nameRow struct {
-	id        int64
-	name      string
-	typ       observation.NameType
-	source    observation.Source
-	firstSeen time.Time
-	lastSeen  time.Time
-}
-
 func newHost() *host {
 	return &host{
-		bindings: map[netip.Addr]*binding{}, services: map[string]*serviceRow{},
-		names: map[observation.NameType]*nameRow{}, nameChange: map[observation.NameType]time.Time{},
-		arpClaims: map[netip.Addr]time.Time{}, arpOverlaps: map[netip.Addr]time.Time{}, idents: map[string]string{},
-		identConf: map[string]float64{},
+		bindings: map[netip.Addr]*binding{}, names: map[string]hostName{},
+		arpClaims: map[netip.Addr]time.Time{}, arpOverlaps: map[netip.Addr]time.Time{},
 	}
+}
+
+// soleHolder returns the host that alone holds k at t, if its binding was
+// confirmed within expiry before t: a MAC-less observation (a TCP result,
+// an address record) is attributed only to a fresh, unambiguous holder
+// (docs/DATA_MODEL.md §5.4, §5.5). A binding nobody confirmed for that long
+// may belong to a device that left; the observation stays unattributed.
+func (s *state) soleHolder(k ipKey, t time.Time, expiry time.Duration) *host {
+	hs := s.holders[k]
+	if len(hs) != 1 || t.Sub(hs[0].lastSeen) > expiry {
+		return nil
+	}
+	return hs[0].host
 }
 
 type binding struct {
@@ -101,12 +99,6 @@ type binding struct {
 	// arpOnly: opened by an ARP reply and not confirmed by other evidence
 	// since (bindings loaded at start-up count as confirmed).
 	arpOnly bool
-}
-
-type serviceRow struct {
-	state     observation.ServiceState
-	firstSeen time.Time
-	lastSeen  time.Time
 }
 
 // ipKey identifies an IP within a context.
@@ -126,11 +118,17 @@ type state struct {
 	holders      map[ipKey][]*binding       // open bindings per IP
 	ipLastChange map[ipKey]time.Time
 
-	dhcpServers map[dhcpKey]*dhcpServer // §5.6
+	dhcpServers map[dhcpKey]*dhcpServer   // §5.6
+	endpoints   map[endpointKey]*endpoint // §5.5
+	records     map[recordKey]*record     // open name records, §5.4
+	exchanges   map[exchKey]*exchange     // open DHCP exchanges, §5.6
+	leases      map[leaseKey]*dhcpLease   // clients' open leases, §5.6
+	// exchangesSwept is when idle exchanges were last closed.
+	exchangesSwept time.Time
 
-	nextContextID, nextPrefixID, nextAddressID, nextObservationID, nextServiceID, nextNameID, nextScanID int64
+	nextContextID, nextPrefixID, nextAddressID, nextObservationID, nextScanID int64
 
-	nextDHCPServerID int64 // dhcp_servers
+	nextDHCPServerID, nextEndpointID, nextEndpointResultID, nextRecordID, nextExchangeID, nextLeaseID int64
 
 	openScans []openScan // left unfinished by the previous run
 }
@@ -145,6 +143,8 @@ func newState() *state {
 		contexts: map[string]*netContext{}, contextsByID: map[int64]*netContext{},
 		hosts: map[int64]map[string]*host{}, hostsByMAC: map[string][]*host{},
 		holders: map[ipKey][]*binding{}, ipLastChange: map[ipKey]time.Time{}, dhcpServers: map[dhcpKey]*dhcpServer{},
+		endpoints: map[endpointKey]*endpoint{}, records: map[recordKey]*record{},
+		exchanges: map[exchKey]*exchange{}, leases: map[leaseKey]*dhcpLease{},
 	}
 }
 
@@ -190,6 +190,22 @@ func (s *state) touchIP(k ipKey, t time.Time) {
 func ms(t time.Time) int64 { return t.UnixMilli() }
 
 func fromMS(v int64) time.Time { return time.UnixMilli(v).UTC() }
+
+// optMS reads an optional time stored as 0 when unknown.
+func optMS(v int64) time.Time {
+	if v == 0 {
+		return time.Time{}
+	}
+	return fromMS(v)
+}
+
+// msOrNil writes an optional time: NULL when unknown.
+func msOrNil(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return ms(t)
+}
 
 // load reads the current state from the database (open bindings only).
 func (s *state) load(ctx context.Context, tx *sql.Tx) error {
@@ -242,14 +258,17 @@ func (s *state) load(ctx context.Context, tx *sql.Tx) error {
 		return nil
 	})
 	byID := map[string]*host{}
-	q(`SELECT host_id, context_id, mac, coalesce(vendor, ''), presence, coalesce(preferred_name, ''), coalesce(device_type, ''),
-		coalesce(description, ''), first_seen, last_seen FROM hosts ORDER BY first_seen, host_id`, func(r *sql.Rows) error {
+	q(`SELECT host_id, context_id, mac, coalesce(vendor, ''), presence, coalesce(preferred_name, ''), proxy_arp,
+		coalesce(description, ''), first_seen, last_seen, coalesce(last_frame_seen, 0), coalesce(last_address_confirmed, 0),
+		coalesce(last_endpoint_answer, 0) FROM hosts ORDER BY first_seen, host_id`, func(r *sql.Rows) error {
 		h := newHost()
-		var cid, first, last int64
+		var cid, first, last, frame, addr, answer int64
 		var mac, presence string
-		if err := r.Scan(&h.id, &cid, &mac, &h.vendor, &presence, &h.preferred, &h.deviceType, &h.description, &first, &last); err != nil {
+		if err := r.Scan(&h.id, &cid, &mac, &h.vendor, &presence, &h.preferred, &h.proxyARP, &h.description, &first, &last,
+			&frame, &addr, &answer); err != nil {
 			return err
 		}
+		h.lastFrame, h.lastAddress, h.lastAnswer = optMS(frame), optMS(addr), optMS(answer)
 		var err error
 		if h.mac, err = net.ParseMAC(mac); err != nil {
 			return err
@@ -299,56 +318,6 @@ func (s *state) load(ctx context.Context, tx *sql.Tx) error {
 		}
 		return nil
 	})
-	q(`SELECT host_id, proto, port, state, first_seen, last_seen FROM services`, func(r *sql.Rows) error {
-		var hid, proto, st string
-		var port int
-		var first, last int64
-		if err := r.Scan(&hid, &proto, &port, &st, &first, &last); err != nil {
-			return err
-		}
-		if h := byID[hid]; h != nil {
-			key := observation.ServiceResult{Proto: proto, Port: port}.Key()
-			h.services[key] = &serviceRow{state: observation.ServiceState(st), firstSeen: fromMS(first), lastSeen: fromMS(last)}
-		}
-		return nil
-	})
-	q(`SELECT id, host_id, name, name_type, source, first_seen, last_seen FROM names WHERE ended_at IS NULL`, func(r *sql.Rows) error {
-		n := &nameRow{}
-		var hid, typ, src string
-		var first, last int64
-		if err := r.Scan(&n.id, &hid, &n.name, &typ, &src, &first, &last); err != nil {
-			return err
-		}
-		n.typ, n.source, n.firstSeen, n.lastSeen = observation.NameType(typ), observation.Source(src), fromMS(first), fromMS(last)
-		if h := byID[hid]; h != nil {
-			h.names[n.typ] = n
-		}
-		return nil
-	})
-	q(`SELECT DISTINCT host_id FROM identifications WHERE field = 'proxy_arp' AND value = 'true'`, func(r *sql.Rows) error {
-		var hid string
-		if err := r.Scan(&hid); err != nil {
-			return err
-		}
-		if h := byID[hid]; h != nil {
-			h.proxyARP = true
-		}
-		return nil
-	})
-	// The current identification of each field from the probes and the
-	// passive identifiers (§5.5, §5.7).
-	q(`SELECT host_id, field, source, value, confidence FROM identifications
-		WHERE current = 1 AND source IN (`+probeSources+`, `+identifierSources+`)`, func(r *sql.Rows) error {
-		var hid, field, src, value string
-		var conf float64
-		if err := r.Scan(&hid, &field, &src, &value, &conf); err != nil {
-			return err
-		}
-		if h := byID[hid]; h != nil {
-			h.idents[identKey(field, src)], h.identConf[identKey(field, src)] = value, conf
-		}
-		return nil
-	})
 	q(`SELECT id, context_id, kind FROM scans WHERE finished_at IS NULL ORDER BY id`, func(r *sql.Rows) error {
 		var sc openScan
 		if err := r.Scan(&sc.id, &sc.ctx, &sc.kind); err != nil {
@@ -357,20 +326,12 @@ func (s *state) load(ctx context.Context, tx *sql.Tx) error {
 		s.openScans = append(s.openScans, sc)
 		return nil
 	})
-	q(`SELECT host_id, name_type, max(max(first_seen), max(coalesce(ended_at, 0))) FROM names GROUP BY host_id, name_type`, func(r *sql.Rows) error {
-		var hid, typ string
-		var t int64
-		if err := r.Scan(&hid, &typ, &t); err != nil {
-			return err
-		}
-		if h := byID[hid]; h != nil {
-			h.nameChange[observation.NameType(typ)] = fromMS(t)
-		}
-		return nil
-	})
-	if err == nil {
-		if err = s.loadDHCPServers(ctx, tx); err != nil {
-			err = fmt.Errorf("load state: %w", err)
+	for _, load := range []func(context.Context, *sql.Tx) error{s.loadDHCPServers, s.loadLeases, s.loadEndpoints,
+		func(ctx context.Context, tx *sql.Tx) error { return s.loadRecords(ctx, tx, byID) }} {
+		if err == nil {
+			if err = load(ctx, tx); err != nil {
+				err = fmt.Errorf("load state: %w", err)
+			}
 		}
 	}
 	for _, c := range []struct {
@@ -378,8 +339,9 @@ func (s *state) load(ctx context.Context, tx *sql.Tx) error {
 		dst   *int64
 	}{
 		{"network_contexts", &s.nextContextID}, {"context_prefixes", &s.nextPrefixID},
-		{"addresses", &s.nextAddressID}, {"observations", &s.nextObservationID}, {"services", &s.nextServiceID},
-		{"names", &s.nextNameID}, {"scans", &s.nextScanID},
+		{"addresses", &s.nextAddressID}, {"observations", &s.nextObservationID}, {"scans", &s.nextScanID},
+		{"endpoints", &s.nextEndpointID}, {"endpoint_results", &s.nextEndpointResultID}, {"name_records", &s.nextRecordID},
+		{"dhcp_exchanges", &s.nextExchangeID}, {"dhcp_leases", &s.nextLeaseID},
 	} {
 		q(`SELECT coalesce(max(id), 0) FROM `+c.table, func(r *sql.Rows) error { return r.Scan(c.dst) })
 	}

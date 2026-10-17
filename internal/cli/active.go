@@ -13,11 +13,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/idprobe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 func (a *app) activeCmd() *cobra.Command {
@@ -26,7 +25,7 @@ func (a *app) activeCmd() *cobra.Command {
 	disable := &cobra.Command{
 		Use:     "disable",
 		Short:   "Kill switch: stop all active probing now; persists across restarts",
-		Example: "  sudo lan-sentinel active disable --reason maintenance",
+		Example: "  sudo lan-tracker active disable --reason maintenance",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if a.g.offline {
@@ -39,7 +38,7 @@ func (a *app) activeCmd() *cobra.Command {
 			if a.g.output == "json" {
 				return writeJSON(a.output(), st)
 			}
-			fmt.Fprintln(a.output(), "Active discovery disabled (persists across restarts). Clear with: lan-sentinel active enable")
+			fmt.Fprintln(a.output(), "Active discovery disabled (persists across restarts). Clear with: lan-tracker active enable")
 			return nil
 		},
 	}
@@ -50,8 +49,8 @@ func (a *app) activeCmd() *cobra.Command {
 	enable := &cobra.Command{
 		Use:     "enable",
 		Short:   "Clear the kill switch",
-		Example: "  sudo lan-sentinel active enable",
-		Long: "Clears the kill switch. It fails (exit 2) while LAN_SENTINEL_ACTIVE_DISABLED=1\n" +
+		Example: "  sudo lan-tracker active enable",
+		Long: "Clears the kill switch. It fails (exit 2) while LAN_TRACKER_ACTIVE_DISABLED=1\n" +
 			"is set, and does not override per-interface active.enabled: false.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -80,7 +79,6 @@ type scanFlags struct {
 	profile    string
 	arp, icmp  bool
 	tcp        []int
-	udp        []string
 	allowWide  bool
 }
 
@@ -92,12 +90,11 @@ func (f *scanFlags) add(cmd *cobra.Command) {
 	fl.BoolVar(&f.arp, "arp", false, "ARP sweep of the networks (the default when no probe is given)")
 	fl.BoolVar(&f.icmp, "icmp", false, "ICMP echo to the known hosts")
 	fl.IntSliceVar(&f.tcp, "tcp", nil, "TCP connect to this port on the known hosts (repeatable)")
-	fl.StringSliceVar(&f.udp, "udp", nil, "UDP probe of the known hosts: "+strings.Join(config.UDPProbeNames, " or ")+" (repeatable)")
 	fl.BoolVar(&f.allowWide, "allow-wide", false, fmt.Sprintf("allow a sweep of more than %d addresses (check scan plan first)", config.DefaultMaxSweepTargets))
 }
 
 func (f *scanFlags) request() (probe.Request, error) {
-	req := probe.Request{Interfaces: f.interfaces, Profile: f.profile, ARP: f.arp, ICMP: f.icmp, TCP: f.tcp, UDP: f.udp, AllowWide: f.allowWide}
+	req := probe.Request{Interfaces: f.interfaces, Profile: f.profile, ARP: f.arp, ICMP: f.icmp, TCP: f.tcp, AllowWide: f.allowWide}
 	for _, n := range f.networks {
 		p, err := netip.ParsePrefix(n)
 		if err != nil {
@@ -114,7 +111,7 @@ func (a *app) scanCmd() *cobra.Command {
 	plan := &cobra.Command{
 		Use:     "plan",
 		Short:   "Dry run: what a scan would do, sending nothing",
-		Example: "  sudo lan-sentinel scan plan --interface eth0",
+		Example: "  sudo lan-tracker scan plan --interface eth0",
 		Long: "Prints targets, probes, rates, the estimate and the verdict. Exit 0 if the\n" +
 			"scan is allowed, 2 if refused. Online the daemon computes the plan; with\n" +
 			"--offline it comes from the config file, the persisted kill switch and the\n" +
@@ -147,10 +144,10 @@ func (a *app) scanCmd() *cobra.Command {
 	run := &cobra.Command{
 		Use:     "run",
 		Short:   "Operator-triggered scan, bound by the same safety controls",
-		Example: "  sudo lan-sentinel scan run --interface eth0 --arp",
+		Example: "  sudo lan-tracker scan run --interface eth0 --arp",
 		Long: "Computes the same plan as scan plan, prints it and refuses (exit 2) if the\n" +
 			"plan does. Otherwise the daemon runs it through its budgets: per interface\n" +
-			"the ARP sweep first, then ICMP, TCP and UDP on the known hosts and the ARP\n" +
+			"the ARP sweep first, then ICMP and TCP on the known hosts and the ARP\n" +
 			"responders. Returns with a summary when the scan completes.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -239,9 +236,7 @@ func (a *app) plan(ctx context.Context, req probe.Request) (probe.Plan, error) {
 			st.Reason = config.EnvActiveDisabled + "=1"
 		}
 	}
-	in := probe.PlanInput{Config: cfg, Active: st, Known: map[string][]netip.Addr{},
-		IdentifyJobs: map[string]int{}, IdentifyPackets: map[string]int{}}
-	since := a.env.now().Add(-cfg.Active.Identify.HostMaxAge.D())
+	in := probe.PlanInput{Config: cfg, Active: st, Known: map[string][]netip.Addr{}}
 	for _, ic := range cfg.Interfaces {
 		known, err := r.KnownIPv4(ctx, ic.Name)
 		if err != nil {
@@ -249,19 +244,6 @@ func (a *app) plan(ctx context.Context, req probe.Request) (probe.Plan, error) {
 		}
 		for _, k := range known {
 			in.Known[ic.Name] = append(in.Known[ic.Name], k.IP)
-		}
-		for _, e := range ic.Active.Identify {
-			cands, err := r.IdentifyTargets(ctx, ic.Name, e.Name, since)
-			if err != nil {
-				return probe.Plan{}, err
-			}
-			for _, c := range cands {
-				if c.Suppress != "" {
-					continue
-				}
-				in.IdentifyJobs[ic.Name]++
-				in.IdentifyPackets[ic.Name] += idprobe.BudgetCostOf(e.Name)
-			}
 		}
 	}
 	return probe.Compute(in, req), nil
@@ -292,10 +274,19 @@ func (a *app) printPlan(p probe.Plan) error {
 			}
 			targets = append(targets, t)
 		}
-		if p.Probes.ICMP || len(p.Probes.TCP) > 0 || len(p.Probes.UDP) > 0 {
+		if p.Probes.ICMP || len(p.Probes.TCP) > 0 {
 			targets = append(targets, fmt.Sprintf("%d known hosts", ip.KnownTargets))
 		}
 		fmt.Fprintf(w, "Targets:    %s\n", strings.Join(targets, ", "))
+		for i, nr := range ip.NoDirectRoute {
+			label := "            "
+			if i == 0 {
+				label = "No route:   "
+				fmt.Fprintf(w, "%sTCP checks need a direct route; these are not dialled (LOCAL_ERROR):\n", label)
+				label = "            "
+			}
+			fmt.Fprintf(w, "%s  %s\n", label, nr)
+		}
 		if len(p.Interfaces) > 1 {
 			fmt.Fprintf(w, "Estimate:   %s\n", estimateText(ip.Estimate))
 			fmt.Fprintf(w, "Duration:   %s\n", durationText(ip.Estimate))
@@ -304,7 +295,7 @@ func (a *app) printPlan(p probe.Plan) error {
 	fmt.Fprintf(w, "Probes:     %s\n", strings.ReplaceAll(scheduler.Kind(p.Probes), ",", "; "))
 	fmt.Fprintf(w, "Rates:      %s\n", ratesText(p))
 	fmt.Fprintf(w, "Estimate:   %s\n", estimateText(p.Estimate))
-	if p.Estimate.Packets > 0 {
+	if p.Estimate.Starts > 0 {
 		fmt.Fprintf(w, "Duration:   %s\n", durationText(p.Estimate))
 		for i, as := range p.Assumptions {
 			label := "            "
@@ -338,18 +329,15 @@ func ratesText(p probe.Plan) string {
 	var parts []string
 	rate := func(proto probe.Protocol) string { return trimFloat(r.Protocols[proto]) }
 	if p.Probes.ARP {
-		parts = append(parts, "arp "+rate(probe.ARP)+" pps")
+		parts = append(parts, "arp "+rate(probe.ARP)+" starts/s")
 	}
 	if p.Probes.ICMP {
-		parts = append(parts, "icmp "+rate(probe.ICMP)+" pps")
+		parts = append(parts, "icmp "+rate(probe.ICMP)+" starts/s")
 	}
 	if len(p.Probes.TCP) > 0 {
 		parts = append(parts, fmt.Sprintf("tcp %s connects/s (≤%d per interface, ≤%d per host)", rate(probe.TCP), r.TCPPerInterface, r.TCPPerHost))
 	}
-	if len(p.Probes.UDP) > 0 {
-		parts = append(parts, "udp "+rate(probe.UDP)+" pps")
-	}
-	return strings.Join(parts, ", ") + fmt.Sprintf("; global cap %s pps", trimFloat(r.GlobalPPS))
+	return strings.Join(parts, ", ") + fmt.Sprintf("; global cap %s probe starts/s", trimFloat(r.GlobalStarts))
 }
 
 func trimFloat(f float64) string {
@@ -365,15 +353,12 @@ func estimateText(e probe.Estimate) string {
 		parts = append(parts, fmt.Sprintf("%d ICMP echoes", e.ICMPEchoes))
 	}
 	if e.TCPConnects > 0 {
-		parts = append(parts, fmt.Sprintf("%d TCP connects (at most %d packets each)", e.TCPConnects, probe.TCPTokens))
-	}
-	if e.UDPProbes > 0 {
-		parts = append(parts, fmt.Sprintf("%d UDP probes", e.UDPProbes))
+		parts = append(parts, fmt.Sprintf("%d TCP connects", e.TCPConnects))
 	}
 	if len(parts) == 0 {
 		return "nothing to send"
 	}
-	return strings.Join(parts, ", ") + fmt.Sprintf(", at most ~%d packets", e.Packets)
+	return strings.Join(parts, ", ") + fmt.Sprintf(": %d probe starts (kernel TCP packets come on top)", e.Starts)
 }
 
 // durationText labels the two duration estimates (Plan.Assumptions say
@@ -421,9 +406,9 @@ func printScan(w io.Writer, res scheduler.ScanResult) {
 	}
 }
 
-// probeOrder sorts summary rows in scan order: arp, icmp, tcp, udp.
+// probeOrder sorts summary rows in scan order: arp, icmp, tcp.
 func probeOrder(k string) string {
-	for i, p := range []string{"arp", "icmp", "tcp", "udp"} {
+	for i, p := range []string{"arp", "icmp", "tcp"} {
 		if k == p || strings.HasPrefix(k, p+"/") {
 			return fmt.Sprintf("%d%s", i, k)
 		}

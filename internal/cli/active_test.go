@@ -13,15 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
-	"lan-sentinel/internal/store/storetest"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store/storetest"
 )
 
-const scanConfig = `version: 1
+const scanConfig = `version: 2
 interfaces:
   - name: eth1
     active: { enabled: true, networks: [192.168.110.0/24], exclude: [192.168.110.1] }
@@ -41,8 +41,6 @@ type control struct {
 	scanErr   error
 	reload    api.ReloadResult
 	described map[string]string
-	refuse    map[string]bool  // identify run: probes refused (api.ErrIdentifyRefused)
-	fail      map[string]error // identify run: probes that fail otherwise
 }
 
 // DescribeHost records the call; described maps host IDs to descriptions.
@@ -55,18 +53,6 @@ func (c *control) DescribeHost(_ context.Context, _, hostID, description string)
 	}
 	c.described[hostID] = description
 	return store.HostSummary{HostID: hostID, MAC: "00:1b:1b:aa:bb:01", Interface: "eth1", Description: description}, nil
-}
-
-func (c *control) IdentifyRun(_ context.Context, _, _, probe, _ string) (store.IdentifyAttempt, error) {
-	switch {
-	case c.err != nil:
-		return store.IdentifyAttempt{}, c.err
-	case c.refuse[probe]:
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: %s is not enabled on eth1", api.ErrIdentifyRefused, probe)
-	case c.fail[probe] != nil:
-		return store.IdentifyAttempt{}, c.fail[probe]
-	}
-	return store.IdentifyAttempt{Probe: probe, Result: "ok", Trigger: "operator"}, nil
 }
 
 func (c *control) ReloadConfig(context.Context, string) (api.ReloadResult, error) {
@@ -142,7 +128,7 @@ func TestActiveCommands(t *testing.T) {
 		{"disable needs a reason", []string{"active", "disable"}, nil, ExitUsage, "", `"reason" not set`},
 		{"enable", []string{"active", "enable"}, nil, 0, "Active discovery enabled.", ""},
 		{"enable json", []string{"-o", "json", "active", "enable", "--reason", "fixed"}, nil, 0, `"disabled": false`, ""},
-		{"enable while forced", []string{"active", "enable"}, api.ErrForced, ExitError, "", "LAN_SENTINEL_ACTIVE_DISABLED=1"},
+		{"enable while forced", []string{"active", "enable"}, api.ErrForced, ExitError, "", "LAN_TRACKER_ACTIVE_DISABLED=1"},
 		{"disable fails", []string{"active", "disable", "--reason", "x"}, errors.New("bus closed"), ExitError, "", "bus closed"},
 		{"offline disable", []string{"--offline", "active", "disable", "--reason", "x"}, nil, ExitUsage, "", "needs the running daemon"},
 		{"offline enable", []string{"--offline", "active", "enable"}, nil, ExitUsage, "", "needs the running daemon"},
@@ -161,12 +147,12 @@ func TestActiveCommands(t *testing.T) {
 func TestConfigReload(t *testing.T) {
 	f := serveControl(t)
 	changed := api.ReloadResult{
-		Path:       "/etc/lan-sentinel/config.yaml",
+		Path:       "/etc/lan-tracker/config.yaml",
 		Applied:    []config.Change{{Key: "interfaces[0].active.enabled", Old: "false", New: "true"}, {Key: "logging.level", Old: "info", New: "debug"}},
 		NotApplied: []config.Change{{Key: "interfaces[1].name", New: "eth2"}},
 	}
-	unchanged := api.ReloadResult{Path: "/etc/lan-sentinel/config.yaml", Applied: []config.Change{}, NotApplied: []config.Change{}}
-	rejected := fmt.Errorf("%w: %w", api.ErrConfigRejected, errors.New("invalid configuration /etc/lan-sentinel/config.yaml:\n  active.arp.interval: must be positive"))
+	unchanged := api.ReloadResult{Path: "/etc/lan-tracker/config.yaml", Applied: []config.Change{}, NotApplied: []config.Change{}}
+	rejected := fmt.Errorf("%w: %w", api.ErrConfigRejected, errors.New("invalid configuration /etc/lan-tracker/config.yaml:\n  active.arp.interval: must be positive"))
 	tests := []struct {
 		name    string
 		args    []string
@@ -177,15 +163,15 @@ func TestConfigReload(t *testing.T) {
 		errText string
 	}{
 		{"applied and not applied", []string{"config", "reload"}, changed, nil, 0, []string{
-			"Configuration /etc/lan-sentinel/config.yaml reloaded.\n\nApplied:\n",
+			"Configuration /etc/lan-tracker/config.yaml reloaded.\n\nApplied:\n",
 			"  interfaces[0].active.enabled  false  true\n",
 			"  logging.level                 info   debug\n",
-			"Not applied, needs a restart (sudo systemctl restart lan-sentinel):\n  KEY                 RUNNING  FILE\n  interfaces[1].name           eth2\n",
+			"Not applied, needs a restart (sudo systemctl restart lan-tracker):\n  KEY                 RUNNING  FILE\n  interfaces[1].name           eth2\n",
 		}, ""},
 		{"no changes", []string{"config", "reload"}, unchanged, nil, 0, []string{"reloaded.\nNo changes.\n"}, ""},
 		{"json", []string{"-o", "json", "config", "reload"}, unchanged, nil, 0, []string{`"applied": []`, `"not_applied": []`}, ""},
 		{"quiet", []string{"--quiet", "config", "reload"}, changed, nil, 0, nil, ""},
-		{"rejected", []string{"config", "reload"}, api.ReloadResult{}, rejected, ExitError, nil, "configuration rejected; the running configuration is unchanged: invalid configuration /etc/lan-sentinel/config.yaml:\n  active.arp.interval: must be positive"},
+		{"rejected", []string{"config", "reload"}, api.ReloadResult{}, rejected, ExitError, nil, "configuration rejected; the running configuration is unchanged: invalid configuration /etc/lan-tracker/config.yaml:\n  active.arp.interval: must be positive"},
 		{"offline", []string{"--offline", "config", "reload"}, api.ReloadResult{}, nil, ExitUsage, nil, "needs the running daemon"},
 		{"csv", []string{"-o", "csv", "config", "reload"}, api.ReloadResult{}, nil, ExitUsage, nil, "csv"},
 	}
@@ -225,10 +211,10 @@ func TestScanPlan(t *testing.T) {
 		"Interface:  eth1    Profile: modbus    Networks: 192.168.110.0/24\n",
 		"Targets:    253 to sweep (excluded: 192.168.110.1), 2 known hosts\n",
 		"Probes:     arp; tcp/502\n",
-		"Rates:      arp 10 pps, tcp 5 connects/s (≤4 per interface, ≤1 per host); global cap 20 pps\n",
-		"Estimate:   253 ARP requests, 2 TCP connects (at most 3 packets each), at most ~259 packets\n",
-		"Duration:   estimated typical ~27 s, estimated no-response ~28 s\n",
-		"Assumes:    probes leave paced at the rates above",
+		"Rates:      arp 5 starts/s, tcp 1 connects/s (≤2 per interface, ≤1 per host); global cap 5 probe starts/s\n",
+		"Estimate:   253 ARP requests, 2 TCP connects: 255 probe starts (kernel TCP packets come on top)\n",
+		"Duration:   estimated typical ~65 s, estimated no-response ~66 s\n",
+		"Assumes:    probes start paced at the rates above",
 		"            no-response: nothing answers, so every phase waits out its reply timeout once (ARP 1s, tcp/502 750ms)\n",
 		"Verdict:    ALLOWED\n",
 	} {
@@ -237,9 +223,9 @@ func TestScanPlan(t *testing.T) {
 		}
 	}
 
-	code, out, _ = f.run(t, "-o", "json", "scan", "plan", "--icmp", "--udp", "ntp", "--tcp", "80")
+	code, out, _ = f.run(t, "-o", "json", "scan", "plan", "--icmp", "--tcp", "80")
 	var p probe.Plan
-	if code != 0 || json.Unmarshal([]byte(out), &p) != nil || !p.Allowed || p.Estimate.ICMPEchoes != 2 || p.Estimate.UDPProbes != 2 {
+	if code != 0 || json.Unmarshal([]byte(out), &p) != nil || !p.Allowed || p.Estimate.ICMPEchoes != 2 || p.Estimate.TCPConnects != 2 || p.Estimate.Starts != 4 {
 		t.Errorf("json plan: exit %d %s", code, out)
 	}
 
@@ -283,7 +269,7 @@ func TestScanRun(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Verdict:    ALLOWED\n",
-		"Scanning (estimated typical duration ~27 s) ...\n",
+		"Scanning (estimated typical duration ~65 s) ...\n",
 		"eth1: done in 27 s; 3 hosts answered ARP\n",
 		"  arp      250 no_reply, 3 reply\n",
 		"  tcp/502  2 OPEN, 3 REFUSED\n",
@@ -320,7 +306,7 @@ func TestScanRun(t *testing.T) {
 	}
 
 	aborted := scheduler.ScanResult{Interfaces: []scheduler.InterfaceResult{{Interface: "eth1", Seconds: 3, Aborted: "active discovery is disabled by the kill switch",
-		Counts: map[string]map[string]int{"icmp": {"reply": 1}, "udp/ntp": {"no_reply": 1}, "zzz": {"x": 1}}}}}
+		Counts: map[string]map[string]int{"icmp": {"reply": 1}, "tcp/80": {"TIMEOUT": 1}, "zzz": {"x": 1}}}}}
 	f.ctl.scan, f.ctl.scanErr = &aborted, probe.ErrDisabled
 	if code, out, _ := f.run(t, "scan", "run"); code != ExitError || !strings.Contains(out, "eth1: aborted after 3 s: active discovery is disabled") {
 		t.Errorf("aborted run: exit %d\n%s", code, out)
@@ -345,7 +331,7 @@ func TestOfflineScanPlan(t *testing.T) {
 		t.Fatalf("offline plan: exit %d\n%s\n%s", code, out, stderr)
 	}
 	code, out, _ = runOffline([]string{config.EnvActiveDisabled + "=1"}, "scan", "plan")
-	if code != ExitError || !strings.Contains(out, "kill switch (LAN_SENTINEL_ACTIVE_DISABLED=1)") {
+	if code != ExitError || !strings.Contains(out, "kill switch (LAN_TRACKER_ACTIVE_DISABLED=1)") {
 		t.Errorf("offline plan with the environment switch: exit %d\n%s", code, out)
 	}
 	ctx := context.Background()
@@ -385,7 +371,7 @@ func TestPlanFormatting(t *testing.T) {
 	a := &app{env: Env{Stdout: &buf}}
 	_ = a.printPlan(probe.Plan{Probes: probe.Probes{ARP: true}, Rates: probe.Rates{Protocols: map[probe.Protocol]float64{probe.ARP: 10}},
 		Interfaces: []probe.InterfacePlan{
-			{Interface: "eth1", Networks: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/30")}, SweepTargets: 2, Estimate: probe.Estimate{ARPRequests: 2, Packets: 2, TypicalSeconds: 1.1, NoResponseSeconds: 1.1}},
+			{Interface: "eth1", Networks: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/30")}, SweepTargets: 2, Estimate: probe.Estimate{ARPRequests: 2, Starts: 2, TypicalSeconds: 1.1, NoResponseSeconds: 1.1}},
 			{Interface: "eth2", Reasons: []string{"interface is not configured"}},
 		}})
 	if strings.Count(buf.String(), "Estimate:") != 2 || strings.Contains(buf.String(), "eth2    Networks") {
@@ -402,7 +388,7 @@ func TestPlanFormatting(t *testing.T) {
 
 func TestWideSweepNeedsAcknowledgement(t *testing.T) {
 	_, db, _ := storetest.Seed(t, golden)
-	cfgPath := writeFile(t, `version: 1
+	cfgPath := writeFile(t, `version: 2
 interfaces:
   - name: eth1
     active: { enabled: true, networks: [10.0.0.0/14] }
@@ -417,14 +403,14 @@ logging: { format: text }
 	}
 	code, out, _ := run("scan", "plan")
 	if code != ExitError || !strings.Contains(out, "Targets:    262142 to sweep") || !strings.Contains(out, "repeat with --allow-wide") ||
-		!strings.Contains(out, "estimated typical ~7.4 h") {
+		!strings.Contains(out, "estimated typical ~18.2 h") {
 		t.Errorf("wide plan without --allow-wide: exit %d\n%s", code, out)
 	}
 	if code, out, _ := run("scan", "plan", "--allow-wide"); code != 0 || !strings.Contains(out, "ALLOWED") {
 		t.Errorf("wide plan with --allow-wide: exit %d\n%s", code, out)
 	}
 	code, out, stderr := run("config", "validate")
-	if code != 0 || !strings.Contains(out, "sweep 262142 addresses (~7.4 h)") || !strings.Contains(out, "Expert override: active.max_sweep_targets 262144") {
+	if code != 0 || !strings.Contains(out, "sweep 262142 addresses (~18.2 h)") || !strings.Contains(out, "Expert override: active.max_sweep_targets 262144") {
 		t.Errorf("config validate: exit %d\n%s%s", code, out, stderr)
 	}
 }

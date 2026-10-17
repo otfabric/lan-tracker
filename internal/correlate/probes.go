@@ -4,98 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
-
-// probeConfidence is the confidence of what a device says about itself in
-// a protocol-specific probe reply (EtherNet/IP ListIdentity).
-const probeConfidence = 0.9
 
 // causeOperator is the cause of kill-switch and scan events.
 const causeOperator = "operator"
-
-// probeSources lists the UDP and identification probe names as an SQL
-// list, for loading the identifications the probes made.
-var probeSources = func() string {
-	names := append(append([]string{}, config.UDPProbeNames...), config.IdentifyProbeNames...)
-	q := make([]string, len(names))
-	for i, n := range names {
-		q[i] = "'" + n + "'"
-	}
-	return strings.Join(q, ", ")
-}()
-
-func identKey(field, source string) string { return field + "\x00" + source }
-
-// probeDetails records what a protocol-specific probe learnt (§5.5): the
-// service details in services.detail_json and the device's identity
-// claims as identifications with the probe as source. A changed or new
-// claim emits VENDOR_IDENTIFIED; a device type also sets
-// hosts.device_type.
-func (c *Correlator) probeDetails(ctx context.Context, h *host, o observation.Observation, obsID int64, ev events.Evidence) {
-	src := o.Meta[observation.MetaProbe]
-	details := map[string]string{}
-	identity := map[string]string{}
-	for k, v := range o.Meta {
-		if strings.HasPrefix(k, observation.MetaIdentityConfPrefix) {
-			continue
-		}
-		if f, ok := strings.CutPrefix(k, observation.MetaIdentityPrefix); ok {
-			if f != "" && v != "" {
-				identity[f] = v
-			}
-			continue
-		}
-		details[k] = v
-	}
-	b, _ := json.Marshal(details)
-	c.exec(ctx, "service detail", `UPDATE services SET detail_json = ? WHERE host_id = ? AND proto = ? AND port = ?`,
-		string(b), h.id, o.Service.Proto, o.Service.Port)
-
-	fields := make([]string, 0, len(identity))
-	for f := range identity {
-		fields = append(fields, f)
-	}
-	sort.Strings(fields)
-	evidence := make(map[string]any, len(details))
-	for k, v := range details {
-		evidence[k] = v
-	}
-	for _, f := range fields {
-		v := identity[f]
-		conf := probeConfidence
-		if s, ok := o.Meta[observation.MetaIdentityConfPrefix+f]; ok {
-			if parsed, err := strconv.ParseFloat(s, 64); err == nil && parsed > 0 && parsed <= 1 {
-				conf = parsed
-			}
-		}
-		c.dbIdentification(ctx, h, f, v, conf, src, evidence, o.Time)
-		key := identKey(f, src)
-		old, known := h.idents[key]
-		if known && old == v {
-			continue
-		}
-		h.idents[key], h.identConf[key] = v, conf
-		c.dbCurrent(ctx, h, f, src, v)
-		if f == identify.FieldDeviceType {
-			c.updateDeviceType(ctx, h)
-		}
-		e := hostEvent(events.VendorIdentified, o.Time, h, string(o.Source), ev)
-		e.New, e.ObservationID = f+"="+v, obsID
-		if known {
-			e.Old = f + "=" + old
-		}
-		c.emit(ctx, e)
-	}
-}
 
 // operator records an operator action (§7, §8): the kill switch in
 // runtime_state, operator scans in scans, and their events.
@@ -127,13 +43,7 @@ func (c *Correlator) operator(ctx context.Context, op observation.Operator) {
 // again changes nothing. An unknown host is ignored: the API checks that it
 // exists before asking.
 func (c *Correlator) describe(ctx context.Context, op observation.Operator, ev events.Evidence) {
-	var h *host
-	for _, x := range c.st.order {
-		if x.id == op.HostID {
-			h = x
-			break
-		}
-	}
+	h := c.hostByID(op.HostID)
 	if h == nil || h.description == op.Description {
 		return
 	}
@@ -155,42 +65,6 @@ func switchText(what string, op observation.Operator) string {
 		s += ": " + op.Reason
 	}
 	return s
-}
-
-// recordIdentifyAttempt upserts the once-per-MAC latch (ADR 0011). An
-// operator retry also emits IDENTIFY_RAN with the caller.
-func (c *Correlator) recordIdentifyAttempt(ctx context.Context, h *host, o observation.Observation, obsID int64) {
-	name := o.Meta[observation.MetaProbe]
-	result := o.Meta[observation.MetaResult]
-	if name == "" || !identifyResult(result) {
-		return
-	}
-	trigger := o.Meta[observation.MetaTrigger]
-	if trigger != observation.TriggerOperator {
-		trigger = observation.TriggerScheduled
-	}
-	actor := o.Meta[observation.MetaActor]
-	c.exec(ctx, "identify attempt", `INSERT INTO identify_attempts (host_id, probe, result, attempted_at, trigger, actor)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (host_id, probe) DO UPDATE SET
-			result = excluded.result, attempted_at = excluded.attempted_at, trigger = excluded.trigger, actor = excluded.actor`,
-		h.id, name, result, ms(o.Time), trigger, actor)
-	if trigger != observation.TriggerOperator {
-		return
-	}
-	ev := events.EvidenceFrom(o)
-	ev.Actor, ev.Probe, ev.Result = actor, name, result
-	e := hostEvent(events.IdentifyRan, o.Time, h, causeOperator, ev)
-	e.New, e.ObservationID = name+" "+result, obsID
-	c.emit(ctx, e)
-}
-
-func identifyResult(s string) bool {
-	switch s {
-	case observation.ResultOK, observation.ResultTimeout, observation.ResultRefused, observation.ResultMalformed:
-		return true
-	}
-	return false
 }
 
 func (c *Correlator) scan(ctx context.Context, op observation.Operator, ev events.Evidence) {

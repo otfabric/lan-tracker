@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 func planInput() PlanInput {
@@ -31,7 +32,7 @@ func TestComputePlan(t *testing.T) {
 		check   func(t *testing.T, p Plan)
 	}{
 		{"default is an arp sweep of every active interface", nil, Request{}, true, nil, func(t *testing.T, p Plan) {
-			if !p.Probes.ARP || p.Probes.ICMP || len(p.Probes.TCP)+len(p.Probes.UDP) > 0 {
+			if !p.Probes.ARP || p.Probes.ICMP || len(p.Probes.TCP) > 0 {
 				t.Errorf("probes = %+v", p.Probes)
 			}
 			if len(p.Interfaces) != 1 || p.Interfaces[0].Interface != "eth1" {
@@ -46,22 +47,24 @@ func TestComputePlan(t *testing.T) {
 				t.Errorf("excluded = %v", ip.Excluded)
 			}
 			e := p.Estimate
-			if e.ARPRequests != 237 || e.Packets != 237 {
+			if e.ARPRequests != 237 || e.Starts != 237 {
 				t.Errorf("estimate = %+v", e)
 			}
-			// 236 gaps at 10 pps (paced 2% below) plus the last reply wait.
-			want := 236*0.1*paceMargin + 1
-			if math.Abs(e.TypicalSeconds-want) > 0.01 || e.NoResponseSeconds != e.TypicalSeconds {
+			// The 3 known hosts answer at once; the other 234 hold one of
+			// the 4 slots for their 1 s reply wait: 4 requests/s, below
+			// the 5 starts/s rate, and the last waits out its timeout.
+			want := 60.0
+			if math.Abs(e.TypicalSeconds-want) > 0.5 || math.Abs(e.NoResponseSeconds-237.0/4-1) > 0.5 {
 				t.Errorf("estimate %.3f s typical, %.3f s no-response, want %.3f", e.TypicalSeconds, e.NoResponseSeconds, want)
 			}
 			if len(p.Assumptions) != 3 || !strings.Contains(p.Assumptions[1], "the sweep waits its 1s reply timeout once") ||
-				!strings.Contains(p.Assumptions[2], "(ARP 1s)") || !strings.Contains(p.Assumptions[0], "at least 1s apart per target") {
+				!strings.Contains(p.Assumptions[2], "(ARP 1s)") || !strings.Contains(p.Assumptions[0], "at least 5s apart per target") {
 				t.Errorf("assumptions = %q", p.Assumptions)
 			}
 		}},
-		{"profile with explicit probes", nil, Request{Profile: "modbus", TCP: []int{80, 502}, UDP: []string{"ntp"}, ICMP: true}, true, nil,
+		{"profile with explicit probes", nil, Request{Profile: "modbus", TCP: []int{80, 502}, ICMP: true}, true, nil,
 			func(t *testing.T, p Plan) {
-				if !p.Probes.ARP || !p.Probes.ICMP || !slices.Equal(p.Probes.TCP, []int{80, 502}) || !slices.Equal(p.Probes.UDP, []string{"ntp"}) {
+				if !p.Probes.ARP || !p.Probes.ICMP || !slices.Equal(p.Probes.TCP, []int{80, 502}) {
 					t.Errorf("probes = %+v", p.Probes)
 				}
 				ip := p.Interfaces[0]
@@ -72,7 +75,7 @@ func TestComputePlan(t *testing.T) {
 					t.Errorf("tcp targets = %+v", ip.TCP)
 				}
 				e := p.Estimate
-				if e.ICMPEchoes != 3 || e.TCPConnects != 6 || e.UDPProbes != 3 || e.Packets != 237+3+18+3 {
+				if e.ICMPEchoes != 3 || e.TCPConnects != 6 || e.Starts != 237+3+6 {
 					t.Errorf("estimate = %+v", e)
 				}
 			}},
@@ -87,8 +90,8 @@ func TestComputePlan(t *testing.T) {
 			[]string{"kill switch (PLC fault)"}, nil},
 		{"kill switch without reason", func(in *PlanInput) { in.Active = store.ActiveState{Disabled: true} }, Request{}, false,
 			[]string{"disabled by the kill switch"}, nil},
-		{"unknown profile and probe", nil, Request{Profile: "nope", UDP: []string{"snmp"}, TCP: []int{0}}, false,
-			[]string{`unknown profile "nope"`, "TCP port 0", `unknown UDP probe "snmp"`}, nil},
+		{"unknown profile and probe", nil, Request{Profile: "nope", TCP: []int{0}}, false,
+			[]string{`unknown profile "nope"`, "TCP port 0"}, nil},
 		{"interface not configured", nil, Request{Interfaces: []string{"eth7"}}, false, []string{"eth7: interface is not configured"}, nil},
 		{"active disabled on interface", nil, Request{Interfaces: []string{"eth0"}}, false,
 			[]string{"eth0: active discovery is disabled on the interface"}, nil},
@@ -128,7 +131,7 @@ func TestComputePlan(t *testing.T) {
 			if tt.check != nil {
 				tt.check(t, p)
 			}
-			if p.Rates.GlobalPPS != 20 || p.Rates.Protocols[ARP] != 10 || p.Rates.TargetSpacingMS != 1000 {
+			if p.Rates.GlobalStarts != 5 || p.Rates.Protocols[ARP] != 5 || p.Rates.TargetSpacingMS != 5000 {
 				t.Errorf("rates = %+v", p.Rates)
 			}
 		})
@@ -137,7 +140,7 @@ func TestComputePlan(t *testing.T) {
 
 func TestEstimateTCPSpacing(t *testing.T) {
 	// Two ports on one known host: the second connect waits for the
-	// one-second target spacing; if nothing answers, each port also waits
+	// five-second target spacing; if nothing answers, each port also waits
 	// for its timeout.
 	in := planInput()
 	in.Known = map[string][]netip.Addr{"eth1": {ip("192.168.110.20")}}
@@ -145,14 +148,16 @@ func TestEstimateTCPSpacing(t *testing.T) {
 	if !p.Allowed {
 		t.Fatal(p.Reasons)
 	}
-	if want := 1.0; math.Abs(p.Estimate.TypicalSeconds-want) > 0.01 {
+	if want := 5.0; math.Abs(p.Estimate.TypicalSeconds-want) > 0.01 {
 		t.Errorf("typical %.3f s, want %.3f", p.Estimate.TypicalSeconds, want)
 	}
-	if want := 1.0 + 0.75 + DefaultTCPTimeout.Seconds(); math.Abs(p.Estimate.NoResponseSeconds-want) > 0.01 {
+	// The second port's phase starts once the first port's connect has
+	// timed out, then waits out the spacing behind it.
+	if want := 5.0 + DefaultTCPTimeout.Seconds(); math.Abs(p.Estimate.NoResponseSeconds-want) > 0.01 {
 		t.Errorf("no-response %.3f s, want %.3f", p.Estimate.NoResponseSeconds, want)
 	}
 	as := strings.Join(p.Assumptions, "\n")
-	if !strings.Contains(as, "typical: known hosts answer at once") || !strings.Contains(as, "tcp/502 750ms, tcp/503 1s") {
+	if !strings.Contains(as, "typical: known hosts answer at once") || !strings.Contains(as, "tcp/502 750ms, tcp/503 750ms") {
 		t.Errorf("assumptions = %q", p.Assumptions)
 	}
 }
@@ -166,9 +171,9 @@ func TestWideSweeps(t *testing.T) {
 		in.Config.Interfaces[0].Active.Exclude = nil
 		return in
 	}
-	// Beyond the default 65,536 the plan is a preview until acknowledged.
+	// Beyond the default 1,024 the plan is a preview until acknowledged.
 	p := Compute(wide(1<<20), Request{})
-	if p.Allowed || !strings.Contains(strings.Join(p.Reasons, ";"), "more than 65536: review this plan, then repeat with --allow-wide") {
+	if p.Allowed || !strings.Contains(strings.Join(p.Reasons, ";"), "more than 1024: review this plan, then repeat with --allow-wide") {
 		t.Errorf("unacknowledged wide sweep: %v", p.Reasons)
 	}
 	if got := p.Interfaces[0].SweepTargets; got != 1<<18-2 {
@@ -179,8 +184,8 @@ func TestWideSweeps(t *testing.T) {
 		t.Fatalf("acknowledged wide sweep refused: %v", p.Reasons)
 	}
 	// The long sweep is extrapolated from its simulated start: about
-	// 262,142 requests at 10 pps paced 2% below.
-	want := float64(1<<18-3)*0.1*paceMargin + 1
+	// 262,142 requests, 4 at a time for their 1 s reply wait (over 18 h).
+	want := float64(1<<18-3) / 4
 	if got := p.Estimate.TypicalSeconds; math.Abs(got-want) > want*0.01 {
 		t.Errorf("typical %.0f s, want about %.0f", got, want)
 	}
@@ -191,5 +196,28 @@ func TestWideSweeps(t *testing.T) {
 	p = Compute(wide(1<<17), Request{AllowWide: true})
 	if p.Allowed || !strings.Contains(strings.Join(p.Reasons, ";"), "more than active.max_sweep_targets (131072)") {
 		t.Errorf("sweep over the limit: %v", p.Reasons)
+	}
+}
+
+// With the kernel's routes, scan plan lists the known hosts a TCP check
+// cannot reach directly and leaves them out of the estimate, as the run
+// leaves them undialled.
+func TestPlanNoDirectRoute(t *testing.T) {
+	in := planInput()
+	gw := ip("192.168.110.20")
+	in.Route = func(iface string, dst netip.Addr) (platform.Route, error) {
+		if dst == gw {
+			return platform.Route{Iface: iface, Gateway: ip("192.168.110.1"), Src: ip("192.168.110.10")}, nil
+		}
+		return platform.Route{Iface: iface, Src: ip("192.168.110.10")}, nil
+	}
+	p := Compute(in, Request{TCP: []int{502}})
+	if !p.Allowed {
+		t.Fatal(p.Reasons)
+	}
+	ipl := p.Interfaces[0]
+	if len(ipl.NoDirectRoute) != 1 || ipl.NoDirectRoute[0] != "192.168.110.20: routed via gateway 192.168.110.1" ||
+		p.Estimate.TCPConnects != ipl.KnownTargets-1 {
+		t.Errorf("no direct route %v, %d connects for %d known", ipl.NoDirectRoute, p.Estimate.TCPConnects, ipl.KnownTargets)
 	}
 }

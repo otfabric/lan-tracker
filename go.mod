@@ -1,4 +1,4 @@
-module lan-sentinel
+module github.com/otfabric/lan-tracker
 
 go 1.26.0
 

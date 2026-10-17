@@ -4,40 +4,29 @@ import (
 	"errors"
 	"net/netip"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
-// Limits on what one mDNS packet contributes.
-const (
-	maxRecords  = 64 // resource records read per message
-	maxServices = 16 // service types kept per packet
-)
+// maxRecords bounds the resource records read from one DNS or mDNS
+// message.
+const maxRecords = 64
 
-// mdnsInfo is what one mDNS response says about its sender.
-type mdnsInfo struct {
-	addrs    []mdnsAddr        // A and AAAA records in packet order
-	services map[string]string // service type → port ("" if no SRV)
-	targets  []string          // SRV target hosts
-	txt      []string
-}
+// cacheFlush is the top bit of an mDNS record's class (RFC 6762 §10.2).
+const cacheFlush = 0x8000
 
-type mdnsAddr struct {
-	name string
-	ip   netip.Addr
-}
-
-// mdns decodes an mDNS response (FR-PA-4): A and AAAA records name the
-// sender's addresses; PTR, SRV and TXT records describe its services. An
-// mDNS responder answers for itself, so every address record is evidence
-// for the frame's source MAC. One hostname per packet is kept, the one
-// whose address is the packet's source (else the first), so an alias does
-// not flip the host's mDNS name back and forth.
+// mdns decodes an mDNS response (FR-PA-4) into name records: A and AAAA
+// (a name and the address it advertises), PTR (a service type and an
+// instance), SRV (an instance's target and port) and TXT (bounded text),
+// each with its TTL and cache-flush bit. The sender is the frame's source
+// MAC and address. The records are what the sender advertises: a proxy,
+// a reflector or a host answering for others advertises addresses that
+// are not its own, so the records never bind an address to the sender
+// (docs/DATA_MODEL.md §5.4). Records read before a malformed one are kept.
 func (f *frame) mdns(src netip.Addr, b []byte) {
 	var p dnsmessage.Parser
 	h, err := p.Start(b)
@@ -47,10 +36,8 @@ func (f *frame) mdns(src netip.Addr, b []byte) {
 	if err := p.SkipAllQuestions(); err != nil {
 		return
 	}
-	info := mdnsInfo{services: map[string]string{}}
+	var records []observation.Record
 	n := 0
-	// next reads a section's record headers, skip skips a record of a type
-	// the decoder does not read.
 	visit := func(next func() (dnsmessage.ResourceHeader, error), skip func() error) bool {
 		for n < maxRecords {
 			rh, err := next()
@@ -58,158 +45,100 @@ func (f *frame) mdns(src netip.Addr, b []byte) {
 				return errors.Is(err, dnsmessage.ErrSectionDone)
 			}
 			n++
-			if !info.record(&p, rh, skip) {
+			r, ok, err := readRecord(&p, rh, skip, true)
+			if err != nil {
 				return false
+			}
+			if ok {
+				records = append(records, r)
 			}
 		}
 		return true
 	}
-	// Records read before a malformed one are kept.
 	if visit(p.AnswerHeader, p.SkipAnswer) && n < maxRecords && p.SkipAllAuthorities() == nil {
 		visit(p.AdditionalHeader, p.SkipAdditional)
 	}
-	f.mdnsObservations(src, info)
+	if len(records) == 0 {
+		return
+	}
+	f.add(observation.Observation{Source: observation.PassiveMDNS, MAC: f.src, IP: src, Records: records})
 }
 
-// record reads one resource record into info, skipping unknown types with
-// skip; false stops parsing.
-func (info *mdnsInfo) record(p *dnsmessage.Parser, rh dnsmessage.ResourceHeader, skip func() error) bool {
-	owner := rh.Name.String()
+// readRecord reads one resource record. ok is false for a type it does
+// not keep (skipped with skip) or one without a usable name; err stops
+// parsing. With mdns, the class's top bit is the cache-flush bit.
+func readRecord(p *dnsmessage.Parser, rh dnsmessage.ResourceHeader, skip func() error, mdns bool) (observation.Record, bool, error) {
+	r := observation.Record{Name: hostname(rh.Name.String()), TTL: observation.TTLOf(rh.TTL)}
+	if mdns {
+		r.Flush = uint16(rh.Class)&cacheFlush != 0
+	}
 	switch rh.Type {
 	case dnsmessage.TypeA:
-		r, err := p.AResource()
+		a, err := p.AResource()
 		if err != nil {
-			return false
+			return r, false, err
 		}
-		info.addrs = append(info.addrs, mdnsAddr{hostname(owner), netip.AddrFrom4(r.A)})
+		r.Type, r.Addr = observation.RecordA, netip.AddrFrom4(a.A)
 	case dnsmessage.TypeAAAA:
-		r, err := p.AAAAResource()
+		a, err := p.AAAAResource()
 		if err != nil {
-			return false
+			return r, false, err
 		}
-		info.addrs = append(info.addrs, mdnsAddr{hostname(owner), netip.AddrFrom16(r.AAAA)})
+		r.Type, r.Addr = observation.RecordAAAA, netip.AddrFrom16(a.AAAA)
 	case dnsmessage.TypePTR:
-		r, err := p.PTRResource()
+		ptr, err := p.PTRResource()
 		if err != nil {
-			return false
+			return r, false, err
 		}
-		info.service(serviceType(r.PTR.String()), "")
+		target := hostname(ptr.PTR.String())
+		if ip, ok := reverseAddr(rh.Name.String()); ok {
+			// A reverse lookup: the name an address has.
+			r.Type, r.Name, r.Addr = observation.RecordPTR, target, ip
+		} else {
+			// Service enumeration: a type and one of its instances.
+			r.Type, r.Value = observation.RecordPTR, target
+		}
 	case dnsmessage.TypeSRV:
-		r, err := p.SRVResource()
+		srv, err := p.SRVResource()
 		if err != nil {
-			return false
+			return r, false, err
 		}
-		info.service(serviceType(owner), strconv.Itoa(int(r.Port)))
-		if t := hostname(r.Target.String()); t != "" && !slices.Contains(info.targets, t) {
-			info.targets = append(info.targets, t)
-		}
+		r.Type, r.Value = observation.RecordSRV, hostname(srv.Target.String())+":"+strconv.Itoa(int(srv.Port))
 	case dnsmessage.TypeTXT:
-		r, err := p.TXTResource()
+		txt, err := p.TXTResource()
 		if err != nil {
-			return false
+			return r, false, err
 		}
-		for _, s := range r.TXT {
+		var parts []string
+		for _, s := range txt.TXT {
 			if t := text([]byte(s), maxText); t != "" {
-				info.txt = append(info.txt, t)
+				parts = append(parts, t)
 			}
 		}
+		r.Type, r.Value = observation.RecordTXT, text([]byte(strings.Join(parts, ";")), maxText)
+	case dnsmessage.TypeCNAME:
+		c, err := p.CNAMEResource()
+		if err != nil {
+			return r, false, err
+		}
+		r.Type, r.Value = observation.RecordCNAME, hostname(c.CNAME.String())
 	default:
-		if err := skip(); err != nil {
-			return false
-		}
+		return r, false, skip()
 	}
-	return true
+	if r.Name == "" || r.Type == observation.RecordPTR && !r.Addr.IsValid() && r.Value == "" {
+		return r, false, nil
+	}
+	if r.Addr.IsValid() && !usableIP(r.Addr) {
+		return r, false, nil
+	}
+	return r, true, nil
 }
 
-func (info *mdnsInfo) service(svc, port string) {
-	if svc == "" {
-		return
-	}
-	if _, ok := info.services[svc]; !ok && len(info.services) >= maxServices {
-		return
-	}
-	if port != "" || info.services[svc] == "" {
-		info.services[svc] = port
-	}
-}
-
-// serviceType extracts "_http._tcp" from "Instance._http._tcp.local.",
-// "_http._tcp.local." or "_printer._sub._http._tcp.local.".
-func serviceType(name string) string {
-	labels := strings.Split(strings.TrimSuffix(name, "."), ".")
-	for i := len(labels) - 1; i > 0; i-- {
-		if (labels[i] == "_tcp" || labels[i] == "_udp") && strings.HasPrefix(labels[i-1], "_") && len(labels[i-1]) > 1 {
-			return text([]byte(labels[i-1]+"."+labels[i]), 64)
-		}
-	}
-	return ""
-}
-
-func (f *frame) mdnsObservations(src netip.Addr, info mdnsInfo) {
-	meta := info.meta()
-	name := ""
-	for _, a := range info.addrs {
-		if a.ip == src {
-			name = a.name
-			break
-		}
-	}
-	if name == "" && len(info.addrs) > 0 {
-		name = info.addrs[0].name
-	}
-	emitted := 0
-	for _, a := range info.addrs {
-		o := observation.Observation{Source: observation.PassiveMDNS, MAC: f.src, IP: a.ip, Meta: meta}
-		if a.name == name {
-			o.Hostname, o.NameType = name, observation.NameMDNS
-		}
-		before := len(f.out)
-		f.add(o)
-		emitted += len(f.out) - before
-	}
-	if emitted == 0 && (len(info.services) > 0 || name != "") {
-		// Services without usable addresses: the sender is still evidence.
-		o := observation.Observation{Source: observation.PassiveMDNS, MAC: f.src, IP: src, Meta: meta}
-		if name == "" && len(info.targets) == 1 {
-			name = info.targets[0]
-		}
-		o.Hostname, o.NameType = name, observation.NameMDNS
-		f.add(o)
-	}
-}
-
-// meta summarises services: "services" lists the service types,
-// "service_ports" the SRV ports and "txt" the TXT strings.
-func (info mdnsInfo) meta() map[string]string {
-	if len(info.services) == 0 && len(info.txt) == 0 {
-		return nil
-	}
-	m := map[string]string{}
-	var svcs, ports []string
-	for s, port := range info.services {
-		svcs = append(svcs, s)
-		if port != "" {
-			ports = append(ports, s+"="+port)
-		}
-	}
-	sort.Strings(svcs)
-	sort.Strings(ports)
-	if len(svcs) > 0 {
-		m["services"] = strings.Join(svcs, ",")
-	}
-	if len(ports) > 0 {
-		m["service_ports"] = strings.Join(ports, ",")
-	}
-	if len(info.txt) > 0 {
-		m["txt"] = text([]byte(strings.Join(info.txt, ";")), maxText)
-	}
-	return m
-}
-
-// dns decodes a unicast DNS response. Only PTR answers to reverse lookups
-// become observations (name type dns_ptr): they say which name an address
-// has, without MAC evidence, so the correlator attaches them to the host
-// holding that address (docs/DATA_MODEL.md §5.1).
+// dns decodes a unicast DNS response's answers: reverse PTR, A, AAAA and
+// CNAME records (name types dns_ptr and dns). They describe names and
+// addresses, never which MAC holds an address: the frame comes from a
+// resolver, so the observation carries no MAC (docs/DATA_MODEL.md §5.4).
+// Negative answers and failures say nothing and are skipped.
 func (f *frame) dns(b []byte) {
 	var p dnsmessage.Parser
 	h, err := p.Start(b)
@@ -219,29 +148,33 @@ func (f *frame) dns(b []byte) {
 	if err := p.SkipAllQuestions(); err != nil {
 		return
 	}
-	seen := map[netip.Addr]bool{}
+	var records []observation.Record
+answers:
 	for range maxRecords {
 		rh, err := p.AnswerHeader()
 		if err != nil {
-			return
+			break
 		}
-		if rh.Type != dnsmessage.TypePTR {
-			if err := p.SkipAnswer(); err != nil {
-				return
+		switch rh.Type {
+		case dnsmessage.TypePTR, dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.TypeCNAME:
+		default:
+			if p.SkipAnswer() != nil {
+				break answers
 			}
 			continue
 		}
-		r, err := p.PTRResource()
+		r, ok, err := readRecord(&p, rh, p.SkipAnswer, false)
 		if err != nil {
-			return
+			break
 		}
-		ip, ok := reverseAddr(rh.Name.String())
-		name := hostname(r.PTR.String())
-		if !ok || name == "" || seen[ip] {
-			continue
+		if ok && (r.Type != observation.RecordPTR || r.Addr.IsValid()) && !slices.ContainsFunc(records, func(x observation.Record) bool {
+			return x.Type == r.Type && x.Name == r.Name && x.Addr == r.Addr && x.Value == r.Value
+		}) {
+			records = append(records, r)
 		}
-		seen[ip] = true
-		f.add(observation.Observation{Source: observation.PassiveDNS, IP: ip, Hostname: name, NameType: observation.NameDNSPTR})
+	}
+	if len(records) > 0 {
+		f.add(observation.Observation{Source: observation.PassiveDNS, Records: records})
 	}
 }
 
@@ -275,4 +208,78 @@ func reverseAddr(name string) (netip.Addr, bool) {
 		return netip.AddrFrom16(b), true
 	}
 	return netip.Addr{}, false
+}
+
+// Response is a parsed DNS or mDNS response to one of LAN Tracker's own
+// queries (FR-AC-12).
+type Response struct {
+	ID      uint16
+	RCode   dnsmessage.RCode
+	Records []observation.Record
+	// NegativeTTL is the SOA minimum of a negative answer (RFC 2308), 0
+	// without one.
+	NegativeTTL uint32
+}
+
+// ParseResponse reads a response's answer and additional records (at most
+// maxRecords, bounded like captured ones) and, for a negative answer, the
+// SOA minimum of its authority section.
+func ParseResponse(b []byte, mdns bool) (Response, error) {
+	var p dnsmessage.Parser
+	h, err := p.Start(b)
+	if err != nil {
+		return Response{}, err
+	}
+	if !h.Response {
+		return Response{}, errors.New("not a response")
+	}
+	res := Response{ID: h.ID, RCode: h.RCode}
+	if err := p.SkipAllQuestions(); err != nil {
+		return res, err
+	}
+	n := 0
+	read := func(next func() (dnsmessage.ResourceHeader, error), skip func() error) error {
+		for n < maxRecords {
+			rh, err := next()
+			if errors.Is(err, dnsmessage.ErrSectionDone) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			n++
+			r, ok, err := readRecord(&p, rh, skip, mdns)
+			if err != nil {
+				return err
+			}
+			if ok {
+				res.Records = append(res.Records, r)
+			}
+		}
+		return nil
+	}
+	if err := read(p.AnswerHeader, p.SkipAnswer); err != nil {
+		return res, err
+	}
+	for {
+		rh, err := p.AuthorityHeader()
+		if err != nil {
+			break
+		}
+		if rh.Type != dnsmessage.TypeSOA {
+			if p.SkipAuthority() != nil {
+				break
+			}
+			continue
+		}
+		soa, err := p.SOAResource()
+		if err != nil {
+			break
+		}
+		res.NegativeTTL = min(soa.MinTTL, rh.TTL)
+	}
+	if err := p.SkipAllAuthorities(); err == nil {
+		_ = read(p.AdditionalHeader, p.SkipAdditional) // additional records are a bonus
+	}
+	return res, nil
 }

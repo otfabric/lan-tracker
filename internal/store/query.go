@@ -50,16 +50,18 @@ func (w *where) sql() string {
 }
 
 const summaryColumns = `h.host_id, c.interface, h.mac, coalesce(h.vendor, ''), h.locally_administered, h.presence,
-	coalesce(h.preferred_name, ''), coalesce(h.manufacturer, ''), coalesce(h.device_type, ''), coalesce(h.description, ''),
-	h.first_seen, h.last_seen`
+	coalesce(h.preferred_name, ''), h.proxy_arp, coalesce(h.description, ''), h.first_seen, h.last_seen,
+	h.last_frame_seen, h.last_address_confirmed, h.last_endpoint_answer`
 
 func scanSummary(rows interface{ Scan(...any) error }) (HostSummary, error) {
 	var h HostSummary
 	var la int
 	var first, last int64
-	err := rows.Scan(&h.HostID, &h.Interface, &h.MAC, &h.Vendor, &la, &h.Presence, &h.PreferredName, &h.Manufacturer,
-		&h.DeviceType, &h.Description, &first, &last)
+	var frame, addr, answer sql.NullInt64
+	err := rows.Scan(&h.HostID, &h.Interface, &h.MAC, &h.Vendor, &la, &h.Presence, &h.PreferredName, &h.ProxyARP,
+		&h.Description, &first, &last, &frame, &addr, &answer)
 	h.LocallyAdministered, h.FirstSeen, h.LastSeen, h.IPs = la == 1, timeOf(first), timeOf(last), []string{}
+	h.LastFrameSeen, h.LastAddressConfirmed, h.LastEndpointAnswer = timePtr(frame), timePtr(addr), timePtr(answer)
 	return h, err
 }
 
@@ -127,7 +129,7 @@ func matchCondition(w *where, kind QueryKind, q string) {
 		w.add(`EXISTS (SELECT 1 FROM addresses a WHERE a.host_id = h.host_id AND a.ip = ?)`, q)
 	case KindName:
 		// preferred_name is always one of the host's names.
-		w.add(`h.host_id IN (SELECT n.host_id FROM names n WHERE n.name = ? COLLATE NOCASE)`, q)
+		w.add(`h.host_id IN (SELECT n.host_id FROM name_records n WHERE n.name = ? COLLATE NOCASE)`, q)
 	}
 }
 
@@ -151,17 +153,13 @@ func hostWhere(f HostFilter) (where, error) {
 		w.add(`h.presence IN ('STALE', 'MISSING')`)
 	}
 	if f.Vendor != "" {
-		w.add(`(instr(lower(coalesce(h.vendor, '')), lower(?)) > 0 OR instr(lower(coalesce(h.manufacturer, '')), lower(?)) > 0)`,
-			f.Vendor, f.Vendor)
-	}
-	if f.Device != "" {
-		w.add(`instr(lower(coalesce(h.device_type, '')), lower(?)) > 0`, f.Device)
+		w.add(`instr(lower(coalesce(h.vendor, '')), lower(?)) > 0`, f.Vendor)
 	}
 	if f.Description != "" {
 		w.add(`instr(lower(coalesce(h.description, '')), lower(?)) > 0`, f.Description)
 	}
 	if f.Port > 0 {
-		w.add(`EXISTS (SELECT 1 FROM services s WHERE s.host_id = h.host_id AND s.port = ? AND s.state = 'OPEN')`, f.Port)
+		w.add(`EXISTS (SELECT 1 FROM endpoints e WHERE e.host_id = h.host_id AND e.port = ? AND e.last_definite_result = 'OPEN')`, f.Port)
 	}
 	if !f.SeenSince.IsZero() {
 		w.add(`h.last_seen >= ?`, msOf(f.SeenSince))
@@ -218,7 +216,7 @@ func hostsTx(ctx context.Context, tx *sql.Tx, w where) ([]HostSummary, error) {
 }
 
 // Host returns the full record of one host: every address and name binding
-// (closed ones too), services and identifications.
+// (closed ones too), services and legacy identifications.
 func (r *Reader) Host(ctx context.Context, id string) (Host, error) {
 	var h Host
 	err := r.read(ctx, func(tx *sql.Tx) error {
@@ -228,6 +226,9 @@ func (r *Reader) Host(ctx context.Context, id string) (Host, error) {
 	})
 	return h, err
 }
+
+// hostLeaseLimit bounds the lease rows a host record carries.
+const hostLeaseLimit = 50
 
 // hostRecord loads a host. With all, every binding; else the bindings in
 // effect at at (or open now when at is nil).
@@ -241,7 +242,7 @@ func (r *Reader) hostRecord(ctx context.Context, tx *sql.Tx, id string, at *time
 	if err != nil {
 		return Host{}, err
 	}
-	h := Host{HostSummary: s, Addresses: []Binding{}, Names: []Name{}, Services: []Service{}, Identifications: []Identification{}}
+	h := Host{HostSummary: s, Addresses: []Binding{}, Names: []Name{}, Endpoints: []Endpoint{}, DHCPLeases: []DHCPLease{}}
 	ips, err := openIPs(ctx, tx, []string{id})
 	if err != nil {
 		return Host{}, err
@@ -260,13 +261,28 @@ func (r *Reader) hostRecord(ctx context.Context, tx *sql.Tx, id string, at *time
 	if h.Addresses, err = bindings(ctx, tx, `host_id = ? AND `+inEffect, args...); err != nil {
 		return Host{}, err
 	}
-	if h.Names, err = r.names(ctx, tx, `host_id = ? AND `+inEffect, args...); err != nil {
+	if h.Names, err = r.names(ctx, tx, `n.host_id = ? AND `+inEffect, args...); err != nil {
 		return Host{}, err
 	}
-	if h.Services, err = services(ctx, tx, id); err != nil {
+	if h.Endpoints, err = r.endpoints(ctx, tx, `e.host_id = ?`, id); err != nil {
 		return Host{}, err
 	}
-	if h.Identifications, err = identifications(ctx, tx, id); err != nil {
+	leaseCond, leaseArgs := ` AND l.ended_at IS NULL`, []any{id, h.MAC}
+	switch {
+	case all:
+		leaseCond = ``
+	case at != nil:
+		leaseCond = ` AND l.first_ack <= ? AND (l.ended_at IS NULL OR l.ended_at > ?)`
+		leaseArgs = append(leaseArgs, msOf(*at), msOf(*at))
+	}
+	if h.DHCPLeases, err = leases(ctx, tx, ` WHERE l.context_id = (SELECT context_id FROM hosts WHERE host_id = ?) AND l.chaddr = ?`+leaseCond,
+		hostLeaseLimit, leaseArgs...); err != nil {
+		return Host{}, err
+	}
+	if h.LegacyServices, err = services(ctx, tx, id); err != nil {
+		return Host{}, err
+	}
+	if h.LegacyIdentifications, err = identifications(ctx, tx, id); err != nil {
 		return Host{}, err
 	}
 	return h, nil
@@ -324,9 +340,12 @@ func bindings(ctx context.Context, tx *sql.Tx, cond string, args ...any) ([]Bind
 	return out, nil
 }
 
+// names loads name records (n) matching cond, oldest first.
 func (r *Reader) names(ctx context.Context, tx *sql.Tx, cond string, args ...any) ([]Name, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT name, name_type, source, first_seen, last_seen, ended_at FROM names WHERE `+cond+
-		` ORDER BY first_seen, id`, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT n.name, n.name_type, n.record_type, coalesce(n.address, ''), coalesce(n.value, ''), n.source,
+		coalesce(n.advertiser_mac, ''), coalesce(n.advertiser_ip, ''), n.link, coalesce(n.host_id, ''), n.ttl_seconds, n.first_seen,
+		n.last_seen, n.expires_at, n.ended_at, coalesce(n.end_reason, ''), n.legacy FROM name_records n WHERE `+cond+
+		` ORDER BY n.first_seen, n.id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -336,26 +355,76 @@ func (r *Reader) names(ctx context.Context, tx *sql.Tx, cond string, args ...any
 	for rows.Next() {
 		var n Name
 		var first, last int64
-		var ended sql.NullInt64
-		if err := rows.Scan(&n.Name, &n.Type, &n.Source, &first, &last, &ended); err != nil {
+		var ttl, expires, ended sql.NullInt64
+		if err := rows.Scan(&n.Name, &n.Type, &n.RecordType, &n.Address, &n.Value, &n.Source, &n.AdvertiserMAC, &n.AdvertiserIP,
+			&n.Link, &n.HostID, &ttl, &first, &last, &expires, &ended, &n.EndReason, &n.Legacy); err != nil {
 			return nil, err
 		}
-		n.FirstSeen, n.LastSeen, n.EndedAt = timeOf(first), timeOf(last), timePtr(ended)
-		expiry := r.nameExpiryD()
-		n.Stale = n.EndedAt == nil && expiry > 0 && now.Sub(n.LastSeen) >= expiry
+		n.FirstSeen, n.LastSeen, n.ExpiresAt, n.EndedAt = timeOf(first), timeOf(last), timePtr(expires), timePtr(ended)
+		if ttl.Valid {
+			n.TTL = &ttl.Int64
+		}
+		n.Freshness = r.freshness(n, now)
 		out = append(out, n)
 	}
 	return out, rows.Err()
 }
 
+// freshness says, when read, whether a name record still stands.
+func (r *Reader) freshness(n Name, now time.Time) string {
+	switch {
+	case n.EndedAt != nil:
+		return "ended"
+	case n.ExpiresAt != nil && !now.Before(*n.ExpiresAt):
+		return "expired"
+	case n.ExpiresAt == nil && r.nameExpiryD() > 0 && now.Sub(n.LastSeen) >= r.nameExpiryD():
+		return "stale"
+	}
+	return "fresh"
+}
+
+// endpoints loads TCP endpoints (e) matching cond.
+func (r *Reader) endpoints(ctx context.Context, tx *sql.Tx, cond string, args ...any) ([]Endpoint, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT c.interface, e.ip, e.proto, e.port, coalesce(e.host_id, ''), coalesce(h.mac, ''), e.last_result,
+		e.last_result_at, coalesce(e.last_detail, ''), e.last_open_at, coalesce(e.last_definite_result, ''), e.last_definite_at, e.first_seen
+		FROM endpoints e JOIN network_contexts c ON c.id = e.context_id LEFT JOIN hosts h ON h.host_id = e.host_id
+		WHERE `+cond+` ORDER BY c.interface, e.port, e.ip`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Endpoint{}
+	for rows.Next() {
+		var e Endpoint
+		var at, first int64
+		var open, definite sql.NullInt64
+		if err := rows.Scan(&e.Interface, &e.IP, &e.Proto, &e.Port, &e.HostID, &e.MAC, &e.LastResult, &at, &e.LastDetail, &open,
+			&e.LastDefiniteResult, &definite, &first); err != nil {
+			return nil, err
+		}
+		e.LastResultAt, e.LastOpenAt, e.LastDefiniteAt, e.FirstSeen = timeOf(at), timePtr(open), timePtr(definite), timeOf(first)
+		out = append(out, e)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Interface != b.Interface || a.Port != b.Port {
+			return a.Interface < b.Interface || a.Interface == b.Interface && a.Port < b.Port
+		}
+		x, errX := netip.ParseAddr(a.IP)
+		y, errY := netip.ParseAddr(b.IP)
+		return errX == nil && errY == nil && x.Less(y)
+	})
+	return out, rows.Err()
+}
+
 func services(ctx context.Context, tx *sql.Tx, hostID string) ([]Service, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT proto, port, state, first_seen, last_seen, last_result_at, detail_json FROM services
+	rows, err := tx.QueryContext(ctx, `SELECT proto, port, state, first_seen, last_seen, last_result_at FROM services
 		WHERE host_id = ? ORDER BY proto, port`, hostID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Service{}
+	var out []Service
 	for rows.Next() {
 		s, err := scanService(rows)
 		if err != nil {
@@ -369,12 +438,8 @@ func services(ctx context.Context, tx *sql.Tx, hostID string) ([]Service, error)
 func scanService(rows interface{ Scan(...any) error }, extra ...any) (Service, error) {
 	var s Service
 	var first, last, result int64
-	var detail string
-	err := rows.Scan(append([]any{&s.Proto, &s.Port, &s.State, &first, &last, &result, &detail}, extra...)...)
+	err := rows.Scan(append([]any{&s.Proto, &s.Port, &s.State, &first, &last, &result}, extra...)...)
 	s.FirstSeen, s.LastSeen, s.LastResultAt = timeOf(first), timeOf(last), timeOf(result)
-	if err == nil && detail != "" && detail != "{}" {
-		_ = json.Unmarshal([]byte(detail), &s.Detail) // written by the correlator; a bad value shows as none
-	}
 	return s, err
 }
 
@@ -385,7 +450,7 @@ func identifications(ctx context.Context, tx *sql.Tx, hostID string) ([]Identifi
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Identification{}
+	var out []Identification
 	for rows.Next() {
 		var i Identification
 		var ev string
@@ -451,6 +516,26 @@ func (r *Reader) Find(ctx context.Context, q FindQuery) (FindResult, error) {
 			}
 			res.Hosts = append(res.Hosts, FoundHost{Host: h})
 		}
+		if kind == KindName {
+			// What was advertised or resolved for the name without one MAC
+			// holding the address: a name record, not a host.
+			cond, args := `n.host_id IS NULL AND n.name = ? COLLATE NOCASE AND n.ended_at IS NULL`, []any{norm}
+			if q.At != nil {
+				cond, args = `n.host_id IS NULL AND n.name = ? COLLATE NOCASE AND n.first_seen <= ? AND (n.ended_at IS NULL OR n.ended_at > ?)`,
+					[]any{norm, msOf(*q.At), msOf(*q.At)}
+			}
+			if q.Interface != "" {
+				cond += ` AND n.context_id = (SELECT id FROM network_contexts WHERE interface = ?)`
+				args = append(args, q.Interface)
+			}
+			adv, err := r.names(ctx, tx, cond, args...)
+			if err != nil {
+				return err
+			}
+			if len(adv) > 0 {
+				res.Advertised = adv
+			}
+		}
 		return nil
 	})
 	return res, err
@@ -470,7 +555,7 @@ func matchingHosts(ctx context.Context, tx *sql.Tx, kind QueryKind, q, iface str
 			inEffect = `n.first_seen <= ? AND (n.ended_at IS NULL OR n.ended_at > ?)`
 			args = append(args, msOf(*at), msOf(*at))
 		}
-		w.add(`h.host_id IN (SELECT n.host_id FROM names n WHERE n.name = ? COLLATE NOCASE AND `+inEffect+`)`, args...)
+		w.add(`h.host_id IN (SELECT n.host_id FROM name_records n WHERE n.name = ? COLLATE NOCASE AND `+inEffect+`)`, args...)
 	default:
 		matchCondition(&w, kind, q)
 		if at != nil {
@@ -589,14 +674,14 @@ func (r *Reader) foundHolder(ctx context.Context, tx *sql.Tx, res *FindResult, c
 	fh.Unconfirmed = res.At.After(b.LastSeen)
 	// What replaced the binding: the first binding of the address by another
 	// host that started when or after it ended (a claimant during the binding
-	// is a conflict, not a successor), and the host's next address.
+	// is a conflict, not a successor), and the host's next new address.
 	if b.EndedAt != nil {
 		end := msOf(*b.EndedAt)
 		if fh.ReplacedBy, err = firstHolding(ctx, tx, `a.context_id = ? AND a.ip = ? AND a.host_id != ? AND a.first_seen >= ?
 			ORDER BY a.first_seen, a.id`, c.id, res.Query, x.HostID, end); err != nil {
 			return FoundHost{}, err
 		}
-		if fh.MovedTo, err = firstHolding(ctx, tx, `a.host_id = ? AND a.ip != ? AND a.first_seen >= ? ORDER BY a.first_seen, a.id`,
+		if fh.NextAddress, err = firstHolding(ctx, tx, `a.host_id = ? AND a.ip != ? AND a.first_seen >= ? ORDER BY a.first_seen, a.id`,
 			x.HostID, res.Query, end); err != nil {
 			return FoundHost{}, err
 		}
@@ -889,55 +974,98 @@ func (r *Reader) Rollups(ctx context.Context, f ObservationFilter) ([]Rollup, er
 	return out, err
 }
 
-// Services lists probe results with the host's current addresses.
-func (r *Reader) Services(ctx context.Context, f ServiceFilter) ([]ServiceRow, error) {
+// Services lists the TCP endpoints: per address and port, the last
+// result, the last definite answer and the MAC it was attributed to. With
+// At, the result in effect then, from the endpoint's history.
+func (r *Reader) Services(ctx context.Context, f ServiceFilter) ([]Endpoint, error) {
 	var w where
 	if f.Port > 0 {
-		w.add(`s.port = ?`, f.Port)
-	}
-	if f.State != "" {
-		w.add(`s.state = ?`, strings.ToUpper(f.State))
+		w.add(`e.port = ?`, f.Port)
 	}
 	if f.Interface != "" {
 		w.add(`c.interface = ?`, f.Interface)
 	}
-	out := []ServiceRow{}
+	if f.IP != "" {
+		ip, err := netip.ParseAddr(f.IP)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %q is not an IP address", ErrBadQuery, f.IP)
+		}
+		w.add(`e.ip = ?`, ip.Unmap().String())
+	}
+	if f.At != nil {
+		w.add(`e.first_seen <= ?`, msOf(*f.At))
+	}
+	var out []Endpoint
 	err := r.read(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT s.proto, s.port, s.state, s.first_seen, s.last_seen, s.last_result_at, s.detail_json,
-			c.interface, h.host_id, h.mac
-			FROM services s JOIN hosts h ON h.host_id = s.host_id JOIN network_contexts c ON c.id = h.context_id`+w.sql()+
-			` ORDER BY s.port, s.proto, c.interface, h.mac`, w.args...)
+		cond := "1"
+		if len(w.conds) > 0 {
+			cond = strings.Join(w.conds, " AND ")
+		}
+		eps, err := r.endpoints(ctx, tx, cond, w.args...)
 		if err != nil {
 			return err
 		}
-		var ids []string
-		for rows.Next() {
-			var row ServiceRow
-			svc, err := scanService(rows, &row.Interface, &row.HostID, &row.MAC)
-			if err != nil {
-				rows.Close()
+		if f.At != nil {
+			if eps, err = endpointsAt(ctx, tx, eps, *f.At); err != nil {
 				return err
 			}
-			row.Service, row.IPs = svc, []string{}
-			out = append(out, row)
-			ids = append(ids, row.HostID)
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		ips, err := openIPs(ctx, tx, ids)
-		if err != nil {
-			return err
-		}
-		for i := range out {
-			if v := ips[out[i].HostID]; v != nil {
-				out[i].IPs = v
+		for _, e := range eps {
+			if f.State == "" || strings.EqualFold(e.LastResult, f.State) {
+				out = append(out, e)
 			}
 		}
 		return nil
 	})
+	if out == nil {
+		out = []Endpoint{}
+	}
 	return out, err
+}
+
+// endpointsAt replaces each endpoint's last result with the one in effect
+// at t: its latest change at or before t, and the latest definite answer
+// by then. An endpoint with no recorded result by t (tested later, or its
+// history pruned) is left out: its result at t is unknown, and the current
+// one would be a guess.
+func endpointsAt(ctx context.Context, tx *sql.Tx, eps []Endpoint, t time.Time) ([]Endpoint, error) {
+	var out []Endpoint
+	for i := range eps {
+		e := &eps[i]
+		found := false
+		rows, err := tx.QueryContext(ctx, `SELECT r.result, r.ts, coalesce(r.host_id, ''), coalesce(r.detail, ''), coalesce(h.mac, '')
+			FROM endpoint_results r JOIN endpoints e ON e.id = r.endpoint_id JOIN network_contexts c ON c.id = e.context_id
+			LEFT JOIN hosts h ON h.host_id = r.host_id
+			WHERE c.interface = ? AND e.ip = ? AND e.proto = ? AND e.port = ? AND r.ts <= ? ORDER BY r.ts, r.id`,
+			e.Interface, e.IP, e.Proto, e.Port, msOf(t))
+		if err != nil {
+			return nil, err
+		}
+		e.LastOpenAt, e.LastDefiniteAt, e.LastDefiniteResult = nil, nil, ""
+		for rows.Next() {
+			var ts int64
+			if err := rows.Scan(&e.LastResult, &ts, &e.HostID, &e.LastDetail, &e.MAC); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			at := timeOf(ts)
+			e.LastResultAt, found = at, true
+			if e.LastResult == "OPEN" || e.LastResult == "REFUSED" {
+				e.LastDefiniteResult, e.LastDefiniteAt = e.LastResult, &at
+			}
+			if e.LastResult == "OPEN" {
+				e.LastOpenAt = &at
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if found {
+			out = append(out, *e)
+		}
+	}
+	return out, nil
 }
 
 // Interfaces lists the network contexts with their open prefixes, host
@@ -1008,7 +1136,7 @@ func (r *Reader) Interfaces(ctx context.Context) ([]InterfaceInfo, error) {
 // countedTables are the tables `db info` counts.
 var countedTables = []string{
 	"network_contexts", "context_prefixes", "hosts", "addresses", "address_sources", "names", "services",
-	"identifications", "observations", "observation_rollups", "events", "scans", "runtime_state",
+	"identifications", "observations", "observation_rollups", "events", "scans", "runtime_state", "endpoints", "endpoint_results", "name_records",
 }
 
 // DBInfo describes the database file and counts the rows of every table.
@@ -1160,7 +1288,7 @@ func (r *Reader) evidenceTx(ctx context.Context, tx *sql.Tx, id string, since ti
 }
 
 // ActiveState is the active-discovery kill switch (docs/DATA_MODEL.md §8):
-// the persisted runtime_state row, and whether LAN_SENTINEL_ACTIVE_DISABLED
+// the persisted runtime_state row, and whether LAN_TRACKER_ACTIVE_DISABLED
 // forces it regardless (Forced, set by the caller).
 type ActiveState struct {
 	Disabled bool       `json:"disabled"`
@@ -1259,99 +1387,67 @@ func (r *Reader) KnownIPv4(ctx context.Context, iface string) ([]KnownAddr, erro
 	return out, err
 }
 
-// IdentifySuppress reasons (ADR 0011): not sent, and not an attempt.
-const (
-	IdentifyStale     = "stale"
-	IdentifyDuplicate = "duplicate"
-	IdentifyProxyARP  = "proxy_arp"
-	IdentifyAttempted = "attempted"
-)
-
-// IdentifyCandidate is an open IPv4 binding considered for an
-// identification probe. Suppress is empty when the address is eligible.
-type IdentifyCandidate struct {
-	HostID        string
-	IP            netip.Addr
-	LastSeen      time.Time
-	PreferredName string
-	Suppress      string
-	Attempted     bool
+// NameTargets are what one pass of name queries on an interface may ask
+// about (FR-AC-12): names and addresses already known, never more. Each
+// list leaves out what a record's TTL still covers and is stalest first.
+type NameTargets struct {
+	MDNS []string     // .local names of the context's mDNS address records
+	DNS  []string     // names of its DNS address and CNAME records
+	PTR  []netip.Addr // open IPv4 bindings without a PTR record in effect
 }
 
-// IdentifyTargets lists open IPv4 bindings on iface for one probe, with
-// why each is ineligible. KnownIPv4 is unchanged: discovery still uses it.
-func (r *Reader) IdentifyTargets(ctx context.Context, iface, probe string, since time.Time) ([]IdentifyCandidate, error) {
-	var out []IdentifyCandidate
+// NameTargets lists up to limit targets of each kind on iface at now.
+func (r *Reader) NameTargets(ctx context.Context, iface string, now time.Time, limit int) (NameTargets, error) {
+	var out NameTargets
+	t := msOf(now)
+	names := func(tx *sql.Tx, cond string) ([]string, error) {
+		rows, err := tx.QueryContext(ctx, `SELECT min(n.name) FROM name_records n JOIN network_contexts c ON c.id = n.context_id
+			WHERE c.interface = ? AND n.ended_at IS NULL AND `+cond+`
+			GROUP BY lower(n.name) HAVING max(coalesce(n.expires_at, 0)) <= ? ORDER BY max(n.last_seen), lower(n.name) LIMIT ?`, iface, t, limit)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				return nil, err
+			}
+			out = append(out, s)
+		}
+		return out, rows.Err()
+	}
 	err := r.read(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT h.host_id, a.ip, a.last_seen, coalesce(h.preferred_name, ''), a.conflict,
-			(SELECT count(*) FROM addresses o WHERE o.context_id = a.context_id AND o.ip = a.ip AND o.ended_at IS NULL) AS holders,
-			EXISTS(SELECT 1 FROM identifications i WHERE i.host_id = h.host_id AND i.field = 'proxy_arp' AND i.value = 'true') AS proxy,
-			EXISTS(SELECT 1 FROM identify_attempts t WHERE t.host_id = h.host_id AND t.probe = ?) AS attempted
-			FROM addresses a
-			JOIN hosts h ON h.host_id = a.host_id
-			JOIN network_contexts c ON c.id = a.context_id
-			WHERE c.interface = ? AND a.family = 4 AND a.ended_at IS NULL
-			ORDER BY a.ip, h.host_id`, probe, iface)
+		var err error
+		if out.MDNS, err = names(tx, `n.name_type = 'mdns' AND n.record_type IN ('A', 'AAAA') AND lower(n.name) LIKE '%.local'`); err != nil {
+			return err
+		}
+		if out.DNS, err = names(tx, `n.name_type = 'dns' AND n.record_type IN ('A', 'AAAA', 'CNAME') AND lower(n.name) NOT LIKE '%.local'`); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT a.ip FROM addresses a JOIN network_contexts c ON c.id = a.context_id
+			WHERE c.interface = ? AND a.family = 4 AND a.ended_at IS NULL AND NOT EXISTS (
+				SELECT 1 FROM name_records n WHERE n.context_id = a.context_id AND n.record_type = 'PTR' AND n.address = a.ip
+					AND n.ended_at IS NULL AND n.expires_at > ?)
+			GROUP BY a.ip ORDER BY (SELECT max(n.last_seen) FROM name_records n WHERE n.context_id = a.context_id
+				AND n.record_type = 'PTR' AND n.address = a.ip) NULLS FIRST, a.ip LIMIT ?`, iface, t, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var hid, ip, preferred string
-			var last int64
-			var conflict, holders, proxy, attempted int
-			if err := rows.Scan(&hid, &ip, &last, &preferred, &conflict, &holders, &proxy, &attempted); err != nil {
+			var s string
+			if err := rows.Scan(&s); err != nil {
 				return err
 			}
-			addr, err := netip.ParseAddr(ip)
-			if err != nil {
-				continue
+			if ip, err := netip.ParseAddr(s); err == nil {
+				out.PTR = append(out.PTR, ip)
 			}
-			c := IdentifyCandidate{HostID: hid, IP: addr, LastSeen: timeOf(last), PreferredName: preferred, Attempted: attempted != 0}
-			switch {
-			case attempted != 0:
-				c.Suppress = IdentifyAttempted
-			case conflict != 0 || holders != 1:
-				c.Suppress = IdentifyDuplicate
-			case proxy != 0:
-				c.Suppress = IdentifyProxyARP
-			case !since.IsZero() && c.LastSeen.Before(since):
-				c.Suppress = IdentifyStale
-			}
-			out = append(out, c)
 		}
 		return rows.Err()
 	})
 	return out, err
-}
-
-// IdentifyAttempt is the last identification exchange for a host and probe.
-type IdentifyAttempt struct {
-	Probe     string    `json:"probe"`
-	Result    string    `json:"result"`
-	Attempted time.Time `json:"attempted_at"`
-	Trigger   string    `json:"trigger"`
-	Actor     string    `json:"actor,omitempty"`
-}
-
-// IdentifyAttemptOf returns the attempt row for host and probe, or
-// ErrNotFound.
-func (r *Reader) IdentifyAttemptOf(ctx context.Context, hostID, probe string) (IdentifyAttempt, error) {
-	var a IdentifyAttempt
-	err := r.read(ctx, func(tx *sql.Tx) error {
-		var at int64
-		err := tx.QueryRowContext(ctx, `SELECT probe, result, attempted_at, trigger, actor FROM identify_attempts
-			WHERE host_id = ? AND probe = ?`, hostID, probe).Scan(&a.Probe, &a.Result, &at, &a.Trigger, &a.Actor)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-		a.Attempted = timeOf(at)
-		return nil
-	})
-	return a, err
 }
 
 // DHCPServers lists the DHCP servers seen, by interface and identity.

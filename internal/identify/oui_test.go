@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"lan-sentinel/data/oui"
-	"lan-sentinel/internal/ouitable"
+	"github.com/otfabric/lan-tracker/data/oui"
+	"github.com/otfabric/lan-tracker/internal/ouitable"
 )
 
 func mac(t *testing.T, s string) net.HardwareAddr {

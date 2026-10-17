@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/netrange"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/netrange"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // Link is what an engine needs to know about its interface: the MAC and
@@ -57,27 +57,23 @@ type Pass struct {
 	Sweep   iter.Seq[netip.Addr]
 	InSweep func(netip.Addr) bool
 	TCP     []config.TCPTarget
-	UDP     []string
-	// Identify is the identification jobs of this pass (ADR 0011).
-	Identify []IdentifyJob
-	Budget   *Budget
-	Emit     func(observation.Observation)
-	Clock    clock.Clock // nil: the wall clock
-	// ReplyTimeout bounds the wait for an ARP, ICMP or UDP reply.
+	// Names are the name queries of a pass (FR-AC-12).
+	Names  []NameQuery
+	Budget *Budget
+	Emit   func(observation.Observation)
+	Clock  clock.Clock // nil: the wall clock
+	// ReplyTimeout bounds the wait for an ARP or ICMP reply.
 	ReplyTimeout time.Duration
 }
 
-// IdentifyJob is one identification exchange: one probe to one host.
-type IdentifyJob struct {
-	HostID    string
-	IP        netip.Addr
-	Probe     string
-	UnitID    uint8
-	Community string
-	SNI       string // resolved ClientHello name; empty sends none
-	Force     bool
-	Trigger   string // scheduled or operator
-	Actor     string // SO_PEERCRED caller of identify run; empty when scheduled
+// NameQuery is one DNS or mDNS question: Type is a dnsmessage.Type (A,
+// AAAA, PTR), Server the resolver's address and port 53, or the mDNS group
+// with MDNS set.
+type NameQuery struct {
+	Name   string
+	Type   uint16
+	Server netip.AddrPort
+	MDNS   bool
 }
 
 // Now returns the pass clock's time in UTC, the time stamped on
@@ -114,9 +110,8 @@ type Result struct {
 	Target netip.Addr `json:"target,omitzero"`
 	Count  int        `json:"count,omitempty"` // 0: one probe
 	Port   int        `json:"port,omitempty"`
-	Probe  string     `json:"probe,omitempty"` // UDP probe name
-	// State: reply or no_reply (ARP, ICMP, UDP); OPEN, REFUSED, TIMEOUT,
-	// UNREACHABLE or UNKNOWN (TCP); blocked when the policy refused the
+	// State: reply or no_reply (ARP, ICMP); OPEN, REFUSED, TIMEOUT,
+	// UNREACHABLE or LOCAL_ERROR (TCP); blocked when the policy refused the
 	// probe (excluded, outside the networks) and nothing was sent.
 	State string `json:"state"`
 }
@@ -140,7 +135,7 @@ type Engine interface {
 	Run(ctx context.Context, p Pass) ([]Result, error)
 }
 
-// DefaultReplyTimeout is how long ARP, ICMP and UDP probes wait for a reply.
+// DefaultReplyTimeout is how long ARP and ICMP probes wait for a reply.
 const DefaultReplyTimeout = time.Second
 
 // Sweep is the address space of one interface's ARP sweep: the IPv4 host
@@ -197,6 +192,26 @@ func (s Sweep) Excluded() []string { return s.applied }
 // Order returns the addresses in a random order.
 func (s Sweep) Order(r *rand.Rand) iter.Seq[netip.Addr] {
 	return func(yield func(netip.Addr) bool) { s.set.Shuffled(r, yield) }
+}
+
+// OrderFirst returns the swept addresses among first (in their order),
+// then the others in a random order. An operator scan sweeps its known
+// hosts first, so the probes that follow the sweep never wait out the
+// target spacing behind their own ARP request, and scan plan can simulate
+// the order the run uses.
+func (s Sweep) OrderFirst(r *rand.Rand, first []netip.Addr) iter.Seq[netip.Addr] {
+	return func(yield func(netip.Addr) bool) {
+		early := map[netip.Addr]bool{}
+		for _, ip := range first {
+			if s.Contains(ip) && !early[ip.Unmap()] {
+				early[ip.Unmap()] = true
+				if !yield(ip.Unmap()) {
+					return
+				}
+			}
+		}
+		s.set.Shuffled(r, func(ip netip.Addr) bool { return early[ip] || yield(ip) })
+	}
 }
 
 // First returns up to n addresses in ascending order.

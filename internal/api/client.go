@@ -15,9 +15,9 @@ import (
 	"strconv"
 	"time"
 
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // ErrUnreachable means the daemon could not be reached (CLI exit 3).
@@ -33,8 +33,8 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
-// Unwrap maps 404 and 400 to the store's errors, 422 to
-// ErrConfigRejected, and a 409 identify refusal to ErrIdentifyRefused.
+// Unwrap maps 404 and 400 to the store's errors and 422 to
+// ErrConfigRejected.
 func (e *Error) Unwrap() error {
 	switch e.Status {
 	case http.StatusNotFound:
@@ -43,10 +43,6 @@ func (e *Error) Unwrap() error {
 		return store.ErrBadQuery
 	case http.StatusUnprocessableEntity:
 		return ErrConfigRejected
-	case http.StatusConflict:
-		if e.Code == CodeIdentifyRefused {
-			return ErrIdentifyRefused
-		}
 	}
 	return nil
 }
@@ -77,7 +73,7 @@ func (c *Client) do(ctx context.Context, hc *http.Client, path string, q url.Val
 }
 
 func (c *Client) send(ctx context.Context, hc *http.Client, method, path string, q url.Values, body io.Reader) (*http.Response, error) {
-	u := "http://lan-sentinel" + path
+	u := "http://lan-tracker" + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
@@ -141,13 +137,6 @@ func (c *Client) EnableActive(ctx context.Context, reason string) (store.ActiveS
 	var st store.ActiveState
 	err := c.post(ctx, c.http, "/v1/active/enable", SwitchRequest{Reason: reason}, &st)
 	return st, err
-}
-
-// IdentifyRun sends one identification probe through the daemon.
-func (c *Client) IdentifyRun(ctx context.Context, hostID, probe, sni string) (store.IdentifyAttempt, error) {
-	var a store.IdentifyAttempt
-	err := c.post(ctx, c.http, "/v1/hosts/"+url.PathEscape(hostID)+"/identify", IdentifyRequest{Probe: probe, SNI: sni}, &a)
-	return a, err
 }
 
 // SetDescription sets a host's description; "" removes it.
@@ -250,7 +239,7 @@ func (c *Client) Hosts(ctx context.Context, f store.HostFilter) ([]store.HostSum
 		presence = "notlive"
 	}
 	q := values{}.str("interface", f.Interface).str("q", f.Query).str("kind", string(f.QueryKind)).str("presence", presence).
-		str("vendor", f.Vendor).str("device", f.Device).int("port", f.Port).time("seen_since", f.SeenSince)
+		str("vendor", f.Vendor).int("port", f.Port).time("seen_since", f.SeenSince).str("description", f.Description)
 	var out []store.HostSummary
 	return out, c.get(ctx, "/v1/hosts", url.Values(q), &out)
 }
@@ -324,16 +313,37 @@ func (c *Client) Events(ctx context.Context, f store.EventFilter) ([]store.Event
 	return out, c.get(ctx, "/v1/events", url.Values(eventValues(f)), &out)
 }
 
-// Services lists services.
-func (c *Client) Services(ctx context.Context, f store.ServiceFilter) ([]store.ServiceRow, error) {
-	var out []store.ServiceRow
-	return out, c.get(ctx, "/v1/services", url.Values(values{}.int("port", f.Port).str("state", f.State).str("interface", f.Interface)), &out)
+// Services lists the TCP endpoints.
+func (c *Client) Services(ctx context.Context, f store.ServiceFilter) ([]store.Endpoint, error) {
+	var out []store.Endpoint
+	v := values{}.int("port", f.Port).str("state", f.State).str("interface", f.Interface).str("ip", f.IP)
+	if f.At != nil {
+		v = v.time("at", *f.At)
+	}
+	return out, c.get(ctx, "/v1/services", url.Values(v), &out)
 }
 
 // DHCPServers lists the DHCP servers seen.
 func (c *Client) DHCPServers(ctx context.Context, f store.DHCPServerFilter) ([]store.DHCPServer, error) {
 	var out []store.DHCPServer
 	return out, c.get(ctx, "/v1/dhcp/servers", url.Values(values{}.str("interface", f.Interface).str("status", f.Status)), &out)
+}
+
+// DHCPLeases lists the DHCP lease history.
+func (c *Client) DHCPLeases(ctx context.Context, f store.DHCPLeaseFilter) ([]store.DHCPLease, error) {
+	var out []store.DHCPLease
+	v := values{}.str("interface", f.Interface).str("mac", f.MAC).str("ip", f.IP).bool("open", f.Open).int("limit", f.Limit)
+	return out, c.get(ctx, "/v1/dhcp/leases", url.Values(v), &out)
+}
+
+// DHCPExchanges lists the DHCP exchanges seen.
+func (c *Client) DHCPExchanges(ctx context.Context, f store.DHCPExchangeFilter) ([]store.DHCPExchange, error) {
+	var out []store.DHCPExchange
+	v := values{}.str("interface", f.Interface).str("mac", f.MAC).int("limit", f.Limit)
+	if !f.Since.IsZero() {
+		v = v.time("since", f.Since)
+	}
+	return out, c.get(ctx, "/v1/dhcp/exchanges", url.Values(v), &out)
 }
 
 // DBInfo describes the database.

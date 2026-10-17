@@ -1,4 +1,4 @@
-// Package daemon runs the LAN Sentinel service: it loads configuration,
+// Package daemon runs the LAN Tracker service: it loads configuration,
 // opens the store, runs the collection pipeline (collectors → bus →
 // correlator → store and journald), talks to systemd and handles SIGHUP
 // reloads and graceful shutdown.
@@ -19,23 +19,22 @@ import (
 	"syscall"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/buildinfo"
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/collect/capture"
-	"lan-sentinel/internal/collect/replay"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/correlate"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/iface"
-	"lan-sentinel/internal/logging"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/idprobe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/service"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/buildinfo"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/collect/capture"
+	"github.com/otfabric/lan-tracker/internal/collect/replay"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/correlate"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/iface"
+	"github.com/otfabric/lan-tracker/internal/logging"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/service"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // Options configures Run. Zero values select production defaults.
@@ -85,7 +84,6 @@ type Daemon struct {
 	reloadMu sync.Mutex           // serialises reloads (SIGHUP and the API)
 	budget   *probe.Budget        // live mode only
 	sched    *scheduler.Scheduler // live mode only
-	identify *idprobe.Engine      // live mode only; its counters feed the metrics
 }
 
 // Ready is closed once the daemon has signalled readiness.
@@ -157,7 +155,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	loaded := d.loaded
 	bi := buildinfo.Get()
-	d.log.Info("lan-sentinel starting", "version", bi.Version, "commit", bi.Commit, "platform", bi.Platform,
+	d.log.Info("lan-tracker starting", "version", bi.Version, "commit", bi.Commit, "platform", bi.Platform,
 		"config", loaded.Path)
 
 	st, err := store.Open(ctx, store.Options{Path: loaded.Config.Storage.Path, Clock: d.clock, Logger: d.log})
@@ -218,12 +216,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.notify("ready", d.notifier.Ready)
 	d.notify("status", func() error { return d.notifier.Status("running") })
 	d.log.Info("active discovery: " + d.activeText(d.cfg.Load()))
-	d.log.Info("lan-sentinel running")
+	d.log.Info("lan-tracker running")
 	close(d.ready)
 
 	reason := d.loop(runCtx)
 
-	d.log.Info("lan-sentinel stopping", "reason", reason)
+	d.log.Info("lan-tracker stopping", "reason", reason)
 	d.notify("stopping", d.notifier.Stopping)
 	cancel()
 	wg.Wait()
@@ -233,7 +231,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.log.Error("closing database", "err", err)
 		return fmt.Errorf("close store: %w", err)
 	}
-	d.log.Info("lan-sentinel stopped")
+	d.log.Info("lan-tracker stopped")
 	return nil
 }
 
@@ -311,6 +309,21 @@ var restartOnly = []struct {
 	{"metrics", func(c *config.Config) any { return c.Metrics }, func(o, n *config.Config) { n.Metrics = o.Metrics }},
 	{"logging.format", func(c *config.Config) any { return c.Logging.Format }, func(o, n *config.Config) { n.Logging.Format = o.Logging.Format }},
 	{"replay", func(c *config.Config) any { return c.Replay }, func(o, n *config.Config) { n.Replay = o.Replay }},
+	// The OUI table is loaded once, at start-up.
+	{"identity.oui_override", func(c *config.Config) any { return c.Identity.OUIOverride },
+		func(o, n *config.Config) { n.Identity.OUIOverride = o.Identity.OUIOverride }},
+	// The budget's semaphores keep their size until restart (probe.Budget
+	// SetLimits): a reload reports them instead of claiming them.
+	{"active.max_concurrent_jobs", func(c *config.Config) any { return c.Active.MaxConcurrentJobs },
+		func(o, n *config.Config) { n.Active.MaxConcurrentJobs = o.Active.MaxConcurrentJobs }},
+	{"active.budgets.tcp.max_concurrent_per_interface", func(c *config.Config) any { return c.Active.Budgets.TCP.MaxConcurrentPerInterface },
+		func(o, n *config.Config) {
+			n.Active.Budgets.TCP.MaxConcurrentPerInterface = o.Active.Budgets.TCP.MaxConcurrentPerInterface
+		}},
+	{"active.budgets.tcp.max_concurrent_per_host", func(c *config.Config) any { return c.Active.Budgets.TCP.MaxConcurrentPerHost },
+		func(o, n *config.Config) {
+			n.Active.Budgets.TCP.MaxConcurrentPerHost = o.Active.Budgets.TCP.MaxConcurrentPerHost
+		}},
 }
 
 // interfaceShape is the restart-only part of the interfaces: all but each

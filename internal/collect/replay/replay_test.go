@@ -15,10 +15,10 @@ import (
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/collect/capture/decoders"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 func write(t *testing.T, name, content string) string {

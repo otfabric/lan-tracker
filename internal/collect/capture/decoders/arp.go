@@ -1,6 +1,6 @@
 package decoders
 
-import "lan-sentinel/internal/observation"
+import "github.com/otfabric/lan-tracker/internal/observation"
 
 // ARP operation kinds recorded in the "arp" meta key.
 const (

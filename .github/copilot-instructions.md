@@ -1,4 +1,4 @@
-# Copilot instructions — LAN Sentinel
+# Copilot instructions — OT Fabric LAN Tracker
 
 Read [`AGENTS.md`](../AGENTS.md) first. It is the single set of instructions for every coding agent here: the hard rules (§4), where the truth lives (§2), the package map, what to run and the common tasks. This file only summarises what must never be missed.
 
@@ -9,7 +9,8 @@ Read [`AGENTS.md`](../AGENTS.md) first. It is the single set of instructions for
 - Kernel access (AF_PACKET, netlink, raw sockets) only in `internal/platform`.
 - OT safety: active discovery is off by default and bounded by budgets, excludes and the /24 guard.
   - No SYN scans, no generic UDP scans, no IPv6 sweeps.
-  - Identification probes that send a payload follow ADR 0011 (opt-in, once per MAC). Do not add another, or infer `device_type` from banners, without a recorded decision.
+  - Every active send takes one start from the shared budget; TCP checks are a bare connect with no payload.
+  - No device identification of any kind (ADR 0012): no payload probes, banners, classifiers or confidence ranking. It was removed on purpose; do not restore it.
 - No observation logging; no MAC, IP, hostname or host ID in metric labels.
 - Migrations are append-only. Docs change in the same change as the code (`AGENTS.md` §12).
 - If code and docs disagree, or a decision is missing, ask rather than guess.

@@ -14,16 +14,18 @@ import (
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/service"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/service"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // Type is an event type.
 type Type string
 
-// Event types.
+// Event types. Legacy types (Spec.Legacy) are LAN Sentinel's: kept so its
+// history stays readable and filterable, never emitted by LAN Tracker
+// (ADR 0012, docs/DATA_MODEL.md §7).
 const (
 	HostDiscovered      Type = "HOST_DISCOVERED"
 	HostDisappeared     Type = "HOST_DISAPPEARED"
@@ -34,7 +36,7 @@ const (
 	MACMoved            Type = "MAC_MOVED"
 	HostnameAdded       Type = "HOSTNAME_ADDED"
 	HostnameChanged     Type = "HOSTNAME_CHANGED"
-	HostnameRemoved     Type = "HOSTNAME_REMOVED" // reserved: no v1 rule closes a name without a replacement
+	HostnameRemoved     Type = "HOSTNAME_REMOVED"
 	ServiceOpened       Type = "SERVICE_OPENED"
 	ServiceClosed       Type = "SERVICE_CLOSED"
 	VendorIdentified    Type = "VENDOR_IDENTIFIED"
@@ -52,10 +54,24 @@ const (
 	DHCPServerDiscovered Type = "DHCP_SERVER_DISCOVERED"
 	DHCPServerUnexpected Type = "DHCP_SERVER_UNEXPECTED"
 	DHCPServerMACChanged Type = "DHCP_SERVER_MAC_CHANGED"
-	DHCPConfigChanged    Type = "DHCP_CONFIG_CHANGED"
+	// DHCPConfigChanged compared one server's configuration across clients;
+	// LAN Tracker compares it per client (DHCPClientConfigChanged) and no
+	// longer emits it. Kept for LAN Sentinel's events.
+	DHCPConfigChanged Type = "DHCP_CONFIG_CHANGED"
 
 	HostDescribed Type = "HOST_DESCRIBED"
 	IdentifyRan   Type = "IDENTIFY_RAN"
+
+	// LAN Tracker (migration 0010).
+	ProxyARPDetected        Type = "PROXY_ARP_DETECTED"
+	ServiceStateChanged     Type = "SERVICE_STATE_CHANGED"
+	MACAlsoObserved         Type = "MAC_ALSO_OBSERVED"
+	ObservationGap          Type = "OBSERVATION_GAP"
+	DHCPLeaseAssigned       Type = "DHCP_LEASE_ASSIGNED"
+	DHCPClientConfigChanged Type = "DHCP_CLIENT_CONFIG_CHANGED"
+	DHCPLeaseNAK            Type = "DHCP_LEASE_NAK"
+	DHCPLeaseDeclined       Type = "DHCP_LEASE_DECLINED"
+	DHCPLeaseReleased       Type = "DHCP_LEASE_RELEASED"
 )
 
 // Severity is an event's severity.
@@ -73,41 +89,52 @@ type Spec struct {
 	Type     Type
 	CLIName  string
 	Severity Severity
+	// Legacy types are only in LAN Sentinel's history.
+	Legacy bool
 }
 
 var catalogue = map[Type]Spec{}
 
 func init() {
 	for _, s := range []Spec{
-		{HostDiscovered, "discovered", Notice},
-		{HostDisappeared, "disappeared", Notice},
-		{HostReappeared, "reappeared", Notice},
-		{IPAdded, "ip-added", Notice},
-		{IPRemoved, "ip-removed", Notice},
-		{IPChanged, "ip-changed", Notice},
-		{MACMoved, "mac-moved", Warning},
-		{HostnameAdded, "name-added", Notice},
-		{HostnameChanged, "name-changed", Notice},
-		{HostnameRemoved, "name-removed", Notice},
-		{ServiceOpened, "service-opened", Notice},
-		{ServiceClosed, "service-closed", Notice},
-		{VendorIdentified, "vendor-identified", Info},
-		{DuplicateIPDetected, "duplicate-ip", Warning},
-		{DuplicateIPResolved, "duplicate-ip-resolved", Notice},
-		{ScanStarted, "scan-started", Info},
-		{ScanCompleted, "scan-completed", Info},
-		{ActiveDisabled, "active-disabled", Warning},
-		{ActiveEnabled, "active-enabled", Notice},
-		{InterfaceUp, "interface-up", Notice},
-		{InterfaceDown, "interface-down", Warning},
-		{SubnetChanged, "subnet-changed", Notice},
-		{DatabaseRecreated, "db-recreated", Warning},
-		{DHCPServerDiscovered, "dhcp-server-discovered", Notice},
-		{DHCPServerUnexpected, "dhcp-server-unexpected", Warning},
-		{DHCPServerMACChanged, "dhcp-server-mac-changed", Warning},
-		{DHCPConfigChanged, "dhcp-config-changed", Notice},
-		{HostDescribed, "described", Notice},
-		{IdentifyRan, "identify-ran", Info},
+		{HostDiscovered, "discovered", Notice, false},
+		{HostDisappeared, "disappeared", Notice, false},
+		{HostReappeared, "reappeared", Notice, false},
+		{IPAdded, "ip-added", Notice, false},
+		{IPRemoved, "ip-removed", Notice, false},
+		{IPChanged, "ip-changed", Notice, true},
+		{MACMoved, "mac-moved", Warning, true},
+		{HostnameAdded, "name-added", Notice, false},
+		{HostnameChanged, "name-changed", Notice, true},
+		{HostnameRemoved, "name-removed", Notice, false},
+		{ServiceOpened, "service-opened", Notice, true},
+		{ServiceClosed, "service-closed", Notice, true},
+		{VendorIdentified, "vendor-identified", Info, true},
+		{DuplicateIPDetected, "duplicate-ip", Warning, false},
+		{DuplicateIPResolved, "duplicate-ip-resolved", Notice, false},
+		{ScanStarted, "scan-started", Info, false},
+		{ScanCompleted, "scan-completed", Info, false},
+		{ActiveDisabled, "active-disabled", Warning, false},
+		{ActiveEnabled, "active-enabled", Notice, false},
+		{InterfaceUp, "interface-up", Notice, false},
+		{InterfaceDown, "interface-down", Warning, false},
+		{SubnetChanged, "subnet-changed", Notice, false},
+		{DatabaseRecreated, "db-recreated", Warning, false},
+		{DHCPServerDiscovered, "dhcp-server-discovered", Notice, false},
+		{DHCPServerUnexpected, "dhcp-server-unexpected", Warning, false},
+		{DHCPServerMACChanged, "dhcp-server-mac-changed", Warning, false},
+		{DHCPConfigChanged, "dhcp-config-changed", Notice, true},
+		{HostDescribed, "described", Notice, false},
+		{IdentifyRan, "identify-ran", Info, true},
+		{ProxyARPDetected, "proxy-arp", Warning, false},
+		{ServiceStateChanged, "service-changed", Notice, false},
+		{MACAlsoObserved, "mac-also-observed", Notice, false},
+		{ObservationGap, "observation-gap", Warning, false},
+		{DHCPLeaseAssigned, "dhcp-lease", Notice, false},
+		{DHCPClientConfigChanged, "dhcp-client-config-changed", Notice, false},
+		{DHCPLeaseNAK, "dhcp-nak", Warning, false},
+		{DHCPLeaseDeclined, "dhcp-decline", Warning, false},
+		{DHCPLeaseReleased, "dhcp-release", Notice, false},
 	} {
 		catalogue[s.Type] = s
 	}
@@ -153,8 +180,9 @@ type Evidence struct {
 	NeighborState string                     `json:"neighbor_state,omitempty"`
 	Reason        string                     `json:"reason,omitempty"`
 	Actor         string                     `json:"actor,omitempty"`
-	Probe         string                     `json:"probe,omitempty"`
-	Result        string                     `json:"result,omitempty"`
+	// Contested lists the addresses a proxy-ARP host answered for that
+	// other live hosts held.
+	Contested []string `json:"contested,omitempty"`
 }
 
 // EvidenceFrom snapshots an observation.

@@ -1,5 +1,5 @@
 # Linux development image. Every make target that runs Go runs in here, as
-# the calling user, with caches on the lan-sentinel-cache volume (/cache).
+# the calling user, with caches on the lan-tracker-cache volume (/cache).
 FROM golang:1.27-bookworm
 
 ARG GOLANGCI_LINT_VERSION=v2.14.0

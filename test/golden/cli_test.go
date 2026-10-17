@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/cli"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/cli"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 type lockedBuffer struct {
@@ -36,7 +36,7 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-// runCLI runs the lan-sentinel CLI in-process and returns its exit code
+// runCLI runs the lan-tracker CLI in-process and returns its exit code
 // and output.
 func runCLI(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
@@ -57,7 +57,7 @@ func TestCLIReconstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(dir, "config.yaml")
-	cfg := "version: 1\ninterfaces:\n  - name: " + exp.Interface + "\n    prefixes: [" + strings.Join(exp.Prefixes, ", ") + "]\n" +
+	cfg := "version: 2\ninterfaces:\n  - name: " + exp.Interface + "\n    prefixes: [" + strings.Join(exp.Prefixes, ", ") + "]\n" +
 		"    replay: { file: " + stream + " }\nreplay: { exit_when_done: false }\n" +
 		"storage: { path: " + filepath.Join(dir, "hosts.db") + " }\napi: { socket: " + filepath.Join(dir, "api.sock") + " }\n" +
 		"logging: { format: text }\n"

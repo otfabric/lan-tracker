@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 func testConfig() *config.Config {
@@ -23,8 +23,8 @@ func testConfig() *config.Config {
 		{Name: "eth0"},
 	}
 	cfg.Profiles = map[string]config.ProfileConfig{
-		"modbus":   {ARP: true, TCP: []int{502}},
-		"identify": {UDP: []string{"enip"}},
+		"modbus": {ARP: true, TCP: []int{502}},
+		"icmp":   {ICMP: true},
 	}
 	cfg.Active.TCP.Targets = []config.TCPTarget{{Port: 502, Name: "modbus", Timeout: config.Duration(750e6)}}
 	return cfg
@@ -68,5 +68,29 @@ func TestConfigPolicy(t *testing.T) {
 	}
 	if !sw.Disabled() || !sw.State().Disabled {
 		t.Error("switch state")
+	}
+}
+
+// A name query may go only to the mDNS group (when mDNS queries are on)
+// or a configured resolver, and only with name queries enabled.
+func TestNamePolicy(t *testing.T) {
+	cfg := testConfig()
+	p := ConfigPolicy{Switch: NewSwitch(store.ActiveState{}), Config: func() *config.Config { return cfg }}
+	group, resolver := ip("224.0.0.251"), ip("8.8.8.8")
+	if err := p.Check("eth1", Name, group); !errors.Is(err, ErrRefused) {
+		t.Errorf("names disabled: %v", err)
+	}
+	cfg.Active.Names = config.NamesConfig{Enabled: true, MDNS: true, Resolvers: []netip.Addr{resolver}}
+	for target, ok := range map[netip.Addr]bool{group: true, resolver: true, ip("1.1.1.1"): false, ip("192.168.110.20"): false} {
+		if err := p.Check("eth1", Name, target); (err == nil) != ok {
+			t.Errorf("%s: %v", target, err)
+		}
+	}
+	cfg.Active.Names.MDNS = false
+	if err := p.Check("eth1", Name, group); err == nil {
+		t.Error("mDNS query allowed with mdns off")
+	}
+	if err := p.Check("eth0", Name, resolver); err == nil {
+		t.Error("name query on an interface without active discovery")
 	}
 }

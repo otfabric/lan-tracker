@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // NDP message kinds recorded in the "ndp" meta key.

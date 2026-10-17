@@ -14,7 +14,11 @@ import (
 )
 
 // EnvPrefix prefixes every configuration environment variable.
-const EnvPrefix = "LAN_SENTINEL_"
+const EnvPrefix = "LAN_TRACKER_"
+
+// LegacyEnvPrefix is LAN Sentinel's prefix. Its variables are refused,
+// never read or mixed with LAN_TRACKER_* ones.
+const LegacyEnvPrefix = "LAN_SENTINEL_"
 
 // Reserved environment variables that are not configuration keys.
 const (
@@ -33,7 +37,7 @@ type Override struct {
 
 // LoadOptions controls Load.
 type LoadOptions struct {
-	// Path is the config file. Empty means $LAN_SENTINEL_CONFIG or
+	// Path is the config file. Empty means $LAN_TRACKER_CONFIG or
 	// DefaultConfigPath.
 	Path string
 	// Environ is the process environment (os.Environ()).
@@ -373,6 +377,13 @@ func applyEnv(cfg *Config, environ []string, leaves leafIndex, l *Loaded) []Fiel
 	var errs []FieldError
 	for _, kv := range environ {
 		name, value, ok := strings.Cut(kv, "=")
+		if ok && strings.HasPrefix(name, LegacyEnvPrefix) {
+			// Ignoring one silently could leave probing on that the
+			// operator meant to switch off (LAN_SENTINEL_ACTIVE_DISABLED).
+			errs = append(errs, FieldError{Key: name, Msg: "LAN Sentinel variables are not read; rename it to " +
+				EnvPrefix + strings.TrimPrefix(name, LegacyEnvPrefix) + " (docs/MIGRATION.md)"})
+			continue
+		}
 		if !ok || !strings.HasPrefix(name, EnvPrefix) {
 			continue
 		}

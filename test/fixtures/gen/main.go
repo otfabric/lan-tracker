@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"lan-sentinel/test/fixtures"
+	"github.com/otfabric/lan-tracker/test/fixtures"
 )
 
 func main() {

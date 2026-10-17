@@ -1,12 +1,12 @@
 // Command capcheck is the phase 0 privilege and feasibility check. It runs
-// every kernel operation LAN Sentinel's collectors and probes need, under the
+// every kernel operation LAN Tracker's collectors and probes need, under the
 // identity it is started with, and reports PASS, FAIL or SKIP per operation
 // (docs/ARCHITECTURE.md §8).
 //
 // It never transmits unless a target is given (--arp-target, --ndp-target,
 // --icmp-target, --tcp-target), and then sends exactly one probe per target.
 //
-// Run it the way the daemon runs: as the lan-sentinel user with only
+// Run it the way the daemon runs: as the lan-tracker user with only
 // CAP_NET_RAW (see README.md). `make test-net` runs it that way in a Docker
 // container on a test network.
 package main
@@ -134,7 +134,7 @@ func main() {
 	defer cancel()
 
 	rep := report{
-		Tool: "lan-sentinel capcheck", Time: time.Now().UTC(), Platform: runtime.GOOS + "/" + runtime.GOARCH,
+		Tool: "lan-tracker capcheck", Time: time.Now().UTC(), Platform: runtime.GOOS + "/" + runtime.GOARCH,
 		OS: osVersion(), Privilege: privilegeSummary(), Interface: o.iface,
 	}
 	if u, err := user.Current(); err == nil {
@@ -355,7 +355,7 @@ func pingSocket(target netip.Addr) (string, error) {
 }
 
 func echo(c *icmp.PacketConn, dst net.Addr) (string, error) {
-	msg := icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: os.Getpid() & 0xffff, Seq: 1, Data: []byte("lan-sentinel capcheck")}}
+	msg := icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: os.Getpid() & 0xffff, Seq: 1, Data: []byte("lan-tracker capcheck")}}
 	b, err := msg.Marshal(nil)
 	if err != nil {
 		return "", err

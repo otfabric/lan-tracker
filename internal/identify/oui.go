@@ -1,7 +1,7 @@
-// Package identify derives facts about hosts from their evidence: the
-// manufacturer from the MAC's IEEE assignment (MA-L, MA-M, MA-S), the
-// locally-administered flag, and the passive identifiers (plugins.go), which
-// read evidence already captured and send nothing (AGENTS.md rule 11).
+// Package identify looks up a MAC's IEEE assignment (MA-L, MA-M, MA-S): the
+// registrant of the prefix, a hint and never a manufacturer, and the
+// locally-administered flag. There are no classifiers (AGENTS.md rule 11,
+// ADR 0012).
 package identify
 
 import (
@@ -15,8 +15,8 @@ import (
 	"strings"
 	"sync"
 
-	"lan-sentinel/data/oui"
-	"lan-sentinel/internal/ouitable"
+	"github.com/otfabric/lan-tracker/data/oui"
+	"github.com/otfabric/lan-tracker/internal/ouitable"
 )
 
 // prefix lengths in bits, longest first: MA-S, MA-M, MA-L.

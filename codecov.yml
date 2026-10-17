@@ -1,0 +1,12 @@
+# Codecov configuration for lan-tracker.
+# CI uploads the coverage.out of `make check` (coverage of internal/ from
+# every test package), the same metric `make coverage` gates at 90%.
+coverage:
+  status:
+    project:
+      default:
+        target: 90%
+        threshold: 1%
+    patch:
+      default:
+        target: 70%

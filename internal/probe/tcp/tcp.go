@@ -2,16 +2,13 @@
 // to each configured port of each known host, closed at once with a reset
 // without sending anything. Never SYN scanning (AGENTS.md rule 7). Every
 // result becomes a tcp_connect observation: OPEN, REFUSED, TIMEOUT or
-// UNREACHABLE.
+// UNREACHABLE, or LOCAL_ERROR when the kernel has no direct route and source
+// address for the target on the interface (then nothing is dialled).
 //
-// Packets per connect, all within the 3 tokens a connect is charged:
-// OPEN sends SYN, ACK and RST (3); REFUSED sends one SYN (the target's RST
-// ends it); TIMEOUT sends the SYN and at most 2 kernel retransmissions
-// (platform.SYNRetries), never data.
-//
-// The reset close belongs to this bare probe only. Identification probes
-// (internal/probe/idprobe) write a bounded exchange and Close() without
-// SetLinger(0); they are charged BudgetCost, not this engine's 3 tokens.
+// A connect is one start of the budget (ADR 0012), whatever the kernel
+// sends for it: OPEN sends SYN, ACK and RST (3 packets); REFUSED one SYN
+// (the target's RST ends it); TIMEOUT the SYN and at most 2 kernel
+// retransmissions (platform.SYNRetries), never data.
 package tcp
 
 import (
@@ -24,10 +21,10 @@ import (
 	"syscall"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe"
 )
 
 // Engine dials through the platform transmitter.
@@ -38,9 +35,9 @@ type Engine struct {
 // Protocol implements probe.Engine.
 func (Engine) Protocol() probe.Protocol { return probe.TCP }
 
-// Classify maps a connect error to a service state. UNKNOWN is a local
-// failure (no permission, interface gone, out of descriptors), not an
-// answer from the target.
+// Classify maps a connect error to a service state (FR-AC-5). LOCAL_ERROR
+// is a failure here (no permission, interface gone, out of descriptors,
+// no usable source address), not an answer from the target.
 func Classify(err error) observation.ServiceState {
 	var ne net.Error
 	switch {
@@ -53,13 +50,28 @@ func Classify(err error) observation.ServiceState {
 	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTDOWN):
 		return observation.ServiceUnreachable
 	}
-	return observation.ServiceUnknown
+	return observation.ServiceLocalError
+}
+
+// LocalDetail names a local connect failure for the result's detail.
+func LocalDetail(err error) string {
+	switch {
+	case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+		return "permission denied"
+	case errors.Is(err, syscall.EADDRNOTAVAIL):
+		return "no usable source address"
+	case errors.Is(err, syscall.ENODEV), errors.Is(err, syscall.ENXIO):
+		return "interface missing"
+	case errors.Is(err, syscall.EMFILE), errors.Is(err, syscall.ENFILE), errors.Is(err, syscall.ENOBUFS), errors.Is(err, syscall.ENOMEM):
+		return "out of resources"
+	}
+	return "local error"
 }
 
 // Run implements probe.Engine. Probes go port by port across the hosts, so
 // consecutive connects reach different hosts. A connect that fails locally
-// (UNKNOWN) emits no observation: it says nothing about the target, and it
-// fails the pass.
+// (LOCAL_ERROR) is recorded with its detail, so the endpoint shows why it
+// was not tested, and fails the pass; it says nothing about the target.
 func (e Engine) Run(ctx context.Context, p probe.Pass) ([]probe.Result, error) {
 	var (
 		mu       sync.Mutex
@@ -73,9 +85,32 @@ func (e Engine) Run(ctx context.Context, p probe.Pass) ([]probe.Result, error) {
 		results = append(results, r)
 		mu.Unlock()
 	}
+	// A check needs a direct route on the interface and a source address:
+	// SO_BINDTODEVICE picks the interface, it does not make a destination
+	// directly connected. Without one nothing is sent and no start is
+	// spent; the endpoint records why (LOCAL_ERROR), once per pass.
+	unroutable := map[netip.Addr]string{}
+	for _, target := range p.Targets {
+		rt, err := e.TX.Route(p.Link.Name, target)
+		switch {
+		case err != nil:
+			unroutable[target] = "no route via " + p.Link.Name
+		case !rt.Direct(p.Link.Name):
+			unroutable[target] = rt.Problem(p.Link.Name)
+		}
+	}
 loop:
 	for _, tg := range p.TCP {
 		for _, target := range p.Targets {
+			if why, ok := unroutable[target]; ok {
+				add(probe.Result{Target: target, Port: tg.Port, State: string(observation.ServiceLocalError)})
+				p.Emit(observation.Observation{
+					Time: p.Now(), Source: observation.TCPConnect, Interface: p.Link.Name, IP: target,
+					Service: &observation.ServiceResult{Proto: "tcp", Port: tg.Port, State: observation.ServiceLocalError},
+					Meta:    map[string]string{observation.MetaDetail: why},
+				})
+				continue
+			}
 			release, err := p.Budget.Acquire(ctx, probe.TCP, p.Link.Name, target)
 			if errors.Is(err, probe.ErrRefused) {
 				add(probe.Result{Target: target, Port: tg.Port, State: probe.Blocked})
@@ -95,18 +130,19 @@ loop:
 					return
 				}
 				add(probe.Result{Target: target, Port: tg.Port, State: string(state)})
-				if state == observation.ServiceUnknown {
+				o := observation.Observation{
+					Time: p.Now(), Source: observation.TCPConnect, Interface: p.Link.Name, IP: target,
+					Service: &observation.ServiceResult{Proto: "tcp", Port: tg.Port, State: state},
+				}
+				if state == observation.ServiceLocalError {
+					o.Meta = map[string]string{observation.MetaDetail: LocalDetail(err)}
 					mu.Lock()
 					if localErr == nil {
 						localErr = fmt.Errorf("tcp on %s: connect %s: %w", p.Link.Name, addr, err)
 					}
 					mu.Unlock()
-					return
 				}
-				p.Emit(observation.Observation{
-					Time: p.Now(), Source: observation.TCPConnect, Interface: p.Link.Name, IP: target,
-					Service: &observation.ServiceResult{Proto: "tcp", Port: tg.Port, State: state},
-				})
+				p.Emit(o)
 			}(target, tg)
 		}
 	}

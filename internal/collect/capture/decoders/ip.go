@@ -3,7 +3,7 @@ package decoders
 import (
 	"net/netip"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 const (
@@ -57,7 +57,8 @@ func (f *frame) ipv6(b []byte) {
 	f.source(observation.PassiveIPv6, src)
 }
 
-// udp dispatches DHCP (IPv4 only), mDNS responses and DNS responses.
+// udp dispatches DHCP (IPv4 only, including relay-to-server traffic from
+// port 67 to 67), mDNS responses and DNS responses.
 func (f *frame) udp(src netip.Addr, b []byte) {
 	if len(b) < 8 {
 		return
@@ -68,7 +69,7 @@ func (f *frame) udp(src netip.Addr, b []byte) {
 	}
 	payload := b[8:]
 	switch {
-	case f.p.DHCP && src.Is4() && (sport == PortDHCPClient && dport == PortDHCPServer || sport == PortDHCPServer && dport == PortDHCPClient):
+	case f.p.DHCP && src.Is4() && (sport == PortDHCPClient && dport == PortDHCPServer || sport == PortDHCPServer && (dport == PortDHCPClient || dport == PortDHCPServer)):
 		f.dhcp(src, payload)
 	case f.p.MDNS && sport == PortMDNS:
 		f.mdns(src, payload)

@@ -117,7 +117,8 @@ type InterfaceSummary struct {
 	Exclude     []string `json:"exclude,omitempty"`
 	ReplayFile  string   `json:"replay_file,omitempty"`
 	// SweepTargets is how many addresses an ARP sweep covers (after
-	// excludes), and SweepSeconds how long one takes at the ARP rate.
+	// excludes), and SweepSeconds the least time one takes at the ARP
+	// start rate.
 	SweepTargets uint64  `json:"sweep_targets,omitempty"`
 	SweepSeconds float64 `json:"sweep_seconds,omitempty"`
 	// DHCPServers is the DHCP server allowlist; nil without one.
@@ -130,21 +131,23 @@ type Summary struct {
 	// Probes lists enabled periodic probes, e.g. "arp every 5m".
 	Probes  []string           `json:"probes"`
 	Budgets map[string]float64 `json:"budgets"`
-	// MaxPacketsPerSecond is the estimated worst-case probe rate: the sum of
-	// the budgets of enabled probes, capped by the global budget. Zero when
-	// no interface has active discovery enabled.
-	MaxPacketsPerSecond float64 `json:"max_packets_per_second"`
+	// Warnings are cadences the limits cannot keep.
+	Warnings []string `json:"warnings,omitempty"`
+	// MaxStartsPerSecond is the most probe starts per second the enabled
+	// probes can make: the sum of their budgets, capped by the global one.
+	// Kernel packets (TCP handshake, retransmissions, the close) come on
+	// top. Zero when no interface has active discovery enabled.
+	MaxStartsPerSecond float64 `json:"max_starts_per_second"`
 }
 
 // Summarize builds the `config validate` summary.
 func Summarize(cfg *Config) Summary {
 	s := Summary{Budgets: map[string]float64{
-		"global_pps":   cfg.Active.MaxPacketsPerSecond,
-		"arp_pps":      cfg.Active.Budgets.ARP.PacketsPerSecond,
-		"icmp_pps":     cfg.Active.Budgets.ICMP.PacketsPerSecond,
-		"ndp_pps":      cfg.Active.Budgets.NDP.PacketsPerSecond,
-		"udp_pps":      cfg.Active.Budgets.UDP.PacketsPerSecond,
-		"tcp_connects": cfg.Active.Budgets.TCP.ConnectsPerSecond,
+		"global_starts": cfg.Active.MaxStartsPerSecond,
+		"arp_starts":    cfg.Active.Budgets.ARP.StartsPerSecond,
+		"icmp_starts":   cfg.Active.Budgets.ICMP.StartsPerSecond,
+		"tcp_connects":  cfg.Active.Budgets.TCP.ConnectsPerSecond,
+		"name_queries":  cfg.Active.Budgets.Names.StartsPerSecond,
 	}}
 	anyActive := false
 	for _, ic := range cfg.Interfaces {
@@ -167,8 +170,10 @@ func Summarize(cfg *Config) Summary {
 		}
 		if ic.Active.Enabled {
 			is.SweepTargets = SweepTargets(ic)
-			if r := cfg.Active.Budgets.ARP.PacketsPerSecond; r > 0 {
-				is.SweepSeconds = float64(is.SweepTargets) / r * 1.02 // paced 2% below the rate
+			is.SweepSeconds = SweepSeconds(cfg.Active, is.SweepTargets)
+			if a := cfg.Active; a.ARP.Enabled && is.SweepSeconds > a.ARP.Interval.D().Seconds() {
+				s.Warnings = append(s.Warnings, fmt.Sprintf("%s: a sweep takes about %.0f s, longer than active.arp.interval (%s): "+
+					"passes run back to back, never in parallel", ic.Name, is.SweepSeconds, a.ARP.Interval))
 			}
 		}
 		if ic.DHCP.Servers != nil {
@@ -186,11 +191,11 @@ func Summarize(cfg *Config) Summary {
 	var rate float64
 	if a.ARP.Enabled {
 		s.Probes = append(s.Probes, "arp every "+a.ARP.Interval.String())
-		rate += a.Budgets.ARP.PacketsPerSecond
+		rate += a.Budgets.ARP.StartsPerSecond
 	}
 	if a.ICMP.Enabled {
 		s.Probes = append(s.Probes, "icmp every "+a.ICMP.Interval.String())
-		rate += a.Budgets.ICMP.PacketsPerSecond
+		rate += a.Budgets.ICMP.StartsPerSecond
 	}
 	if a.TCP.Enabled {
 		ports := make([]string, len(a.TCP.Targets))
@@ -201,34 +206,51 @@ func Summarize(cfg *Config) Summary {
 			}
 		}
 		s.Probes = append(s.Probes, "tcp "+strings.Join(ports, ", ")+" every "+a.TCP.Interval.String())
-		rate += a.Budgets.TCP.ConnectsPerSecond * TCPConnectTokens
+		rate += a.Budgets.TCP.ConnectsPerSecond
 	}
-	if a.UDP.Enabled && len(a.UDP.Probes) > 0 {
-		s.Probes = append(s.Probes, "udp "+strings.Join(a.UDP.Probes, ", ")+" every "+a.UDP.Interval.String())
-		rate += a.Budgets.UDP.PacketsPerSecond
-	}
-	var identify []string
-	seen := map[string]bool{}
-	for _, ic := range cfg.Interfaces {
-		for _, e := range ic.Active.Identify {
-			if e.Name == "" || seen[e.Name] {
-				continue
-			}
-			seen[e.Name] = true
-			identify = append(identify, e.Name)
+	if a.Names.Enabled {
+		var what []string
+		if a.Names.MDNS {
+			what = append(what, "mdns")
 		}
-	}
-	if len(identify) > 0 {
-		s.Probes = append(s.Probes, "identify "+strings.Join(identify, ", ")+" every "+a.Identify.Interval.String())
+		if len(a.Names.Resolvers) > 0 {
+			r := fmt.Sprintf("dns via %d resolver", len(a.Names.Resolvers))
+			if len(a.Names.Resolvers) > 1 {
+				r += "s"
+			}
+			what = append(what, r)
+		}
+		s.Probes = append(s.Probes, "names ("+strings.Join(what, ", ")+") every "+a.Names.Interval.String())
+		rate += a.Budgets.Names.StartsPerSecond
 	}
 	if anyActive {
-		s.MaxPacketsPerSecond = math.Min(rate, a.MaxPacketsPerSecond)
+		s.MaxStartsPerSecond = math.Min(rate, a.MaxStartsPerSecond)
 	}
 	return s
 }
 
+// sweepReplyWait is how long an unanswered ARP request holds its
+// concurrency slot (probe.DefaultReplyTimeout).
+const sweepReplyWait = 1.0
+
+// SweepSeconds is the least time a sweep of n addresses takes, most of
+// them unanswered: paced 2% below the ARP and global start rates, and with
+// each request holding one of active.max_concurrent_jobs slots for its
+// reply wait.
+func SweepSeconds(a ActiveConfig, n uint64) float64 {
+	rate := min(a.Budgets.ARP.StartsPerSecond, a.MaxStartsPerSecond)
+	if rate <= 0 || n == 0 {
+		return 0
+	}
+	per := 1.02 / rate
+	if a.MaxConcurrentJobs > 0 {
+		per = max(per, sweepReplyWait/float64(a.MaxConcurrentJobs))
+	}
+	return float64(n) * per
+}
+
 // ActiveText says in one line what active discovery runs, for the log at
-// start-up and on reload: "arp every 5m on eth0 (192.168.0.0/24 exclude
+// start-up and on reload: "arp every 15m on eth0 (192.168.0.0/24 exclude
 // 192.168.0.1)", "off", or "no probe enabled on eth0 (...)".
 func (s Summary) ActiveText() string {
 	var on []string

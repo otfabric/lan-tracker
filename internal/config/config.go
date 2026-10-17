@@ -1,13 +1,18 @@
-// Package config defines the LAN Sentinel configuration schema and loads it
-// from compiled defaults, the YAML file, LAN_SENTINEL_* environment variables
-// and command-line flags, in that order of increasing precedence, with strict
-// validation. See docs/ARCHITECTURE.md §6.
+// Package config defines the LAN Tracker configuration schema (version 2)
+// and loads it from compiled defaults, the YAML file, LAN_TRACKER_*
+// environment variables and command-line flags, in that order of
+// increasing precedence, with strict validation. See docs/ARCHITECTURE.md
+// §6. Convert converts a LAN Sentinel version-1 file (convert.go).
 package config
 
 import (
 	"net/netip"
 	"slices"
 )
+
+// SchemaVersion is the configuration schema this binary reads. Version 1
+// was LAN Sentinel's; `lan-tracker config convert` converts it.
+const SchemaVersion = 2
 
 // Config is the complete configuration.
 type Config struct {
@@ -67,19 +72,6 @@ type InterfaceActive struct {
 	Enabled  bool           `yaml:"enabled" json:"enabled"`
 	Networks []netip.Prefix `yaml:"networks,omitempty" json:"networks,omitempty"`
 	Exclude  []AddrOrPrefix `yaml:"exclude,omitempty" json:"exclude,omitempty"`
-	// Identify is the opt-in identification probes on this interface
-	// (ADR 0011). Object form only; a string list is invalid. Empty
-	// (the default) sends nothing.
-	Identify []InterfaceIdentify `yaml:"identify,omitempty" json:"identify,omitempty"`
-}
-
-// InterfaceIdentify is one named identification probe on an interface.
-// Omitted options use active.identify.probes.
-type InterfaceIdentify struct {
-	Name      string `yaml:"name" json:"name"`
-	UnitID    *int   `yaml:"unit_id,omitempty" json:"unit_id,omitempty"`
-	Community string `yaml:"community,omitempty" json:"community,omitempty"`
-	SNI       string `yaml:"sni,omitempty" json:"sni,omitempty"`
 }
 
 // InterfaceDHCP configures DHCP server monitoring on one interface
@@ -131,11 +123,17 @@ type NeighborConfig struct {
 }
 
 // ActiveConfig holds global active-discovery settings and safety budgets.
+// Rates are probe starts per second (ADR 0012): one ARP request, ICMP echo,
+// name query or TCP connect initiation is one start; the kernel's own
+// packets (handshake ACKs, retransmissions, the close) are not paced one by
+// one.
 type ActiveConfig struct {
-	StartupDelay        Duration `yaml:"startup_delay" json:"startup_delay"`
-	Jitter              float64  `yaml:"jitter" json:"jitter"`
-	MaxPacketsPerSecond float64  `yaml:"max_packets_per_second" json:"max_packets_per_second"`
-	MaxConcurrentProbes int      `yaml:"max_concurrent_probes" json:"max_concurrent_probes"`
+	StartupDelay       Duration `yaml:"startup_delay" json:"startup_delay"`
+	Jitter             float64  `yaml:"jitter" json:"jitter"`
+	MaxStartsPerSecond float64  `yaml:"max_starts_per_second" json:"max_starts_per_second"`
+	// MaxConcurrentJobs caps the probes in flight across every engine and
+	// interface, name queries included.
+	MaxConcurrentJobs   int      `yaml:"max_concurrent_jobs" json:"max_concurrent_jobs"`
 	MinTargetInterval   Duration `yaml:"min_target_interval" json:"min_target_interval"`
 	Budgets             Budgets  `yaml:"budgets" json:"budgets"`
 	MaxAutoScanPrefixV4 int      `yaml:"max_auto_scan_prefix_v4" json:"max_auto_scan_prefix_v4"`
@@ -148,102 +146,51 @@ type ActiveConfig struct {
 	ARP             ProbeConfig    `yaml:"arp" json:"arp"`
 	ICMP            ProbeConfig    `yaml:"icmp" json:"icmp"`
 	TCP             TCPProbeConfig `yaml:"tcp" json:"tcp"`
-	UDP             UDPProbeConfig `yaml:"udp" json:"udp"`
-	Identify        IdentifyConfig `yaml:"identify" json:"identify"`
+	Names           NamesConfig    `yaml:"names" json:"names"`
 }
 
-// UDPProbeNames are the protocol-specific UDP probes (FR-AC-6).
-var UDPProbeNames = []string{"ntp", "enip"}
-
-// IdentifyProbeNames are the identification probes an interface may name
-// (ADR 0011). A name that is not on this list fails validation.
-var IdentifyProbeNames = []string{"modbus", "http", "tls", "snmp", "ssh-banner", "telnet", "ftp"}
-
-// IdentifyConfig is the global identification-probe schedule and defaults
-// (FR-AC-11). Interval is how often the daemon looks for hosts it has
-// never attempted, not a repeat period.
-type IdentifyConfig struct {
-	Interval   Duration              `yaml:"interval" json:"interval"`
-	Timeout    Duration              `yaml:"timeout" json:"timeout"`
-	HostMaxAge Duration              `yaml:"host_max_age" json:"host_max_age"`
-	Probes     IdentifyProbeDefaults `yaml:"probes" json:"probes"`
-}
-
-// IdentifyProbeDefaults are the compiled defaults for probe options.
-type IdentifyProbeDefaults struct {
-	Modbus IdentifyModbusOptions `yaml:"modbus" json:"modbus"`
-	TLS    IdentifyTLSOptions    `yaml:"tls" json:"tls"`
-	SNMP   IdentifySNMPOptions   `yaml:"snmp" json:"snmp"`
-}
-
-// IdentifyModbusOptions are the defaults for the Modbus FC 43/14 probe.
-type IdentifyModbusOptions struct {
-	UnitID int `yaml:"unit_id" json:"unit_id"`
-}
-
-// IdentifyTLSOptions are the defaults for the TLS handshake. SNI is empty
-// (none) or auto (preferred_name when it is a DNS name).
-type IdentifyTLSOptions struct {
-	SNI string `yaml:"sni" json:"sni"`
-}
-
-// IdentifySNMPOptions are the defaults for the SNMPv2c GetRequest.
-type IdentifySNMPOptions struct {
-	Community string `yaml:"community" json:"community"`
-}
-
-// UnitIDOf returns the Modbus unit id for an interface entry.
-func (c IdentifyConfig) UnitIDOf(e InterfaceIdentify) int {
-	if e.UnitID != nil {
-		return *e.UnitID
-	}
-	if c.Probes.Modbus.UnitID != 0 {
-		return c.Probes.Modbus.UnitID
-	}
-	return 1
-}
-
-// CommunityOf returns the SNMPv2c community for an interface entry.
-// Empty when neither the entry nor the global default is set; validation
-// requires a value when the interface names snmp.
-func (c IdentifyConfig) CommunityOf(e InterfaceIdentify) string {
-	if e.Community != "" {
-		return e.Community
-	}
-	return c.Probes.SNMP.Community
-}
-
-// UDPProbeConfig configures periodic protocol-specific UDP probes.
-type UDPProbeConfig struct {
+// NamesConfig configures the name queries (FR-AC-12): they ask only about
+// names and addresses already known, and DNS-SD types the operator names,
+// on interfaces with active discovery enabled.
+type NamesConfig struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
 	Interval Duration `yaml:"interval" json:"interval"`
-	Probes   []string `yaml:"probes" json:"probes"`
+	// MDNS sends one-shot mDNS queries for the interface's known .local
+	// names and for ServiceTypes.
+	MDNS bool `yaml:"mdns" json:"mdns"`
+	// ServiceTypes are DNS-SD types to enumerate, e.g. _http._tcp.
+	ServiceTypes []string `yaml:"service_types" json:"service_types"`
+	// EnumerateServices adds one _services._dns-sd._udp.local query per
+	// pass; the types it returns are not queried automatically.
+	EnumerateServices bool `yaml:"enumerate_services" json:"enumerate_services"`
+	// Resolvers are the unicast DNS servers asked for PTR records of known
+	// addresses and A/AAAA records of known DNS names; none: no unicast
+	// DNS queries. Observed traffic is never sent to other resolvers.
+	Resolvers []netip.Addr `yaml:"resolvers" json:"resolvers"`
+	// MaxQueriesPerPass bounds one pass on one interface.
+	MaxQueriesPerPass int `yaml:"max_queries_per_pass" json:"max_queries_per_pass"`
 }
 
-// Budgets are the per-protocol rate limits beneath the global packet budget.
+// Budgets are the per-protocol start rates beneath the global one.
 type Budgets struct {
-	ARP  RateBudget `yaml:"arp" json:"arp"`
-	ICMP RateBudget `yaml:"icmp" json:"icmp"`
-	NDP  RateBudget `yaml:"ndp" json:"ndp"`
-	UDP  RateBudget `yaml:"udp" json:"udp"`
-	TCP  TCPBudget  `yaml:"tcp" json:"tcp"`
+	ARP   StartBudget `yaml:"arp" json:"arp"`
+	ICMP  StartBudget `yaml:"icmp" json:"icmp"`
+	Names StartBudget `yaml:"names" json:"names"`
+	TCP   TCPBudget   `yaml:"tcp" json:"tcp"`
 }
 
-// RateBudget limits a packet-based probe engine.
-type RateBudget struct {
-	PacketsPerSecond float64 `yaml:"packets_per_second" json:"packets_per_second"`
+// StartBudget limits how many probes of one protocol start per second.
+type StartBudget struct {
+	StartsPerSecond float64 `yaml:"starts_per_second" json:"starts_per_second"`
 }
 
-// TCPBudget limits the TCP connect engine.
+// TCPBudget limits the TCP connect engine. A connect is one start of the
+// global budget.
 type TCPBudget struct {
 	ConnectsPerSecond         float64 `yaml:"connects_per_second" json:"connects_per_second"`
 	MaxConcurrentPerInterface int     `yaml:"max_concurrent_per_interface" json:"max_concurrent_per_interface"`
 	MaxConcurrentPerHost      int     `yaml:"max_concurrent_per_host" json:"max_concurrent_per_host"`
 }
-
-// TCPConnectTokens is how many tokens of the global packet budget one TCP
-// connect consumes (SYN, ACK, FIN/RST).
-const TCPConnectTokens = 3
 
 // ProbeConfig enables a periodic probe.
 type ProbeConfig struct {
@@ -267,10 +214,9 @@ type TCPTarget struct {
 
 // ProfileConfig is a named on-demand scan profile.
 type ProfileConfig struct {
-	ARP  bool     `yaml:"arp" json:"arp"`
-	ICMP bool     `yaml:"icmp" json:"icmp"`
-	TCP  []int    `yaml:"tcp" json:"tcp"`
-	UDP  []string `yaml:"udp,omitempty" json:"udp,omitempty"`
+	ARP  bool  `yaml:"arp" json:"arp"`
+	ICMP bool  `yaml:"icmp" json:"icmp"`
+	TCP  []int `yaml:"tcp" json:"tcp"`
 }
 
 // PresenceConfig holds presence thresholds (time since last observation).
@@ -280,29 +226,19 @@ type PresenceConfig struct {
 	Stale  Duration `yaml:"stale" json:"stale"`
 }
 
-// IdentityConfig holds correlation and naming settings.
+// IdentityConfig holds correlation and naming settings. Addresses of one
+// MAC are independent: a new address never closes another (there is no
+// overlap window); an address not confirmed for AddressExpiry while the
+// host was seen is closed as an inference (docs/DATA_MODEL.md §5.3).
 type IdentityConfig struct {
 	HostnamePreference []string `yaml:"hostname_preference" json:"hostname_preference"`
-	AddressOverlap     Duration `yaml:"address_overlap" json:"address_overlap"`
 	AddressExpiry      Duration `yaml:"address_expiry" json:"address_expiry"`
-	// NameExpiry marks a name not confirmed for this long as stale when it
-	// is read; it never closes the name (docs/DATA_MODEL.md §5.4).
+	// NameExpiry marks a name not confirmed for this long, and without a
+	// record TTL, as stale when it is read; it never closes the name
+	// (docs/DATA_MODEL.md §5.4).
 	NameExpiry        Duration `yaml:"name_expiry" json:"name_expiry"`
 	ProxyARPThreshold int      `yaml:"proxy_arp_threshold" json:"proxy_arp_threshold"`
 	OUIOverride       string   `yaml:"oui_override" json:"oui_override"`
-	// Identifiers enables the passive identification plugins
-	// (docs/DATA_MODEL.md §5.7).
-	Identifiers IdentifierToggles `yaml:"identifiers" json:"identifiers"`
-}
-
-// IdentifierToggles enables each passive identifier: device type, OS and
-// model from mDNS services, DHCP vendor class and request list, hostname
-// patterns and LLDP capabilities.
-type IdentifierToggles struct {
-	MDNS     bool `yaml:"mdns" json:"mdns"`
-	DHCP     bool `yaml:"dhcp" json:"dhcp"`
-	Hostname bool `yaml:"hostname" json:"hostname"`
-	LLDP     bool `yaml:"lldp" json:"lldp"`
 }
 
 // StorageConfig configures the SQLite database.

@@ -1,5 +1,5 @@
 // Package api is the local REST API (docs/API.md): JSON over the Unix socket
-// /run/lan-sentinel/api.sock (mode 0660), and optionally over a 127.0.0.1
+// /run/lan-tracker/api.sock (mode 0660), and optionally over a 127.0.0.1
 // listener that also serves /metrics. It reads through store.Reader, the
 // same queries `--offline` uses, so online and offline answers agree. The
 // client in this package is what the CLI uses online.
@@ -20,11 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // Health states of `daemon status`.
@@ -124,6 +124,8 @@ func New(o Options) *Server {
 		"/v1/events/stream":       s.stream,
 		"/v1/services":            s.services,
 		"/v1/dhcp/servers":        s.dhcpServers,
+		"/v1/dhcp/leases":         s.dhcpLeases,
+		"/v1/dhcp/exchanges":      s.dhcpExchanges,
 		"/v1/config":              s.config,
 		"/v1/db":                  s.db,
 		"/v1/db/check":            s.dbCheck,
@@ -138,7 +140,6 @@ func New(o Options) *Server {
 		"/v1/config/reload":  s.configReload,
 
 		"/v1/hosts/{id}/description": s.hostDescription,
-		"/v1/hosts/{id}/identify":    s.hostIdentify,
 	} {
 		s.mux.HandleFunc(path, postOnly(h))
 	}
@@ -293,10 +294,6 @@ type errorBody struct {
 	Code  string `json:"code,omitempty"`
 }
 
-// CodeIdentifyRefused is the code of a 409 from /v1/hosts/{id}/identify:
-// the policy refused the probe and nothing was sent (ErrIdentifyRefused).
-const CodeIdentifyRefused = "identify_refused"
-
 // badParam is an invalid query parameter.
 type badParam struct{ msg string }
 
@@ -430,7 +427,7 @@ func (s *Server) interfaces(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
 	p := &params{r: r}
 	f := store.HostFilter{Interface: p.str("interface"), Query: p.str("q"), QueryKind: p.kind(), Vendor: p.str("vendor"),
-		Device: p.str("device"), Port: p.int("port"), SeenSince: p.time("seen_since")}
+		Port: p.int("port"), SeenSince: p.time("seen_since"), Description: p.str("description")}
 	switch pr := p.str("presence"); pr {
 	case "", "any":
 	case "live":
@@ -632,7 +629,10 @@ func matches(e store.Event, iface string, types []string, port int) bool {
 
 func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 	p := &params{r: r}
-	f := store.ServiceFilter{Port: p.int("port"), State: p.str("state"), Interface: p.str("interface")}
+	f := store.ServiceFilter{Port: p.int("port"), State: p.str("state"), Interface: p.str("interface"), IP: p.str("ip")}
+	if at := p.time("at"); !at.IsZero() {
+		f.At = &at
+	}
 	if p.err != nil {
 		s.fail(w, p.err)
 		return
@@ -652,6 +652,28 @@ func (s *Server) dhcpServers(w http.ResponseWriter, r *http.Request) {
 	}
 	servers, err := s.o.Reader.DHCPServers(r.Context(), f)
 	s.reply(w, servers, err)
+}
+
+func (s *Server) dhcpLeases(w http.ResponseWriter, r *http.Request) {
+	p := &params{r: r}
+	f := store.DHCPLeaseFilter{Interface: p.str("interface"), MAC: p.str("mac"), IP: p.str("ip"), Open: p.bool("open"), Limit: p.int("limit")}
+	if p.err != nil {
+		s.fail(w, p.err)
+		return
+	}
+	leases, err := s.o.Reader.DHCPLeases(r.Context(), f)
+	s.reply(w, leases, err)
+}
+
+func (s *Server) dhcpExchanges(w http.ResponseWriter, r *http.Request) {
+	p := &params{r: r}
+	f := store.DHCPExchangeFilter{Interface: p.str("interface"), MAC: p.str("mac"), Since: p.time("since"), Limit: p.int("limit")}
+	if p.err != nil {
+		s.fail(w, p.err)
+		return
+	}
+	exchanges, err := s.o.Reader.DHCPExchanges(r.Context(), f)
+	s.reply(w, exchanges, err)
 }
 
 func (s *Server) config(w http.ResponseWriter, _ *http.Request) {

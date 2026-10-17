@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"lan-sentinel/internal/service"
+	"github.com/otfabric/lan-tracker/internal/service"
 )
 
 // Levels, including the two custom ones.

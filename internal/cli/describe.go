@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // hostsSetCmd sets metadata on a host: for now its description
@@ -17,7 +17,7 @@ func (a *app) hostsSetCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "set <host> --description TEXT",
 		Short:   "Set metadata on a host: its description",
-		Example: "  sudo lan-sentinel hosts set 192.168.0.99 --description \"QNAP NAS\"",
+		Example: "  sudo lan-tracker hosts set 192.168.0.99 --description \"QNAP NAS\"",
 		Long: "Sets a host's description, free text for context such as \"Solar panel rooftop\"\n" +
 			"or \"Mobile phone Bart\": one line of at most 200 characters. The host is a host ID,\n" +
 			"MAC, IP or hostname that matches exactly one current host; add --interface or\n" +
@@ -48,7 +48,7 @@ func (a *app) hostsUnsetCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "unset <host> --description",
 		Short:   "Remove metadata from a host: its description",
-		Example: "  sudo lan-sentinel hosts unset 192.168.0.99 --description",
+		Example: "  sudo lan-tracker hosts unset 192.168.0.99 --description",
 		Long: "Removes a host's description, recorded as HOST_DESCRIBED with the calling user.\n" +
 			"The host is given as for hosts set. Needs the daemon.",
 		Args: cobra.MaximumNArgs(1),

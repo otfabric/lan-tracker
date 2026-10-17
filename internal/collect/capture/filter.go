@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/net/bpf"
 
-	"lan-sentinel/internal/collect/capture/decoders"
+	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
 )
 
 // Snap lengths returned by the filter: whole frames for the protocols the

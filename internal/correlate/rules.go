@@ -4,12 +4,13 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 func (c *Correlator) hostByID(id string) *host {
@@ -38,7 +39,7 @@ func (c *Correlator) observe(ctx context.Context, o observation.Observation) {
 	if ip.IsValid() && !ip.IsGlobalUnicast() && !ip.IsLinkLocalUnicast() {
 		ip = netip.Addr{}
 	}
-	if mac == nil && !ip.IsValid() {
+	if mac == nil && !ip.IsValid() && len(o.Records) == 0 {
 		c.ignored.Add(1)
 		return
 	}
@@ -49,69 +50,72 @@ func (c *Correlator) observe(ctx context.Context, o observation.Observation) {
 	c.st.nextObservationID++
 	obsID := c.st.nextObservationID
 	ev := events.EvidenceFrom(o)
+	kind := o.Evidence()
 
-	// §5.1: bind the observation to a host. A MAC-less observation that is
-	// not evidence of presence (a DNS answer, a TCP timeout) describes the
-	// holder of the IP but neither updates presence nor confirms the
-	// binding.
-	var h *host
-	discovered, present := false, true
-	if mac != nil {
-		h, discovered = c.bindMAC(ctx, n, mac, o, obsID, ev)
-	} else if hs := c.st.holders[ipKey{n.id, ip}]; len(hs) == 1 {
-		h, present = hs[0].host, o.ProvesPresence()
-		if present {
-			c.seen(ctx, h, o, ev)
+	// §5.1: bind the observation to a host, by the kind of evidence it is
+	// (§2). A DHCP server's lease assertion creates no host and binds
+	// nothing (DHCP leases keep it, §5.6). A MAC-less observation describes
+	// the one MAC that holds its IP, if exactly one does and its binding was
+	// confirmed within identity.address_expiry; only an answer makes that
+	// host present and confirms the binding.
+	var h, holder *host
+	discovered := false
+	switch {
+	case mac != nil && o.Source == observation.PassiveDHCPLease:
+		h = c.st.hosts[n.id][mac.String()]
+	case mac != nil:
+		h, discovered = c.bindMAC(ctx, n, mac, o, obsID, ev, kind)
+	case ip.IsValid():
+		if hh := c.st.soleHolder(ipKey{n.id, ip}, o.Time, c.cfg.Load().Identity.AddressExpiry.D()); hh != nil {
+			h, holder = hh, hh
+			if kind.Present() {
+				c.seen(ctx, h, o, ev, kind)
+			}
 		}
 	}
 	hostID := ""
 	if h != nil {
 		hostID = h.id
-	} else if hid := o.Meta[observation.MetaHostID]; hid != "" {
-		if found := c.hostByID(hid); found != nil {
-			h, hostID = found, hid
-		}
-	}
-	if h == nil {
+	} else {
 		c.unbound.Add(1)
 		c.count(o.Source, c.unboundBySource)
 	}
 	c.dbObservation(ctx, obsID, n.id, o, hostID)
-	if h == nil {
-		return
+
+	if h != nil && ip.IsValid() && o.Source != observation.PassiveDHCPLease && kind != observation.EvidenceNone {
+		c.attribute(ctx, h, ip, o, obsID, ev, discovered, kind != observation.EvidenceCached)
 	}
-	if o.Source == observation.IdentifyProbe {
-		c.recordIdentifyAttempt(ctx, h, o, obsID)
+	if o.Service != nil && o.Source == observation.TCPConnect && mac == nil && ip.IsValid() {
+		c.endpointResult(ctx, n, ip, holder, o, obsID, ev)
 	}
-	if ip.IsValid() && present {
-		c.attribute(ctx, h, ip, o, obsID, ev, discovered)
+	sender := h
+	if mac == nil || o.Source == observation.PassiveDHCPLease {
+		sender = nil // a NAME belongs only to the device that sent it
 	}
-	if o.Service != nil {
-		c.service(ctx, h, *o.Service, o, obsID, ev)
-		if o.Meta[observation.MetaProbe] != "" {
-			c.probeDetails(ctx, h, o, obsID, ev)
+	c.names(ctx, n, sender, o, obsID, ev)
+	if m := dhcpOf(o); m != nil {
+		if o.Source == observation.PassiveDHCPServer && h != nil && mac != nil { // the sender's own MAC, not an IP holder's
+			c.dhcpServerReply(ctx, h, m, o, obsID, ev)
 		}
-	}
-	if o.Hostname != "" && validNameType(o.NameType) {
-		c.name(ctx, h, o, obsID, ev)
-	}
-	if o.Source == observation.PassiveDHCPServer && mac != nil { // the sender's own MAC, not an IP holder's
-		c.dhcpServerReply(ctx, h, o, obsID, ev)
-	}
-	if present {
-		c.identify(ctx, h, o, obsID, ev)
+		c.dhcpMessage(ctx, n, m, o, obsID, ev)
 	}
 }
 
-// bindMAC returns the host for (context, MAC), creating it if needed.
-func (c *Correlator) bindMAC(ctx context.Context, n *netContext, mac net.HardwareAddr, o observation.Observation, obsID int64, ev events.Evidence) (*host, bool) {
+// bindMAC returns the host for (context, MAC), creating it if needed. A
+// known host is refreshed only by presence evidence: a cache entry (a
+// STALE neighbour) records a MAC never seen before, but never makes a
+// known one present again.
+func (c *Correlator) bindMAC(ctx context.Context, n *netContext, mac net.HardwareAddr, o observation.Observation, obsID int64, ev events.Evidence, kind observation.Evidence) (*host, bool) {
 	key := mac.String()
 	if h := c.st.hosts[n.id][key]; h != nil {
-		c.seen(ctx, h, o, ev)
+		if kind.Present() {
+			c.seen(ctx, h, o, ev, kind)
+		}
 		return h, false
 	}
 	h := newHost()
 	h.id, h.ctx, h.mac, h.firstSeen, h.lastSeen, h.evidence = c.newID(), n, append(net.HardwareAddr(nil), mac...), o.Time, o.Time, ev
+	h.mark(o, kind)
 	if c.vendors != nil {
 		h.vendor, _ = c.vendors.Lookup(mac)
 	}
@@ -123,7 +127,10 @@ func (c *Correlator) bindMAC(ctx context.Context, n *netContext, mac net.Hardwar
 	e.New, e.ObservationID = key, obsID
 	c.emit(ctx, e)
 
-	// The same MAC known on another interface is another host (§1).
+	// The same MAC known on another interface is another host (§1). Seeing
+	// it on a second interface does not establish that it moved (a bridge,
+	// a mirror port and a duplicated MAC look the same), so the event says
+	// only that it is also observed here.
 	var other *host
 	for _, x := range c.st.hostsByMAC[key] {
 		if x != h && (other == nil || x.lastSeen.After(other.lastSeen)) {
@@ -131,18 +138,46 @@ func (c *Correlator) bindMAC(ctx context.Context, n *netContext, mac net.Hardwar
 		}
 	}
 	if other != nil {
-		e := hostEvent(events.MACMoved, o.Time, h, string(o.Source), ev)
+		e := hostEvent(events.MACAlsoObserved, o.Time, h, string(o.Source), ev)
 		e.Old, e.New, e.RelatedHostID, e.RelatedMAC, e.ObservationID = other.ctx.iface, n.iface, other.id, other.mac.String(), obsID
 		c.emit(ctx, e)
 	}
 	return h, true
 }
 
-// seen records that h was observed.
-func (c *Correlator) seen(ctx context.Context, h *host, o observation.Observation, ev events.Evidence) {
+// frameSources are address evidence that is also a frame from the MAC.
+var frameSources = []observation.Source{observation.PassiveARP, observation.ARPScan, observation.PassiveNDP, observation.NDPProbe}
+
+// mark moves the time of o's kind of evidence on h; it reports whether
+// one moved.
+func (h *host) mark(o observation.Observation, kind observation.Evidence) bool {
+	later := func(t *time.Time) bool {
+		if o.Time.After(*t) {
+			*t = o.Time
+			return true
+		}
+		return false
+	}
 	moved := false
+	switch kind {
+	case observation.EvidenceFrame:
+		moved = later(&h.lastFrame)
+	case observation.EvidenceAddress:
+		moved = later(&h.lastAddress)
+		if slices.Contains(frameSources, o.Source) {
+			moved = later(&h.lastFrame) || moved
+		}
+	case observation.EvidenceAnswer:
+		moved = later(&h.lastAnswer)
+	}
+	return moved
+}
+
+// seen records presence evidence of h.
+func (c *Correlator) seen(ctx context.Context, h *host, o observation.Observation, ev events.Evidence, kind observation.Evidence) {
+	moved := h.mark(o, kind)
 	if o.Time.After(h.lastSeen) {
-		h.lastSeen, h.evidence, moved = o.Time, ev, true
+		h.lastSeen, h.evidence = o.Time, ev
 	}
 	p := c.presenceAt(h.lastSeen, c.refTime(o.Time))
 	if h.presence == Missing && p != Missing {
@@ -205,8 +240,10 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
 }
 
-// attribute applies the address binding lifecycle (§5.3) for ip on h.
-func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o observation.Observation, obsID int64, ev events.Evidence, discovered bool) {
+// attribute applies the address binding lifecycle (§5.3) for ip on h. A
+// cache entry (refresh false) may open a binding the host never had but
+// never confirms one it has.
+func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o observation.Observation, obsID int64, ev events.Evidence, discovered, refresh bool) {
 	n := h.ctx
 	if !onLink(n, ip, o.Source) || notHostAddress(n, ip) {
 		return
@@ -220,6 +257,9 @@ func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o ob
 		return
 	}
 	if b := h.bindings[ip]; b != nil {
+		if !refresh {
+			return
+		}
 		if o.Time.After(b.lastSeen) {
 			b.lastSeen = o.Time
 		}
@@ -231,14 +271,17 @@ func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o ob
 		return
 	}
 	cause := string(o.Source)
-	idCfg := c.cfg.Load().Identity
 
 	// Takeover from hosts that are no longer live; conflict with live ones.
 	var rivals []*host
+	var wasConflict *host // a closed holder that was in conflict
 	for _, g := range append([]*binding(nil), c.st.holders[k]...) {
 		if c.presenceAt(g.host.lastSeen, o.Time).live() {
 			rivals = append(rivals, g.host)
 			continue
+		}
+		if g.conflict {
+			wasConflict = g.host
 		}
 		c.close(g, o.Time)
 		e := hostEvent(events.IPRemoved, o.Time, g.host, cause, ev)
@@ -246,48 +289,28 @@ func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o ob
 		c.emit(ctx, e)
 	}
 
-	// Replacement (IPv4 only): older IPv4 bindings not confirmed within the
-	// overlap window are closed.
-	var replaced []*binding
-	if ip.Is4() {
-		for _, b := range h.bindings {
-			if b.ip.Is4() && o.Time.Sub(b.lastSeen) >= idCfg.AddressOverlap.D() {
-				replaced = append(replaced, b)
-			}
-		}
-		sort.Slice(replaced, func(i, j int) bool {
-			if !replaced[i].lastSeen.Equal(replaced[j].lastSeen) {
-				return replaced[i].lastSeen.After(replaced[j].lastSeen)
-			}
-			return replaced[i].ip.Less(replaced[j].ip)
-		})
-		for _, b := range replaced {
-			c.close(b, o.Time)
-		}
-	}
-
+	// A MAC's addresses are independent (§5.3): a new address never ends
+	// another. Equipment with a production and a maintenance address, or
+	// one moving to a new address while the old one is merely quiet, keeps
+	// both until each ages out on its own evidence.
 	c.st.nextAddressID++
 	nb := &binding{id: c.st.nextAddressID, host: h, ip: ip, conflict: len(rivals) > 0, firstSeen: o.Time, lastSeen: o.Time, arpOnly: reply}
 	c.st.addBinding(nb)
 	c.dbOpenBinding(ctx, nb, o.Source)
 	c.changed(h, k, o.Time)
 
-	switch {
-	case len(replaced) > 0:
-		e := hostEvent(events.IPChanged, o.Time, h, cause, ev)
-		e.Old, e.New, e.ObservationID = replaced[0].ip.String(), ip.String(), obsID
-		c.emit(ctx, e)
-		for _, b := range replaced[1:] {
-			e := hostEvent(events.IPRemoved, o.Time, h, cause, ev)
-			e.Old, e.ObservationID = b.ip.String(), obsID
-			c.emit(ctx, e)
-		}
-	case !discovered:
+	if !discovered {
 		e := hostEvent(events.IPAdded, o.Time, h, cause, ev)
 		e.New, e.ObservationID = ip.String(), obsID
 		c.emit(ctx, e)
 	}
 
+	if len(rivals) == 0 && wasConflict != nil {
+		// The takeover ended a conflict: one MAC holds the address again.
+		e := hostEvent(events.DuplicateIPResolved, o.Time, h, cause, ev)
+		e.New, e.RelatedHostID, e.RelatedMAC, e.ObservationID = ip.String(), wasConflict.id, wasConflict.mac.String(), obsID
+		c.emit(ctx, e)
+	}
 	if len(rivals) > 0 {
 		sort.Slice(rivals, func(i, j int) bool { return rivals[i].lastSeen.After(rivals[j].lastSeen) })
 		for _, g := range c.st.holders[k] {
@@ -299,10 +322,6 @@ func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o ob
 		e := hostEvent(events.DuplicateIPDetected, o.Time, h, cause, ev)
 		e.New, e.RelatedHostID, e.RelatedMAC, e.ObservationID = ip.String(), rivals[0].id, rivals[0].mac.String(), obsID
 		c.emit(ctx, e)
-	}
-
-	for _, b := range replaced {
-		c.resolve(ctx, ipKey{n.id, b.ip}, o.Time, cause, obsID, ev, h)
 	}
 }
 
@@ -334,34 +353,6 @@ func (c *Correlator) resolve(ctx context.Context, k ipKey, t time.Time, cause st
 	c.emit(ctx, e)
 }
 
-// service applies §5.5.
-func (c *Correlator) service(ctx context.Context, h *host, svc observation.ServiceResult, o observation.Observation, obsID int64, ev events.Evidence) {
-	key := svc.Key()
-	row := h.services[key]
-	if row != nil && o.Time.Before(row.lastSeen) {
-		return // late result
-	}
-	insert := row == nil
-	var prev observation.ServiceState
-	if insert {
-		row = &serviceRow{state: svc.State, firstSeen: o.Time, lastSeen: o.Time}
-		h.services[key] = row
-	} else {
-		prev, row.state, row.lastSeen = row.state, svc.State, o.Time
-	}
-	c.dbService(ctx, h, svc, row, insert, o.Time)
-	switch {
-	case svc.State == observation.ServiceOpen && prev != observation.ServiceOpen:
-		e := hostEvent(events.ServiceOpened, o.Time, h, string(o.Source), ev)
-		e.Old, e.New, e.ObservationID = string(prev), key, obsID
-		c.emit(ctx, e)
-	case prev == observation.ServiceOpen && svc.State != observation.ServiceOpen:
-		e := hostEvent(events.ServiceClosed, o.Time, h, string(o.Source), ev)
-		e.Old, e.New, e.ObservationID = key, string(svc.State), obsID
-		c.emit(ctx, e)
-	}
-}
-
 // advance evaluates presence (§6) and binding expiry (§5.3) up to now.
 // Transitions are stamped with the moment the threshold was crossed.
 func (c *Correlator) advance(ctx context.Context, now time.Time) {
@@ -369,6 +360,7 @@ func (c *Correlator) advance(ctx context.Context, now time.Time) {
 		return
 	}
 	c.advancedTo = now
+	c.expireExchanges(ctx, now)
 	cfg := c.cfg.Load()
 	stale, expiry := cfg.Presence.Stale.D(), cfg.Identity.AddressExpiry.D()
 

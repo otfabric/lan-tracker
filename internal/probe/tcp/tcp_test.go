@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -12,11 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/probetest"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/probetest"
 )
 
 func TestClassify(t *testing.T) {
@@ -32,8 +34,8 @@ func TestClassify(t *testing.T) {
 		{syscall.ENETUNREACH, observation.ServiceUnreachable},
 		{syscall.EHOSTDOWN, observation.ServiceUnreachable},
 		{syscall.ECONNRESET, observation.ServiceRefused},
-		{fmt.Errorf("SO_BINDTODEVICE eth1: %w", syscall.EPERM), observation.ServiceUnknown},
-		{errors.New("something else"), observation.ServiceUnknown},
+		{fmt.Errorf("SO_BINDTODEVICE eth1: %w", syscall.EPERM), observation.ServiceLocalError},
+		{errors.New("something else"), observation.ServiceLocalError},
 	}
 	for _, tt := range tests {
 		if got := Classify(tt.err); got != tt.want {
@@ -179,7 +181,10 @@ func TestConnectClosesWithReset(t *testing.T) {
 	}
 }
 
-func TestLocalFailureIsNoResult(t *testing.T) {
+// A local failure fails the pass and is recorded as LOCAL_ERROR with its
+// reason: the endpoint shows why it was not tested, and it says nothing
+// about the target.
+func TestLocalFailureIsLocalError(t *testing.T) {
 	tx := &fake.Transmitter{TCPResult: map[netip.AddrPort]error{
 		ap("192.168.110.21:502"): fmt.Errorf("dial: %w", syscall.EMFILE),
 	}}
@@ -194,7 +199,54 @@ func TestLocalFailureIsNoResult(t *testing.T) {
 		t.Errorf("results = %+v", results)
 	}
 	obs := sink.All()
-	if len(obs) != 1 || obs[0].IP.String() != "192.168.110.20" {
-		t.Errorf("observations = %+v (a local failure must not reach the correlator)", obs)
+	var local []observation.Observation
+	for _, o := range obs {
+		if o.Service.State == observation.ServiceLocalError {
+			local = append(local, o)
+		}
+	}
+	if len(obs) != 2 || len(local) != 1 || local[0].IP.String() != "192.168.110.21" || local[0].Meta[observation.MetaDetail] != "out of resources" ||
+		local[0].Evidence() != observation.EvidenceNone {
+		t.Errorf("observations = %+v", obs)
+	}
+	for err, want := range map[error]string{syscall.EPERM: "permission denied", syscall.EADDRNOTAVAIL: "no usable source address",
+		syscall.ENODEV: "interface missing", errors.New("x"): "local error"} {
+		if got := LocalDetail(err); got != want {
+			t.Errorf("LocalDetail(%v) = %q, want %q", err, got, want)
+		}
+	}
+}
+
+// A target without a direct route on the interface, or without a source
+// address there, is not dialled: no start is spent and the endpoint says
+// why. A /32 field interface reaches its candidates only through routes
+// the operator adds.
+func TestNoDirectRouteSendsNothing(t *testing.T) {
+	gw, direct, nosrc := netip.MustParseAddr("10.9.0.5"), netip.MustParseAddr("192.168.110.20"), netip.MustParseAddr("192.168.120.7")
+	tx := &fake.Transmitter{
+		Routes: map[netip.Addr]platform.Route{
+			gw:    {Iface: "eth1", Gateway: netip.MustParseAddr("192.168.110.1"), Src: netip.MustParseAddr("192.168.110.10")},
+			nosrc: {Iface: "eth1"},
+		},
+		RouteErr: map[netip.Addr]error{netip.MustParseAddr("172.16.0.1"): syscall.ENETUNREACH},
+	}
+	sink := &probetest.Sink{}
+	pass := probetest.Pass([]netip.Addr{gw, direct, nosrc, netip.MustParseAddr("172.16.0.1")}, nil, sink)
+	pass.TCP = []config.TCPTarget{{Port: 502}}
+	if _, err := (Engine{TX: tx}).Run(context.Background(), pass); err != nil {
+		t.Fatal(err)
+	}
+	if d := tx.Dials(); len(d) != 1 || d[0].Addr() != direct {
+		t.Errorf("dials = %v, want only the directly connected target", d)
+	}
+	why := map[string]string{}
+	for _, o := range sink.All() {
+		if o.Service.State == observation.ServiceLocalError {
+			why[o.IP.String()] = o.Meta[observation.MetaDetail]
+		}
+	}
+	want := map[string]string{"10.9.0.5": "routed via gateway 192.168.110.1", "192.168.120.7": "no source address on eth1", "172.16.0.1": "no route via eth1"}
+	if !maps.Equal(why, want) {
+		t.Errorf("local errors = %v, want %v", why, want)
 	}
 }

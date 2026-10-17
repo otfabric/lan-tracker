@@ -2,46 +2,54 @@ package config
 
 import "time"
 
-// Compiled default paths (docs/ARCHITECTURE.md §6). LAN Sentinel runs on
-// Linux only; other OSes build for development but use the same defaults.
+// Compiled default paths (docs/ARCHITECTURE.md §6). LAN Tracker runs on
+// Linux only.
 const (
-	DefaultConfigPath = "/etc/lan-sentinel/config.yaml"
-	DefaultDBPath     = "/data/lan-sentinel/hosts.db"
-	DefaultSocketPath = "/run/lan-sentinel/api.sock"
+	DefaultConfigPath = "/etc/lan-tracker/config.yaml"
+	DefaultDBPath     = "/data/lan-tracker/hosts.db"
+	DefaultSocketPath = "/run/lan-tracker/api.sock"
 	// maxSocketPath is the longest Unix socket path Linux accepts (sun_path).
 	maxSocketPath = 107
+	// DefaultTCPTimeout is a TCP check's connect timeout; slower links
+	// set active.tcp.targets[].timeout.
+	DefaultTCPTimeout = 750 * time.Millisecond
 )
 
 // Defaults returns the compiled defaults.
 func Defaults() *Config {
 	return &Config{
-		Version: 1,
+		Version: SchemaVersion,
 		Passive: PassiveConfig{
 			Protocols: PassiveProtocols{ARP: true, IPv4: true, IPv6: false, DHCP: true, MDNS: true, DNS: true, LLDP: true},
 			RingSize:  2 << 20,
 		},
 		Neighbor: NeighborConfig{ResyncInterval: Duration(10 * time.Minute)},
+		// Active discovery (ADR 0012): probe starts, not packets. Off until
+		// an interface enables it; the TCP ports are suggestions that run
+		// only once active.tcp.enabled is set.
 		Active: ActiveConfig{
-			StartupDelay:        Duration(30 * time.Second),
-			Jitter:              0.1,
-			MaxPacketsPerSecond: 20,
-			MaxConcurrentProbes: 10,
-			MinTargetInterval:   Duration(time.Second),
+			StartupDelay:       Duration(30 * time.Second),
+			Jitter:             0.1,
+			MaxStartsPerSecond: 5,
+			MaxConcurrentJobs:  4,
+			MinTargetInterval:  Duration(5 * time.Second),
 			Budgets: Budgets{
-				ARP:  RateBudget{PacketsPerSecond: 10},
-				ICMP: RateBudget{PacketsPerSecond: 5},
-				NDP:  RateBudget{PacketsPerSecond: 5},
-				UDP:  RateBudget{PacketsPerSecond: 5},
-				TCP:  TCPBudget{ConnectsPerSecond: 5, MaxConcurrentPerInterface: 4, MaxConcurrentPerHost: 1},
+				ARP:   StartBudget{StartsPerSecond: 5},
+				ICMP:  StartBudget{StartsPerSecond: 1},
+				Names: StartBudget{StartsPerSecond: 1},
+				TCP:   TCPBudget{ConnectsPerSecond: 1, MaxConcurrentPerInterface: 2, MaxConcurrentPerHost: 1},
 			},
 			MaxAutoScanPrefixV4: 24,
 			MaxSweepTargets:     DefaultMaxSweepTargets,
-			ARP:                 ProbeConfig{Enabled: true, Interval: Duration(5 * time.Minute)},
-			ICMP:                ProbeConfig{Enabled: false, Interval: Duration(10 * time.Minute)},
-			TCP:                 TCPProbeConfig{Enabled: false, Interval: Duration(5 * time.Minute)},
-			UDP:                 UDPProbeConfig{Enabled: false, Interval: Duration(15 * time.Minute), Probes: []string{"ntp", "enip"}},
-			Identify: IdentifyConfig{Interval: Duration(time.Hour), Timeout: Duration(2 * time.Second), HostMaxAge: Duration(30 * time.Minute),
-				Probes: IdentifyProbeDefaults{Modbus: IdentifyModbusOptions{UnitID: 1}}},
+			ARP:                 ProbeConfig{Enabled: true, Interval: Duration(15 * time.Minute)},
+			ICMP:                ProbeConfig{Enabled: false, Interval: Duration(15 * time.Minute)},
+			TCP: TCPProbeConfig{Enabled: false, Interval: Duration(15 * time.Minute), Targets: []TCPTarget{
+				{Port: 80, Name: "http", Timeout: Duration(DefaultTCPTimeout)},
+				{Port: 443, Name: "https", Timeout: Duration(DefaultTCPTimeout)},
+				{Port: 8080, Name: "http-alt", Timeout: Duration(DefaultTCPTimeout)},
+				{Port: 502, Name: "modbus", Timeout: Duration(DefaultTCPTimeout)},
+			}},
+			Names: NamesConfig{Enabled: false, Interval: Duration(30 * time.Minute), MDNS: true, MaxQueriesPerPass: 64},
 		},
 		Presence: PresenceConfig{
 			Active: Duration(5 * time.Minute),
@@ -49,12 +57,10 @@ func Defaults() *Config {
 			Stale:  Duration(24 * time.Hour),
 		},
 		Identity: IdentityConfig{
-			HostnamePreference: []string{"mdns", "dhcp", "dns_ptr", "lldp"},
-			AddressOverlap:     Duration(5 * time.Minute),
+			HostnamePreference: []string{"mdns", "dhcp", "dns", "dns_ptr", "lldp"},
 			AddressExpiry:      Duration(24 * time.Hour),
 			NameExpiry:         Duration(168 * time.Hour),
 			ProxyARPThreshold:  16,
-			Identifiers:        IdentifierToggles{MDNS: true, DHCP: true, Hostname: true, LLDP: true},
 		},
 		Storage: StorageConfig{
 			Path: DefaultDBPath,

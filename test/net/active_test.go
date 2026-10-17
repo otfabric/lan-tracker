@@ -5,10 +5,8 @@ package nettest
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"net"
 	"net/netip"
@@ -27,23 +25,30 @@ import (
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/icmp"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/icmp"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // frame is one frame the runner sent, as the counter saw it.
 type frame struct {
-	at   time.Time
-	kind string // arp, arp-reply, arp-announce, arp-unicast, icmp, tcp-syn, tcp, udp-probe, ipv4
-	dst  netip.Addr
+	at    time.Time
+	kind  string // arp, arp-reply, arp-announce, arp-unicast, icmp, tcp-syn, tcp, tcp-data, udp, ipv4
+	dst   netip.Addr
+	port  uint16 // TCP and UDP: the source port, which tells connections apart
+	dport uint16 // TCP and UDP: the destination port
 }
+
+// payload reports traffic LAN Tracker never sends (ADR 0012): TCP segments
+// with data (a banner read, a TLS handshake, an HTTP or Modbus request)
+// and UDP (NTP, EtherNet/IP, SNMP).
+func (f frame) payload() bool { return f.kind == "tcp-data" || f.kind == "udp" }
 
 // probe reports whether the frame is probe traffic: what the engines send
 // and the ARP the kernel sends to resolve probed hosts, not the kernel's
@@ -164,21 +169,52 @@ func classify(data []byte, own net.HardwareAddr) (frame, bool) {
 				f.kind = "icmp"
 			}
 		case layers.LayerTypeTCP:
-			f.kind = "tcp"
-			if tcp.SYN && !tcp.ACK {
+			f.kind, f.port, f.dport = "tcp", uint16(tcp.SrcPort), uint16(tcp.DstPort)
+			switch {
+			case tcp.SYN && !tcp.ACK:
 				f.kind = "tcp-syn"
+			case len(tcp.Payload) > 0:
+				f.kind = "tcp-data"
 			}
 		case layers.LayerTypeUDP:
-			if udp.DstPort == 123 || udp.DstPort == 44818 {
-				f.kind = "udp-probe"
-			}
+			f.kind, f.port, f.dport = "udp", uint16(udp.SrcPort), uint16(udp.DstPort)
 		}
 	}
 	return f, f.kind != ""
 }
 
-// maxPerSecond is the most frames kept by keep (weighted by weight) in any
-// one-second window, and where that window starts.
+// starts marks the frames that are probe starts (ADR 0012): the engine's
+// ARP requests, ICMP echoes and the first SYN of each TCP connection. The
+// ARP the kernel sends to resolve a probed host (a request for the target
+// of an IP packet that follows within 100 ms) and SYN retransmissions are
+// kernel packets, as are the handshake's ACK and the RST that closes it.
+func starts(frames []frame) map[int]bool {
+	out := map[int]bool{}
+	syns := map[[2]uint16]bool{}
+	for i, f := range frames {
+		switch f.kind {
+		case "icmp":
+			out[i] = true
+		case "tcp-syn":
+			a := f.dst.As4()
+			k := [2]uint16{uint16(a[2])<<8 | uint16(a[3]), f.port}
+			out[i], syns[k] = !syns[k], true
+		case "arp":
+			resolve := false
+			for _, g := range frames[i+1:] {
+				if g.at.After(f.at.Add(100 * time.Millisecond)) {
+					break
+				}
+				resolve = resolve || g.dst == f.dst && (g.kind == "icmp" || g.kind == "tcp-syn")
+			}
+			out[i] = !resolve
+		}
+	}
+	return out
+}
+
+// maxPerSecond is the most frames kept by keep in any one-second window,
+// and where that window starts.
 func maxPerSecond(frames []frame, keep func(frame) bool) (int, time.Time) {
 	var kept []frame
 	for _, f := range frames {
@@ -254,13 +290,15 @@ func (l *liveDaemon) stop(t *testing.T) {
 	}
 }
 
-// TestActiveDiscovery is the phase 4 exit criterion in Docker, as uid 65534
-// with only CAP_NET_RAW: operator scans through the daemon find and probe
-// the simulated hosts while every one-second window stays within the
-// budgets, excluded addresses are never probed, two probes to one target
-// are at least a second apart, TCP results are classified, scan plan
-// estimates the duration within 10%, the prefix guard refuses, and the kill
-// switch stops probing at once and survives a restart.
+// TestActiveDiscovery is the active-discovery exit criterion in Docker, as
+// uid 65534 with only CAP_NET_RAW: operator scans through the daemon find
+// and probe the simulated hosts while every one-second window stays within
+// the start budgets (the kernel's packets are measured and logged apart),
+// excluded addresses are never probed, two probes to one target are at
+// least the 5 s spacing apart, TCP results are classified, scan plan
+// estimates the starts and the duration within 10%, the prefix guard
+// refuses, no payload or UDP leaves the box, and the kill switch stops
+// probing at once and survives a restart.
 func TestActiveDiscovery(t *testing.T) {
 	iface, prefix := env(t, "LS_TEST_IFACE"), netip.MustParsePrefix(env(t, "LS_TEST_PREFIX"))
 	open, closed, plc, vanish := ip(t, "LS_TEST_OPEN"), ip(t, "LS_TEST_CLOSED"), ip(t, "LS_TEST_PLC"), ip(t, "LS_TEST_VANISH")
@@ -272,7 +310,7 @@ func TestActiveDiscovery(t *testing.T) {
 
 	dir := t.TempDir()
 	cfgPath, socket := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "api.sock")
-	cfg := fmt.Sprintf(`version: 1
+	cfg := fmt.Sprintf(`version: 2
 interfaces:
   - name: %s
     passive: { enabled: false }
@@ -288,7 +326,7 @@ active:
       - { port: 502, name: measured, timeout: 750ms }
       - { port: 503, name: unreachable, timeout: 4s }
 profiles:
-  all: { arp: true, icmp: true, tcp: [502], udp: [ntp, enip] }
+  all: { arp: true, icmp: true, tcp: [502] }
 storage: { path: %s }
 api: { socket: %s }
 logging: { format: text }
@@ -332,17 +370,31 @@ logging: { format: text }
 		t.Fatalf("scan: %v\n%s", err, l.log)
 	}
 	time.Sleep(200 * time.Millisecond) // the counter's ring hands over blocks every 10 ms
-	sent := 0
+	var during []frame
 	for _, f := range cnt.all() {
 		if f.probe() && !f.at.Before(start) && !f.at.After(end) {
-			sent++
+			during = append(during, f)
 		}
 	}
-	took, est, packets := end.Sub(start).Seconds(), plan.Estimate.TypicalSeconds, plan.Estimate.Packets
-	t.Logf("measured scan: %d packets in %.1f s; plan estimated %d packets, typical %.1f s, no-response %.1f s; %d sweep targets, %d known hosts",
-		sent, took, packets, est, plan.Estimate.NoResponseSeconds, plan.Interfaces[0].SweepTargets, plan.Interfaces[0].KnownTargets)
-	if math.Abs(float64(sent-packets)) > 0.1*float64(packets) {
-		t.Errorf("scan sent %d packets, plan estimated %d: more than 10%% apart", sent, packets)
+	isStart := starts(during)
+	kernel := map[string]int{}
+	for i, f := range during {
+		if !isStart[i] {
+			kernel[f.kind]++
+		}
+	}
+	sent := len(isStart) - countFalse(isStart)
+	took, est, planned := end.Sub(start).Seconds(), plan.Estimate.TypicalSeconds, plan.Estimate.Starts
+	t.Logf("measured scan: %d probe starts and %d kernel packets %v in %.1f s; plan estimated %d starts, typical %.1f s, no-response %.1f s; %d sweep targets, %d known hosts",
+		sent, len(during)-sent, kernel, took, planned, est, plan.Estimate.NoResponseSeconds, plan.Interfaces[0].SweepTargets, plan.Interfaces[0].KnownTargets)
+	if math.Abs(float64(sent-planned)) > 0.1*float64(planned) {
+		t.Errorf("scan made %d probe starts, plan estimated %d: more than 10%% apart", sent, planned)
+	}
+	// A TCP check is a bare connect: SYN, the handshake's ACK and the RST,
+	// at most 3 packets each; with no loss here the kernel retransmits
+	// nothing.
+	if n, syn := kernel["tcp"]+kernel["tcp-syn"], plan.Estimate.TCPConnects; n > 2*syn {
+		t.Errorf("%d kernel TCP packets for %d connects, want at most 2 each", n, syn)
 	}
 	if math.Abs(took-est) > 0.1*est {
 		t.Errorf("scan took %.1f s, plan estimated %.1f s: more than 10%% apart", took, est)
@@ -350,9 +402,6 @@ logging: { format: text }
 	counts := res.Interfaces[0].Counts
 	if counts["tcp/502"]["OPEN"] != 1 || counts["tcp/502"]["REFUSED"] < 3 || counts["icmp"]["reply"] < 4 {
 		t.Errorf("counts = %v", counts)
-	}
-	if counts["udp/ntp"]["reply"]+counts["udp/enip"]["reply"] != 0 {
-		t.Errorf("udp replies from hosts without NTP or EtherNet/IP: %v", counts)
 	}
 
 	// 3. A known host vanishes: its connect is UNREACHABLE, the others are
@@ -369,10 +418,13 @@ logging: { format: text }
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Results per address and port; the vanished host's address keeps
+	// its last definite answer apart from the UNREACHABLE result.
 	state := map[string]string{}
 	for _, s := range services {
-		for _, a := range s.IPs {
-			state[fmt.Sprintf("%s:%d", a, s.Port)] = s.State
+		state[fmt.Sprintf("%s:%d", s.IP, s.Port)] = s.LastResult
+		if s.IP == vanish.String() && s.Port == 503 && s.LastDefiniteResult != "" {
+			t.Errorf("vanish:503 has a definite answer %s it never gave", s.LastDefiniteResult)
 		}
 	}
 	for k, want := range map[string]string{
@@ -395,7 +447,7 @@ logging: { format: text }
 	}()
 	// Stop it once the sweep is on the wire, not after a fixed delay: on a
 	// slow runner the switch could land before the scan starts and refuse
-	// it instead of stopping it. The sweep takes about 12 s at 10 pps.
+	// it instead of stopping it. The sweep takes about 50 s at 5 starts/s.
 	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(100 * time.Millisecond) {
 		n := 0
 		for _, f := range cnt.all() {
@@ -425,24 +477,31 @@ logging: { format: text }
 		}
 	}
 
-	// Budgets in every one-second window, from the frames on the wire. The
-	// counter also sees the ARP the kernel sends to resolve probed hosts.
+	// Start budgets in every one-second window, from the frames on the
+	// wire (the defaults: 5 starts/s in all, ARP 5, ICMP 1, TCP 1). Kernel
+	// packets are not starts: they are logged, not budgeted.
+	isStart = starts(frames)
+	var startFrames []frame
+	for i, f := range frames {
+		if isStart[i] {
+			startFrames = append(startFrames, f)
+		}
+	}
 	for _, c := range []struct {
 		name  string
 		keep  func(frame) bool
 		limit int
 	}{
-		{"ARP requests", func(f frame) bool { return f.kind == "arp" }, 10},
-		{"ICMP echoes", func(f frame) bool { return f.kind == "icmp" }, 5},
-		{"TCP connects", func(f frame) bool { return f.kind == "tcp-syn" }, 5},
-		{"UDP probes", func(f frame) bool { return f.kind == "udp-probe" }, 5},
-		{"all packets", frame.probe, 20},
+		{"ARP requests", func(f frame) bool { return f.kind == "arp" }, 5},
+		{"ICMP echoes", func(f frame) bool { return f.kind == "icmp" }, 1},
+		{"TCP connects", func(f frame) bool { return f.kind == "tcp-syn" }, 1},
+		{"all probe starts", func(frame) bool { return true }, 5},
 	} {
-		n, from := maxPerSecond(frames, c.keep)
+		n, from := maxPerSecond(startFrames, c.keep)
 		t.Logf("%s: at most %d in one second", c.name, n)
 		if n > c.limit {
 			t.Errorf("%s: %d in the second from %s, budget %d", c.name, n, from.Format("15:04:05.000"), c.limit)
-			for _, f := range frames {
+			for _, f := range startFrames {
 				if c.keep(f) && !f.at.Before(from) && f.at.Before(from.Add(time.Second)) {
 					t.Logf("  %s %s %s", f.at.Format("15:04:05.000000"), f.kind, f.dst)
 				}
@@ -456,13 +515,23 @@ logging: { format: text }
 			t.Errorf("%s sent to %s at %s", f.kind, f.dst, f.at.Format("15:04:05.000"))
 		}
 	}
-	// Two IP probes to one target are at least the spacing apart.
-	last := map[netip.Addr]time.Time{}
+	if n, _ := maxPerSecond(frames, frame.probe); n > 0 {
+		t.Logf("all packets including the kernel's: at most %d in one second", n)
+	}
+	// No payload and no UDP, ever: no banner, TLS, HTTP, Modbus, SNMP, NTP
+	// or EtherNet/IP traffic (ADR 0012).
 	for _, f := range frames {
-		if f.kind != "icmp" && f.kind != "tcp-syn" && f.kind != "udp-probe" {
+		if f.payload() {
+			t.Errorf("%s to %s at %s: LAN Tracker sends no payloads", f.kind, f.dst, f.at.Format("15:04:05.000"))
+		}
+	}
+	// Two IP probes to one target are at least the 5 s spacing apart.
+	last := map[netip.Addr]time.Time{}
+	for i, f := range frames {
+		if (f.kind != "icmp" && f.kind != "tcp-syn") || !isStart[i] {
 			continue
 		}
-		if prev, ok := last[f.dst]; ok && f.at.Sub(prev) < 950*time.Millisecond {
+		if prev, ok := last[f.dst]; ok && f.at.Sub(prev) < 4950*time.Millisecond {
 			t.Errorf("%s to %s %v after the previous probe", f.kind, f.dst, f.at.Sub(prev))
 		}
 		last[f.dst] = f.at
@@ -488,186 +557,17 @@ logging: { format: text }
 	if p, err := l.client.PlanScan(ctx, probe.Request{}); err != nil || !p.Allowed {
 		t.Errorf("plan after enable: %+v, %v", p.Reasons, err)
 	}
-	if obs, err := l.client.Observations(ctx, store.ObservationFilter{Source: string(observation.IdentifyProbe), Limit: 10}); err != nil || len(obs) != 0 {
-		t.Errorf("default config sent identification probes: %v, %v", obs, err)
-	}
 	l.stop(t)
 }
 
-// TestIdentifyOnce is ADR 0011 on the wire: an empty list sends nothing; an
-// opted-in Modbus probe is attempted once per host; the kill switch
-// refuses without writing another attempt; identify run is the only retry.
-func TestIdentifyOnce(t *testing.T) {
-	iface, prefix := env(t, "LS_TEST_IFACE"), netip.MustParsePrefix(env(t, "LS_TEST_PREFIX"))
-	dir := t.TempDir()
-	cfgPath, socket := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "api.sock")
-	body := func(identify string) string {
-		return fmt.Sprintf(`version: 1
-interfaces:
-  - name: %s
-    passive: { enabled: false }
-    active:
-      enabled: true
-      networks: [%s]
-      identify: %s
-active:
-  startup_delay: 0s
-  jitter: 0
-  arp: { enabled: true, interval: 24h }
-  identify: { interval: 10s, timeout: 500ms, host_max_age: 1h }
-storage: { path: %s }
-api: { socket: %s }
-logging: { format: text }
-`, iface, prefix, identify, filepath.Join(dir, "hosts.db"), socket)
-	}
-	if err := os.WriteFile(cfgPath, []byte(body("[]")), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	l := startDaemon(t, cfgPath, socket)
-	ctx := context.Background()
-	if _, err := l.client.Scan(ctx, probe.Request{ARP: true}); err != nil {
-		t.Fatalf("sweep: %v\n%s", err, l.log)
-	}
-	// An empty list never looks: no pass is recorded and nothing is sent.
-	time.Sleep(3 * time.Second)
-	if p := identifyLook(t, l.client, iface); p != nil {
-		t.Fatalf("empty list ran an identification look: %+v", p)
-	}
-	if n := l.identifyAttempts(t); len(n) != 0 {
-		t.Fatalf("empty list sent identify probes: %v", n)
-	}
-
-	if err := os.WriteFile(cfgPath, []byte(body("[{name: modbus}]")), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := l.client.ReloadConfig(ctx); err != nil {
-		t.Fatalf("reload: %v\n%s", err, l.log)
-	}
-	l.waitCollector(t, iface, platform.CollectorIdentify, platform.StateRunning)
-	// Synchronise on the scheduler's own record of its looks, never on the
-	// database: the API reads what the writer has committed, up to one 5 s
-	// batch behind, so a count that stops growing for a while proves
-	// nothing (CI saw 1, then 6 once the next batch landed). A look that
-	// sent, then two more, which must not send to those hosts again.
-	l.waitIdentifyLooks(t, iface, 2)
-	// The kill switch is an operator action: it answers once everything on
-	// the bus before it is committed, so the counts below are complete.
-	if _, err := l.client.DisableActive(ctx, "test: identify"); err != nil {
-		t.Fatal(err)
-	}
-	// Once per host: later looks may find and try new hosts, never a host
-	// already tried.
-	tried := l.identifyAttempts(t)
-	if len(tried) == 0 {
-		t.Fatalf("opted-in identify sent nothing\n%s", l.log)
-	}
-	for id, n := range tried {
-		if n[observation.TriggerScheduled] != 1 || n[observation.TriggerOperator] != 0 {
-			t.Errorf("host %s attempts %v, want one scheduled", id, n)
+func countFalse(m map[int]bool) int {
+	n := 0
+	for _, v := range m {
+		if !v {
+			n++
 		}
 	}
-	host := slices.Sorted(maps.Keys(tried))[0]
-	if _, err := l.client.IdentifyRun(ctx, host, "modbus", ""); statusNet(err) != 409 {
-		t.Errorf("identify run with kill switch: %v", err)
-	}
-	if _, err := l.client.EnableActive(ctx, "test done"); err != nil { // commits again
-		t.Fatal(err)
-	}
-	if n := l.identifyAttempts(t)[host]; n[observation.TriggerScheduled] != 1 || n[observation.TriggerOperator] != 0 {
-		t.Errorf("kill switch still sent to %s: %v", host, n)
-	}
-	// identify run is the only retry; it answers once its attempt is
-	// committed.
-	a, err := l.client.IdentifyRun(ctx, host, "modbus", "")
-	if err != nil {
-		t.Fatalf("identify run retry: %v\n%s", err, l.log)
-	}
-	if a.Trigger != observation.TriggerOperator || a.Actor == "" {
-		t.Errorf("retry attempt = %+v, want trigger operator with the caller", a)
-	}
-	if n := l.identifyAttempts(t)[host]; n[observation.TriggerScheduled] != 1 || n[observation.TriggerOperator] != 1 {
-		t.Errorf("after the retry %s has %v, want one scheduled and one operator attempt", host, n)
-	}
-	l.stop(t)
-}
-
-// identifyLook is the last identification look on iface that daemon
-// status reports, nil before the first.
-func identifyLook(t *testing.T, c *api.Client, iface string) *scheduler.PassSummary {
-	t.Helper()
-	st, err := c.Status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, in := range st.Interfaces {
-		for _, cs := range in.Collectors {
-			if cs.Interface == iface && cs.Collector == platform.CollectorIdentify {
-				return cs.LastPass
-			}
-		}
-	}
-	return nil
-}
-
-// waitIdentifyLooks waits until the identification loop on iface has
-// finished a look that sent, then more looks after it. A finished look's
-// exchanges are on the bus, not yet necessarily committed. The deadline
-// only bounds a failure (looks come every 10 s here), so it is generous
-// for slow runners; each look is logged for the CI output.
-func (l *liveDaemon) waitIdentifyLooks(t *testing.T, iface string, more int) {
-	t.Helper()
-	start := time.Now()
-	deadline := start.Add(2 * time.Minute)
-	var last time.Time
-	sent, after := false, 0
-	for after < more {
-		if time.Now().After(deadline) {
-			t.Fatalf("identification looks on %s: one that sent %v, %d after it, want %d\n%s", iface, sent, after, more, l.log)
-		}
-		time.Sleep(100 * time.Millisecond)
-		p := identifyLook(t, l.client, iface)
-		if p == nil || !p.At.After(last) {
-			continue
-		}
-		last = p.At
-		t.Logf("identification look after %.1fs: %d sent, %d answered, %d blocked, %.1fs", time.Since(start).Seconds(), p.Probed, p.Replied, p.Blocked, p.Seconds)
-		if sent {
-			after++
-		} else {
-			sent = p.Probed > 0
-		}
-	}
-}
-
-// identifyAttempts counts the committed identification attempts per host
-// and trigger, from the identify_probe observations.
-func (l *liveDaemon) identifyAttempts(t *testing.T) map[string]map[string]int {
-	t.Helper()
-	obs, err := l.client.Observations(context.Background(), store.ObservationFilter{Source: string(observation.IdentifyProbe), Limit: 1000})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := map[string]map[string]int{}
-	for _, o := range obs {
-		var meta map[string]string
-		if err := json.Unmarshal(o.Meta, &meta); err != nil {
-			t.Fatalf("identify observation %d meta %q: %v", o.ID, o.Meta, err)
-		}
-		id := meta[observation.MetaHostID]
-		if out[id] == nil {
-			out[id] = map[string]int{}
-		}
-		out[id][meta[observation.MetaTrigger]]++
-	}
-	return out
-}
-
-func statusNet(err error) int {
-	var ae *api.Error
-	if errors.As(err, &ae) {
-		return ae.Status
-	}
-	return 0
+	return n
 }
 
 // TestICMPRawSocket runs where ping sockets are not allowed for the

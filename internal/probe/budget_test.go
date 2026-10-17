@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
@@ -44,7 +44,7 @@ func schedule(limits Limits, probes []SimProbe) []send {
 	out := make([]send, 0, len(probes))
 	for _, p := range probes {
 		sim.Set(b.spacing(p.Interface, p.Target))
-		at, _ := b.reserve(p.Protocol, p.Interface, p.Target, p.Packets)
+		at, _ := b.reserve(p.Protocol, p.Interface, p.Target)
 		sim.Set(at)
 		out = append(out, send{at, p.Protocol})
 	}
@@ -52,7 +52,7 @@ func schedule(limits Limits, probes []SimProbe) []send {
 }
 
 // windowMax returns, over every one-second window starting at a send, the
-// most sends (or tokens) of one protocol, and the most global tokens.
+// most sends of one protocol, and the most starts of all.
 func windowMax(sends []send) (perProto map[Protocol]int, tokens float64) {
 	perProto = map[Protocol]int{}
 	for i, s := range sends {
@@ -63,10 +63,7 @@ func windowMax(sends []send) (perProto map[Protocol]int, tokens float64) {
 				break
 			}
 			n[x.p]++
-			tok++
-			if x.p == TCP {
-				tok += TCPTokens - 1
-			}
+			tok++ // every probe is one start, a TCP connect too
 		}
 		for p, c := range n {
 			perProto[p] = max(perProto[p], c)
@@ -80,7 +77,7 @@ func TestPacingStaysWithinEveryOneSecondWindow(t *testing.T) {
 	mixed := func(n int) []SimProbe {
 		var ps []SimProbe
 		for i, h := range hosts(n) {
-			p := []Protocol{ARP, ICMP, TCP, UDP}[i%4]
+			p := []Protocol{ARP, ICMP, TCP}[i%3]
 			ps = append(ps, sim(p, "eth1", h))
 		}
 		return ps
@@ -93,7 +90,7 @@ func TestPacingStaysWithinEveryOneSecondWindow(t *testing.T) {
 		return ps
 	}
 	tcpHeavy := defaultLimits()
-	tcpHeavy.Rates[TCP] = 10 // 30 tokens/s wanted, 20 allowed: the global budget binds
+	tcpHeavy.Rates[TCP] = 10 // 10 starts/s wanted, 5 allowed: the global budget binds
 	tests := []struct {
 		name   string
 		limits Limits
@@ -101,10 +98,10 @@ func TestPacingStaysWithinEveryOneSecondWindow(t *testing.T) {
 		rate   map[Protocol]float64 // most per window
 		global float64
 	}{
-		{"arp sweep", defaultLimits(), only(ARP, 254), map[Protocol]float64{ARP: 10}, 20},
-		{"tcp connects", defaultLimits(), only(TCP, 60), map[Protocol]float64{TCP: 5}, 20},
-		{"tcp bound by global tokens", tcpHeavy, only(TCP, 60), map[Protocol]float64{TCP: 7}, 20},
-		{"mixed protocols", defaultLimits(), mixed(200), map[Protocol]float64{ARP: 10, ICMP: 5, TCP: 5, UDP: 5}, 20},
+		{"arp sweep", defaultLimits(), only(ARP, 254), map[Protocol]float64{ARP: 5}, 5},
+		{"tcp connects", defaultLimits(), only(TCP, 20), map[Protocol]float64{TCP: 1}, 5},
+		{"tcp bound by the global start rate", tcpHeavy, only(TCP, 60), map[Protocol]float64{TCP: 5}, 5},
+		{"mixed protocols", defaultLimits(), mixed(60), map[Protocol]float64{ARP: 5, ICMP: 1, TCP: 1}, 5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -129,10 +126,10 @@ func TestPacingStaysWithinEveryOneSecondWindow(t *testing.T) {
 
 func TestTargetSpacing(t *testing.T) {
 	h := ip("10.0.0.5")
-	sends := schedule(defaultLimits(), []SimProbe{sim(ARP, "eth1", h), sim(ICMP, "eth1", h), sim(TCP, "eth1", h), sim(TCP, "eth2", h)})
+	sends := schedule(defaultLimits(), []SimProbe{sim(ARP, "eth1", h), sim(ICMP, "eth1", h), sim(TCP, "eth1", h), sim(ARP, "eth2", h)})
 	for i := 1; i < 3; i++ {
-		if gap := sends[i].at.Sub(sends[i-1].at); gap < time.Second {
-			t.Errorf("probe %d to one target %v after the previous, want >= 1s", i, gap)
+		if gap := sends[i].at.Sub(sends[i-1].at); gap < 5*time.Second {
+			t.Errorf("probe %d to one target %v after the previous, want >= 5s", i, gap)
 		}
 	}
 	// The same IP on another interface is another target.
@@ -147,7 +144,7 @@ func TestSimulateMatchesPacing(t *testing.T) {
 		probes = append(probes, sim(ARP, "eth1", h))
 	}
 	got := Simulate(defaultLimits(), t0, probes)
-	want := 100 * time.Duration(float64(time.Second)/10*paceMargin)
+	want := 100 * time.Duration(float64(time.Second)/5*paceMargin)
 	if got < want-time.Millisecond || got > want+time.Millisecond {
 		t.Errorf("Simulate = %v, want %v", got, want)
 	}
@@ -198,7 +195,7 @@ func TestKillSwitchDuringWaitRefusesTheSend(t *testing.T) {
 	}()
 	waitFor(t, func() bool { return sim.Waiters() > 0 })
 	sw.Set(store.ActiveState{Disabled: true, Reason: "test"})
-	sim.Advance(time.Second)
+	sim.Advance(5 * time.Second)
 	if err := <-done; !errors.Is(err, ErrDisabled) {
 		t.Fatalf("Acquire after the kill switch = %v, want ErrDisabled", err)
 	}
@@ -230,7 +227,7 @@ func TestConcurrencyCaps(t *testing.T) {
 		blocks bool
 		reason string
 	}{
-		{"global cap", []SimProbe{sim(ARP, "eth1", ip("10.0.0.1")), sim(ICMP, "eth1", ip("10.0.0.2")), sim(UDP, "eth2", ip("10.0.0.3"))},
+		{"global cap", []SimProbe{sim(ARP, "eth1", ip("10.0.0.1")), sim(ICMP, "eth1", ip("10.0.0.2")), sim(ICMP, "eth2", ip("10.0.0.3"))},
 			sim(ARP, "eth1", ip("10.0.0.4")), true, "concurrency"},
 		{"tcp per host", []SimProbe{sim(TCP, "eth1", ip("10.0.0.1"))}, sim(TCP, "eth1", ip("10.0.0.1")), true, "tcp_host"},
 		{"tcp per host is per interface", []SimProbe{sim(TCP, "eth1", ip("10.0.0.1"))}, sim(TCP, "eth2", ip("10.0.0.1")), false, ""},
@@ -360,12 +357,12 @@ func TestAcquireCancelled(t *testing.T) {
 }
 
 func TestSetLimitsKeepsConcurrencyCaps(t *testing.T) {
-	b := NewBudget(clock.NewSim(t0), Limits{MaxConcurrent: 2, TCPPerInterface: 2, TCPPerHost: 1, GlobalPPS: 20}, nil)
-	b.SetLimits(Limits{MaxConcurrent: 50, TCPPerInterface: 9, TCPPerHost: 9, GlobalPPS: 5, Rates: map[Protocol]float64{ARP: 1}})
+	b := NewBudget(clock.NewSim(t0), Limits{MaxConcurrent: 2, TCPPerInterface: 2, TCPPerHost: 1, GlobalStarts: 20}, nil)
+	b.SetLimits(Limits{MaxConcurrent: 50, TCPPerInterface: 9, TCPPerHost: 9, GlobalStarts: 5, Rates: map[Protocol]float64{ARP: 1}})
 	if b.limits.MaxConcurrent != 2 || b.limits.TCPPerInterface != 2 || b.limits.TCPPerHost != 1 {
 		t.Errorf("concurrency caps changed: %+v", b.limits)
 	}
-	if b.limits.GlobalPPS != 5 || b.limits.Rates[ARP] != 1 {
+	if b.limits.GlobalStarts != 5 || b.limits.Rates[ARP] != 1 {
 		t.Errorf("rates not applied: %+v", b.limits)
 	}
 }
@@ -374,10 +371,10 @@ func TestPruneDropsPastSpacing(t *testing.T) {
 	sim := clock.NewSim(t0)
 	b := NewBudget(sim, Limits{TargetSpacing: time.Second}, nil)
 	for _, h := range hosts(4096) {
-		b.reserve(ARP, "eth1", h, 0)
+		b.reserve(ARP, "eth1", h)
 	}
 	sim.Advance(time.Minute)
-	b.reserve(ARP, "eth1", ip("10.1.0.1"), 0)
+	b.reserve(ARP, "eth1", ip("10.1.0.1"))
 	if len(b.target) != 1 {
 		t.Errorf("%d spacing entries after prune, want 1", len(b.target))
 	}
@@ -394,7 +391,7 @@ func TestNilClockAndPolicy(t *testing.T) {
 
 func TestLateSendMovesTheBooking(t *testing.T) {
 	sim := clock.NewSim(t0)
-	limits := Limits{GlobalPPS: 20, Rates: map[Protocol]float64{ARP: 10}, MaxConcurrent: 10, TargetSpacing: time.Second}
+	limits := Limits{GlobalStarts: 20, Rates: map[Protocol]float64{ARP: 10}, MaxConcurrent: 10, TargetSpacing: time.Second}
 	b := NewBudget(sim, limits, nil)
 	h := hosts(3)
 	r, err := b.Acquire(context.Background(), ARP, "eth1", h[0])
@@ -418,7 +415,7 @@ func TestLateSendMovesTheBooking(t *testing.T) {
 		t.Fatalf("second send at +%v", late)
 	}
 	// The third send is paced from the actual (late) send, not the booking.
-	at, _ := b.reserve(ARP, "eth1", h[2], 0)
+	at, _ := b.reserve(ARP, "eth1", h[2])
 	if gap := at.Sub(sent); gap < interval(1, 10) {
 		t.Errorf("third send %v after the late one, want >= %v", gap, interval(1, 10))
 	}
@@ -464,18 +461,18 @@ func TestSpacingWaitDoesNotHoldUpOtherTargets(t *testing.T) {
 		otherDone <- sim.Now()
 	}()
 	waitFor(t, func() bool { return sim.Waiters() == 2 })
-	sim.Advance(200 * time.Millisecond)
+	sim.Advance(250 * time.Millisecond) // the ARP pace at 5 starts/s
 	select {
 	case at := <-otherDone:
-		if at.Sub(t0) > 200*time.Millisecond {
+		if at.Sub(t0) > 250*time.Millisecond {
 			t.Errorf("other target sent at +%v", at.Sub(t0))
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a probe to another target waited for a's spacing")
 	}
-	sim.Advance(time.Second)
-	if at := <-aDone; at.Sub(t0) < time.Second {
-		t.Errorf("second probe to a at +%v, want >= 1s", at.Sub(t0))
+	sim.Advance(5 * time.Second)
+	if at := <-aDone; at.Sub(t0) < 5*time.Second {
+		t.Errorf("second probe to a at +%v, want >= 5s", at.Sub(t0))
 	}
 }
 

@@ -20,20 +20,16 @@ import (
 
 	"github.com/google/uuid"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // DefaultTick is how often live mode evaluates presence and expiry.
 const DefaultTick = 15 * time.Second
-
-// ouiConfidence is the confidence of a manufacturer derived from the OUI:
-// it names the NIC maker, which is usually but not always the device maker.
-const ouiConfidence = 0.7
 
 // Internal event causes (docs/DATA_MODEL.md §2).
 const (
@@ -70,18 +66,18 @@ type Correlator struct {
 	clock   clock.Clock
 	log     *slog.Logger
 	cfg     atomic.Pointer[config.Config]
-	ids     atomic.Pointer[[]identify.Identifier] // the passive identifiers cfg enables
 	data    bool
 	tick    time.Duration
 	newID   func() string
 
 	st         *state
 	advancedTo time.Time
+	gaps       map[gapKey]openGap // passive collectors not running, since when
 
 	unbound atomic.Uint64
 	ignored atomic.Uint64
 	// Per source: observations processed and those left unbound
-	// (lan_sentinel_observations_total, lan_sentinel_observations_unbound_total).
+	// (lan_tracker_observations_total, lan_tracker_observations_unbound_total).
 	bySource        map[observation.Source]*atomic.Uint64
 	unboundBySource map[observation.Source]*atomic.Uint64
 }
@@ -106,7 +102,7 @@ func New(ctx context.Context, o Options) (*Correlator, error) {
 	}
 	c := &Correlator{
 		store: o.Store, events: o.Events, vendors: o.Vendors, clock: o.Clock, log: o.Logger,
-		data: o.DataDriven, tick: o.Tick, newID: o.NewID, st: newState(),
+		data: o.DataDriven, tick: o.Tick, newID: o.NewID, st: newState(), gaps: map[gapKey]openGap{},
 		bySource: map[observation.Source]*atomic.Uint64{}, unboundBySource: map[observation.Source]*atomic.Uint64{},
 	}
 	for _, src := range observation.Sources {
@@ -122,6 +118,10 @@ func New(ctx context.Context, o Options) (*Correlator, error) {
 			Evidence: events.Evidence{TS: now, Reason: r.Reason}})
 	}
 	c.closeOpenScans(ctx, now)
+	// Exchanges the previous run left open were never answered as far as
+	// anyone saw; the in-memory exchange state did not survive.
+	c.exec(ctx, "close dhcp exchanges", `UPDATE dhcp_exchanges SET outcome = 'incomplete'
+		WHERE outcome IN ('discover', 'request', 'inform')`)
 	for _, ic := range o.Config.Interfaces {
 		if _, ok := c.st.contexts[ic.Name]; ok {
 			continue
@@ -131,20 +131,22 @@ func New(ctx context.Context, o Options) (*Correlator, error) {
 		c.st.contexts[n.iface], c.st.contextsByID[n.id] = n, n
 		c.dbInsertContext(ctx, n, now)
 	}
+	if !c.data { // replay has no downtime of its own
+		if err := c.downtime(ctx, now); err != nil {
+			return nil, fmt.Errorf("correlate: last heartbeat: %w", err)
+		}
+		c.heartbeat(ctx, now)
+	}
 	return c, nil
 }
 
-// SetConfig applies a reloaded configuration: thresholds, the passive
-// identifiers, and DHCP allowlists at each server's next reply (the set of
-// interfaces is restart-only).
-func (c *Correlator) SetConfig(cfg *config.Config) {
-	ids := identify.Identifiers(cfg.Identity.Identifiers)
-	c.ids.Store(&ids)
-	c.cfg.Store(cfg)
-}
+// SetConfig applies a reloaded configuration: thresholds, and DHCP
+// allowlists at each server's next reply (the set of interfaces is
+// restart-only).
+func (c *Correlator) SetConfig(cfg *config.Config) { c.cfg.Store(cfg) }
 
 // Unbound is how many observations matched no host
-// (lan_sentinel_observations_unbound_total).
+// (lan_tracker_observations_unbound_total).
 func (c *Correlator) Unbound() uint64 { return c.unbound.Load() }
 
 // Ignored is how many observations were dropped as unusable (unknown
@@ -179,13 +181,21 @@ func (c *Correlator) Run(ctx context.Context, bus *observation.Bus) error {
 	for {
 		select {
 		case <-ctx.Done():
-			c.flushContexts(context.WithoutCancel(ctx))
+			bg := context.WithoutCancel(ctx)
+			if !c.data {
+				now := c.clock.Now()
+				c.closeGaps(bg, now)
+				c.heartbeat(bg, now)
+			}
+			c.flushContexts(bg)
 			return nil
 		case m := <-bus.C():
 			c.Handle(ctx, m)
 		case <-tick:
-			c.advance(ctx, c.clock.Now())
+			now := c.clock.Now()
+			c.advance(ctx, now)
 			c.flushContexts(ctx)
+			c.heartbeat(ctx, now)
 		}
 	}
 }
@@ -201,6 +211,8 @@ func (c *Correlator) Handle(ctx context.Context, m observation.Message) {
 		c.link(ctx, *m.Link)
 	case m.Operator != nil:
 		c.operator(ctx, *m.Operator)
+	case m.Collector != nil:
+		c.collector(ctx, *m.Collector)
 	default:
 		c.observe(ctx, m.Observation)
 	}

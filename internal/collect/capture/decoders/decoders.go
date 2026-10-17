@@ -4,10 +4,11 @@
 // a fuzz target. They never panic and never trust lengths in the frame.
 //
 // Every observation carries the frame's MAC evidence: the sender hardware
-// address for ARP, the link-layer address option for NDP, chaddr for DHCP,
-// the chassis MAC for LLDP and the source MAC otherwise. DNS PTR answers are
-// the exception: they describe other hosts, so they carry no MAC (see
-// docs/DATA_MODEL.md §5.1).
+// address for ARP, the link-layer address option for NDP, chaddr for DHCP
+// and the Ethernet source MAC otherwise (LLDP's chassis ID is metadata, not
+// the attachment). Name records (mDNS, DNS) describe names and addresses,
+// not their MAC: an mDNS observation's MAC is its sender, and unicast DNS
+// answers carry no MAC at all (docs/DATA_MODEL.md §2, §5.4).
 package decoders
 
 import (
@@ -19,8 +20,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // EtherTypes the decoders handle.
@@ -110,14 +111,14 @@ func Decode(p Protocols, t time.Time, iface string, data []byte) []observation.O
 }
 
 // add appends o if it has usable evidence: a unicast MAC, or for the
-// MAC-less DNS source an address.
+// MAC-less DNS source records.
 func (f *frame) add(o observation.Observation) {
 	if o.IP.IsValid() && !usableIP(o.IP) {
 		o.IP = netip.Addr{}
 	}
 	switch {
 	case o.Source == observation.PassiveDNS:
-		if !o.IP.IsValid() {
+		if len(o.Records) == 0 {
 			return
 		}
 	case o.MAC == nil || !identify.UnicastMAC(o.MAC):

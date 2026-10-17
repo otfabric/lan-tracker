@@ -30,7 +30,7 @@ func TestOutputFormats(t *testing.T) {
 		}},
 		{"config as json", []string{"config", "show", "-o", "json", "--config", valid}, ExitOK, func(t *testing.T, out string) {
 			var c map[string]any
-			if err := json.Unmarshal([]byte(out), &c); err != nil || c["version"] != float64(1) {
+			if err := json.Unmarshal([]byte(out), &c); err != nil || c["version"] != float64(2) {
 				t.Errorf("config json: %v %v", c["version"], err)
 			}
 		}},

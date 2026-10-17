@@ -10,8 +10,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"lan-sentinel/internal/store"
-	"lan-sentinel/migrations"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/migrations"
 )
 
 func TestDHCPServers(t *testing.T) {

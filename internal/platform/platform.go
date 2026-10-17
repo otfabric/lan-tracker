@@ -1,4 +1,4 @@
-// Package platform is the only boundary between LAN Sentinel and the
+// Package platform is the only boundary between LAN Tracker and the
 // kernel's networking facilities. Capture, neighbour monitoring, interface
 // monitoring and probe transmission each sit behind one small interface,
 // implemented with AF_PACKET, rtnetlink and raw or ping sockets (backends.go),
@@ -163,14 +163,48 @@ type Transmitter interface {
 	// Frames opens a frame connection on iface for one EtherType.
 	Frames(ctx context.Context, iface string, etherType uint16) (FrameConn, error)
 	// DialTCP makes a connect() bound to iface (SO_BINDTODEVICE).
-	// The bare TCP discovery probe closes immediately with a RST and never
-	// writes. Identification probes write a bounded exchange and Close().
+	// The TCP check closes immediately with a RST and never writes
+	// (ADR 0012: no payloads).
 	DialTCP(ctx context.Context, iface string, addr netip.AddrPort, timeout time.Duration) (net.Conn, error)
 	// DialUDP opens a UDP socket bound to iface and connected to addr, for
-	// protocol-specific probes.
+	// unicast DNS queries.
 	DialUDP(ctx context.Context, iface string, addr netip.AddrPort) (net.Conn, error)
+	// ListenUDP opens an unconnected IPv4 UDP socket bound to iface on an
+	// ephemeral port, for one-shot mDNS queries: responders answer by
+	// unicast from their own addresses (RFC 6762 §5.1, §6.7).
+	ListenUDP(ctx context.Context, iface string) (net.PacketConn, error)
 	// ICMPConn opens an IPv4 ICMP echo socket bound to iface.
 	ICMPConn(ctx context.Context, iface string) (EchoConn, error)
+	// Route asks the kernel how a packet to dst would leave through iface
+	// (an unprivileged RTM_GETROUTE). SO_BINDTODEVICE picks the interface
+	// but does not make a destination directly connected.
+	Route(iface string, dst netip.Addr) (Route, error)
+}
+
+// Route is the kernel's route to an address through one interface.
+type Route struct {
+	Iface   string     // the interface the route leaves through
+	Gateway netip.Addr // invalid when the destination is on-link
+	Src     netip.Addr // the source address the kernel would use; invalid when none
+}
+
+// Direct reports a route on iface to an on-link destination, with a
+// source address: what a TCP check needs (ARCHITECTURE.md §5).
+func (r Route) Direct(iface string) bool {
+	return r.Iface == iface && !r.Gateway.IsValid() && r.Src.IsValid()
+}
+
+// Problem says why r is not Direct on iface: "" when it is.
+func (r Route) Problem(iface string) string {
+	switch {
+	case r.Iface != iface:
+		return "no route via " + iface
+	case r.Gateway.IsValid():
+		return "routed via gateway " + r.Gateway.String()
+	case !r.Src.IsValid():
+		return "no source address on " + iface
+	}
+	return ""
 }
 
 // Transports of a Transmitter, for Backend.

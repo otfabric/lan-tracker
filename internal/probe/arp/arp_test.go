@@ -12,12 +12,12 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/probetest"
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/probetest"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 var (

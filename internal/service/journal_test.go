@@ -30,7 +30,7 @@ func TestJournalHandlerFields(t *testing.T) {
 		want map[string]string
 	}{
 		{"IP changed", journal.PriNotice, map[string]string{
-			"EVENT": "ip_changed", "IFACE": "eth1", "OLD_IP": "192.168.110.60", "HOST_ID": "3db0ce66", "SYSLOG_IDENTIFIER": "lan-sentinel",
+			"EVENT": "ip_changed", "IFACE": "eth1", "OLD_IP": "192.168.110.60", "HOST_ID": "3db0ce66", "SYSLOG_IDENTIFIER": "lan-tracker",
 		}},
 		{"slow commit", journal.PriWarning, map[string]string{"STORE_BATCH_OPS": "12"}},
 		{"debug line", journal.PriDebug, map[string]string{}},

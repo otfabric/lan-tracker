@@ -1,12 +1,13 @@
 package capture
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
 
-	"lan-sentinel/internal/collect/capture/decoders"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // RefreshInterval is how often an unchanged observation is emitted again.
@@ -99,6 +100,18 @@ func key(o observation.Observation) string {
 		sb.WriteString(k)
 		sb.WriteByte('=')
 		sb.WriteString(o.Meta[k])
+	}
+	// Name records and DHCP messages count whole: an mDNS goodbye differs
+	// from the announcement only in its TTL, and a DHCP message of another
+	// transaction, stage or retransmission (secs) is new evidence even for
+	// the same client and address.
+	if len(o.Records) > 0 || o.DHCP != nil {
+		b, _ := json.Marshal(struct {
+			R []observation.Record
+			D *observation.DHCPMessage
+		}{o.Records, o.DHCP})
+		sb.WriteByte('|')
+		sb.Write(b)
 	}
 	return sb.String()
 }

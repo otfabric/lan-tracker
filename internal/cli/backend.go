@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // backend is where read commands get their data: the daemon's API (online,
@@ -28,8 +28,10 @@ type backend interface {
 	Observations(ctx context.Context, f store.ObservationFilter) ([]store.Observation, error)
 	Rollups(ctx context.Context, f store.ObservationFilter) ([]store.Rollup, error)
 	Events(ctx context.Context, f store.EventFilter) ([]store.Event, error)
-	Services(ctx context.Context, f store.ServiceFilter) ([]store.ServiceRow, error)
+	Services(ctx context.Context, f store.ServiceFilter) ([]store.Endpoint, error)
 	DHCPServers(ctx context.Context, f store.DHCPServerFilter) ([]store.DHCPServer, error)
+	DHCPLeases(ctx context.Context, f store.DHCPLeaseFilter) ([]store.DHCPLease, error)
+	DHCPExchanges(ctx context.Context, f store.DHCPExchangeFilter) ([]store.DHCPExchange, error)
 	DBInfo(ctx context.Context) (store.DBInfo, error)
 	DBCheck(ctx context.Context) (store.CheckResult, error)
 	Close() error
@@ -123,7 +125,7 @@ func (a *app) failed(err error) error {
 	case errors.Is(err, os.ErrPermission):
 		return failf(ExitError, "%v (run with sudo)", err)
 	case errors.Is(err, api.ErrUnreachable):
-		return failf(ExitUnreachable, "%v (is lan-sentinel running? --offline reads the database directly)", err)
+		return failf(ExitUnreachable, "%v (is lan-tracker running? --offline reads the database directly)", err)
 	case errors.Is(err, store.ErrBadQuery):
 		return fail(ExitUsage, err)
 	}

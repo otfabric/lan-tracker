@@ -1,6 +1,6 @@
 # ADR 0011: Opt-in identification probes inside the safety envelope
 
-- Status: Accepted
+- Status: Superseded by [0012](0012-connectivity-tracker-scope.md) (16 Oct 2026)
 - Date: 8 Oct 2026
 - Amended: 8 Oct 2026 (TLS probe: a full handshake, X25519 and P-256 only, at most 4 writes; SNI opt-in, `sni: auto` or `identify run --sni`)
 - Specified in: `ARCHITECTURE.md` §3 (Active probes), §5; `REQUIREMENTS.md` FR-AC-11, §4, §5 (Active identification); `DATA_MODEL.md` §2, §5.5; AGENTS.md rules 7 and 11

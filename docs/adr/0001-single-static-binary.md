@@ -10,7 +10,7 @@ The product runs on about a thousand small Linux edge devices: Raspberry Pi CM4,
 
 ## Decision
 
-`lan-sentinel` is a single statically linked Go binary (`CGO_ENABLED=0`, `linux/amd64` and `linux/arm64`). Its cobra subcommands make it:
+`lan-tracker` is a single statically linked Go binary (`CGO_ENABLED=0`, `linux/amd64` and `linux/arm64`). Its cobra subcommands make it:
 
 - the daemon (`daemon run`);
 - the CLI client of the daemon's Unix-socket API;

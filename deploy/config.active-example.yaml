@@ -1,0 +1,36 @@
+# OT Fabric LAN Tracker: the reviewed active profile (ARP sweep + TCP checks).
+# Copy the interface and active sections into /etc/lan-tracker/config.yaml
+# once the networks and excludes are reviewed for the site. Rates are
+# probe starts per second (ADR 0012); the values below are the defaults.
+version: 2
+
+interfaces:
+  - name: eth0
+    passive: { enabled: true, promiscuous: false }
+    active:
+      enabled: true
+      networks: [192.168.1.0/24]           # candidate IPv4 ranges on this Ethernet segment, /24 or narrower
+      exclude:  [192.168.1.1]              # never probed
+    # dhcp: { servers: [192.168.1.1] }
+
+active:
+  max_starts_per_second: 5                 # ARP, ICMP, name queries and TCP connects together
+  max_concurrent_jobs: 4
+  min_target_interval: 5s                  # between probes to one address
+  budgets:
+    arp: { starts_per_second: 5 }
+    tcp: { connects_per_second: 1, max_concurrent_per_interface: 2, max_concurrent_per_host: 1 }
+  arp: { enabled: true, interval: 15m }    # finds devices that ignore ping
+  icmp: { enabled: false }                 # extra evidence only; TCP never waits for it
+  tcp:
+    enabled: true
+    interval: 15m
+    targets:                               # connect only; OPEN on 502 is not proof of Modbus
+      - { port: 80,   name: http,     timeout: 750ms }
+      - { port: 443,  name: https,    timeout: 750ms }
+      - { port: 8080, name: http-alt, timeout: 750ms }
+      - { port: 502,  name: modbus,   timeout: 750ms }
+
+storage:
+  path: /data/lan-tracker/hosts.db
+logging: { level: info, format: journald }

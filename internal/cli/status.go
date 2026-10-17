@@ -12,17 +12,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 func (a *app) daemonStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "status",
 		Short:   "Daemon health, interfaces and per-interface collector state",
-		Example: "  sudo lan-sentinel daemon status",
+		Example: "  sudo lan-tracker daemon status",
 		Long: "Exit 0 when healthy, 1 when degraded (a configured collector is not running),\n" +
 			"2 when unhealthy (the database does not answer), 3 when the daemon is\n" +
 			"unreachable. --quiet prints nothing.",
@@ -71,7 +71,7 @@ func (a *app) statusText(w io.Writer, st api.Status) {
 	if st.Active.Disabled {
 		active = "DISABLED"
 		if st.Active.Forced {
-			active += " (" + "LAN_SENTINEL_ACTIVE_DISABLED=1)"
+			active += " (" + "LAN_TRACKER_ACTIVE_DISABLED=1)"
 		} else if st.Active.Reason != "" {
 			active += " (" + st.Active.Reason + ")"
 		}
@@ -140,7 +140,7 @@ func (a *app) watchCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "watch",
 		Short:   "Live event stream (Ctrl-C to stop)",
-		Example: "  sudo lan-sentinel watch --interface eth0",
+		Example: "  sudo lan-tracker watch --interface eth0",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := onlyFormats(a.g.output, "table", "jsonl", "json"); err != nil {
@@ -178,7 +178,7 @@ func (a *app) dbCmd() *cobra.Command {
 	c.AddCommand(&cobra.Command{
 		Use:     "info",
 		Short:   "Path, schema version, journal mode, size, WAL size, row counts",
-		Example: "  sudo lan-sentinel db info",
+		Example: "  sudo lan-tracker db info",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := onlyFormats(a.g.output, "table", "json"); err != nil {
@@ -210,7 +210,7 @@ func (a *app) dbCmd() *cobra.Command {
 	}, &cobra.Command{
 		Use:     "check",
 		Short:   "SQLite integrity check (exit 2 if it fails)",
-		Example: "  sudo lan-sentinel db check",
+		Example: "  sudo lan-tracker db check",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := onlyFormats(a.g.output, "table", "json"); err != nil {
@@ -246,8 +246,11 @@ func (a *app) dbCmd() *cobra.Command {
 // swept, 14 replied (26 s)".
 func (a *app) lastPass(collector string, p scheduler.PassSummary) string {
 	verb := "probed"
-	if collector == platform.CollectorARP {
+	switch collector {
+	case platform.CollectorARP:
 		verb = "swept"
+	case platform.CollectorNames:
+		verb = "asked"
 	}
 	s := fmt.Sprintf("last pass %s: %d %s, %d replied", a.ago(p.At), p.Probed, verb, p.Replied)
 	if p.Blocked > 0 {
@@ -260,6 +263,9 @@ func (a *app) lastPass(collector string, p scheduler.PassSummary) string {
 	s += " (" + took
 	if !p.Complete {
 		s += ", cut short"
+	}
+	if p.Overran {
+		s += ", longer than its interval: the cadence is not kept"
 	}
 	return s + ")"
 }

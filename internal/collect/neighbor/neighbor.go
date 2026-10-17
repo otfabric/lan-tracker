@@ -16,9 +16,9 @@ import (
 	"net/netip"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
 )
 
 // confirmTolerance absorbs the 10 ms granularity of the kernel's

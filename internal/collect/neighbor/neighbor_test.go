@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
 )
 
 var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)

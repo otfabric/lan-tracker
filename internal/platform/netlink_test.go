@@ -74,7 +74,7 @@ func TestNetlinkNeighborEvent(t *testing.T) {
 	deadline := time.After(10 * time.Second)
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
-	_, _ = conn.Write([]byte("lan-sentinel"))
+	_, _ = conn.Write([]byte("lan-tracker"))
 	for {
 		select {
 		case ev := <-ch:
@@ -93,7 +93,7 @@ func TestNetlinkNeighborEvent(t *testing.T) {
 			}
 			return
 		case <-tick.C:
-			_, _ = conn.Write([]byte("lan-sentinel"))
+			_, _ = conn.Write([]byte("lan-tracker"))
 		case <-deadline:
 			t.Fatalf("no neighbour event for %s", target)
 		}

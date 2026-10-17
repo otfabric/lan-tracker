@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/store"
-	"lan-sentinel/migrations"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/migrations"
 )
 
 // The catalogue must match the CHECK constraint on events.type, as the

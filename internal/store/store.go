@@ -20,8 +20,8 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/migrations"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/migrations"
 )
 
 // Defaults for Options.

@@ -1,6 +1,6 @@
 # ADR 0008: Active discovery inside a fixed OT safety envelope
 
-- Status: Accepted
+- Status: Accepted (UDP probes and the packet-rate budget superseded by [ADR 0012](0012-connectivity-tracker-scope.md), 16 Oct 2026)
 - Date: 5 Oct 2026 (v1 specification); refined 6 Oct 2026
 - Specified in: `ARCHITECTURE.md` §3 (Active probes), §5; `REQUIREMENTS.md` §2.4, NFR-SAFE-1 to NFR-SAFE-5, §4, §5 (Probe targets, IPv4-first, Budget enforcement, TCP close and packets, Back-off scope, Sweep size, Identification plugins); AGENTS.md rules 7, 11, 12
 

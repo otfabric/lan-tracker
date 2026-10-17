@@ -8,8 +8,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"lan-sentinel/internal/store"
-	"lan-sentinel/migrations"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/migrations"
 )
 
 // Migration 0006 marks the latest identification of each host, field and

@@ -11,7 +11,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"lan-sentinel/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/clock"
 )
 
 var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)

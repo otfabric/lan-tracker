@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 func (a *app) hostsCmd() *cobra.Command {
@@ -58,21 +57,22 @@ func (q queryFlags) resolve(args []string) (string, store.QueryKind, error) {
 }
 
 func (a *app) hostsListCmd() *cobra.Command {
-	var iface, vendor, device, description, seen string
+	var iface, vendor, description, seen string
 	var active, stale bool
 	var port int
 	c := &cobra.Command{
 		Use:     "list",
-		Short:   "Inventory: MAC, IP, hostname, vendor, device type, interface, presence, last seen, description",
-		Example: "  sudo lan-sentinel hosts list --active",
+		Short:   "Inventory: MAC, IP, hostname, OUI registrant, interface, presence, last seen, description",
+		Example: "  sudo lan-tracker hosts list --active",
 		Long: "List hosts. --active shows live hosts (ACTIVE or RECENT), --stale the others\n" +
-			"(STALE or MISSING); --port hosts with that port OPEN; --device hosts whose\n" +
-			"device type (the most confident identification) contains the text;\n" +
-			"--description hosts whose description contains it.",
+			"(STALE or MISSING); --port hosts with that TCP port last answering OPEN;\n" +
+			"--vendor hosts whose OUI registrant (the MAC prefix's IEEE registrant, a hint,\n" +
+			"not the equipment's maker) contains the text; --description hosts whose\n" +
+			"description contains it.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			tf := &timeFlags{a: a}
-			f := store.HostFilter{Interface: iface, Live: active, NotLive: stale, Vendor: vendor, Device: device, Description: description, Port: port, SeenSince: tf.ago("seen-within", seen)}
+			f := store.HostFilter{Interface: iface, Live: active, NotLive: stale, Vendor: vendor, Description: description, Port: port, SeenSince: tf.ago("seen-within", seen)}
 			if tf.err != nil {
 				return tf.err
 			}
@@ -89,19 +89,11 @@ func (a *app) hostsListCmd() *cobra.Command {
 	fl.StringVar(&iface, "interface", "", "only this interface")
 	fl.BoolVar(&active, "active", false, "only live hosts (ACTIVE or RECENT)")
 	fl.BoolVar(&stale, "stale", false, "only hosts that are not live (STALE or MISSING)")
-	fl.StringVar(&vendor, "vendor", "", "vendor or manufacturer contains this text")
-	fl.StringVar(&device, "device", "", "device type contains this text (e.g. printer, plc)")
+	fl.StringVar(&vendor, "vendor", "", "the OUI registrant contains this text")
 	fl.StringVar(&description, "description", "", "the description contains this text")
 	fl.IntVar(&port, "port", 0, "an OPEN service on this port")
 	fl.StringVar(&seen, "seen-within", "", "last seen within this duration (24h, 7d) or since this time")
 	return c
-}
-
-func vendorOf(h store.HostSummary) string {
-	if h.Manufacturer != "" {
-		return h.Manufacturer
-	}
-	return h.Vendor
 }
 
 func (a *app) hostsTable(hosts []store.HostSummary) error {
@@ -112,11 +104,11 @@ func (a *app) hostsTable(hosts []store.HostSummary) error {
 	case "jsonl":
 		return writeJSONL(w, hosts)
 	}
-	header := []string{"MAC", "IP", "HOSTNAME", "VENDOR", "DEVICE", "IFACE", "STATE", "LAST SEEN", "DESCRIPTION"}
+	header := []string{"MAC", "IP", "HOSTNAME", "OUI REGISTRANT", "IFACE", "STATE", "LAST SEEN", "DESCRIPTION"}
 	rows := make([][]string, 0, len(hosts))
 	for _, h := range hosts {
 		if a.g.output == "csv" {
-			rows = append(rows, []string{h.MAC, strings.Join(h.IPs, " "), h.PreferredName, vendorOf(h), h.DeviceType, h.Interface, h.Presence,
+			rows = append(rows, []string{h.MAC, strings.Join(h.IPs, " "), h.PreferredName, h.Vendor, h.Interface, h.Presence,
 				h.LastSeen.UTC().Format(time.RFC3339), h.Description})
 			continue
 		}
@@ -127,7 +119,7 @@ func (a *app) hostsTable(hosts []store.HostSummary) error {
 				ip += fmt.Sprintf(" (+%d)", len(h.IPs)-1)
 			}
 		}
-		rows = append(rows, []string{h.MAC, ip, dash(h.PreferredName), dash(vendorOf(h)), dash(h.DeviceType), h.Interface, h.Presence, a.ago(h.LastSeen),
+		rows = append(rows, []string{h.MAC, ip, dash(h.PreferredName), dash(h.Vendor), h.Interface, h.Presence, a.ago(h.LastSeen),
 			h.Description})
 	}
 	if a.g.output == "csv" {
@@ -149,7 +141,7 @@ func (a *app) hostsShowCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "show <query>",
 		Short:   "Full record of one current host, with every address and name over time",
-		Example: "  sudo lan-sentinel hosts show 192.168.0.99",
+		Example: "  sudo lan-tracker hosts show 192.168.0.99",
 		Long: "Shows one current host by host ID, MAC, IP or hostname (detected in that\n" +
 			"order, as hosts find). When several match (the same MAC on two interfaces),\n" +
 			"it lists them with their host IDs and exits 64; --interface or --id picks one.",
@@ -216,8 +208,8 @@ func oneCurrent(ctx context.Context, b finder, query string, kind store.QueryKin
 // unconfirmed at that time.
 func (a *app) hostRecord(w io.Writer, h store.Host, at *time.Time) {
 	mac := h.MAC
-	if v := vendorOf(h.HostSummary); v != "" {
-		mac += "  " + v
+	if h.Vendor != "" {
+		mac += "  (OUI registrant: " + h.Vendor + ")"
 	}
 	if h.LocallyAdministered {
 		mac += "  (locally administered)"
@@ -226,39 +218,135 @@ func (a *app) hostRecord(w io.Writer, h store.Host, at *time.Time) {
 	if h.PreferredName != "" {
 		fmt.Fprintf(w, "Name:        %s\n", h.PreferredName)
 	}
-	if h.DeviceType != "" {
-		fmt.Fprintf(w, "Device:      %s\n", h.DeviceType)
-	}
 	if h.Description != "" {
 		fmt.Fprintf(w, "Description: %s\n", h.Description)
 	}
-	fmt.Fprintf(w, "First seen:  %s\nLast seen:   %s\n", a.stamp(h.FirstSeen), a.stamp(h.LastSeen))
+	if h.ProxyARP {
+		fmt.Fprintln(w, "Proxy ARP:   answers ARP for addresses other hosts hold; its ARP replies do not prove ownership")
+	}
+	fmt.Fprintf(w, "First seen:  %s\nLast seen:   %s%s\n", a.stamp(h.FirstSeen), a.stamp(h.LastSeen), a.evidenceKinds(h.HostSummary))
 	if len(h.Addresses) > 0 {
 		fmt.Fprintln(w, "\nAddresses:")
 		for _, b := range h.Addresses {
 			fmt.Fprintf(w, "  %s\n", a.bindingLine(b, at))
 		}
 	}
-	if len(h.Names) > 0 {
-		fmt.Fprintln(w, "\nNames:")
-		for _, n := range h.Names {
-			line := fmt.Sprintf("  %-16s %-8s confirmed %s", n.Name, n.Type, a.ago(n.LastSeen))
-			if n.Stale {
-				line += " (stale)"
-			}
-			if n.EndedAt != nil {
-				line += "  replaced " + a.stamp(*n.EndedAt)
-			}
-			fmt.Fprintln(w, line)
+	a.printNames(w, h.Names, false)
+	a.printEndpoints(w, h.Endpoints)
+	a.printLeases(w, h.DHCPLeases)
+	a.printLegacyServices(w, h.LegacyServices)
+}
+
+// printLeases lists the leases servers acknowledged for the host's MAC.
+func (a *app) printLeases(w io.Writer, leases []store.DHCPLease) {
+	if len(leases) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nDHCP leases (the servers' statements, not proof the host holds the address):")
+	for _, l := range leases {
+		end := "open"
+		if l.EndedAt != nil {
+			end = l.EndReason + " " + a.stamp(*l.EndedAt)
+		}
+		line := fmt.Sprintf("  %-16s from %-15s %s → %s  acks %d  lease %s", l.IP, dash(l.ServerID), a.stamp(l.FirstACK), end, l.ACKs,
+			leaseText(l.LeaseSeconds))
+		if l.ExpiresAt != nil && l.EndedAt == nil {
+			line += "  expires " + a.stamp(*l.ExpiresAt)
+		}
+		if gw := configText(l.Config, "gateway"); gw != "" {
+			line += "  gateway " + gw
+		}
+		if l.Relay != "" {
+			line += "  via relay " + l.Relay
+		}
+		if l.Backfilled {
+			line += "  (LAN Sentinel: configuration unknown)"
+		}
+		fmt.Fprintln(w, line)
+	}
+}
+
+// evidenceKinds says which kind of evidence was last when ("  (frame 2m
+// ago, address 1h ago, endpoint answer 3m ago)"); empty for a host whose
+// kinds are unknown (recorded by LAN Sentinel).
+func (a *app) evidenceKinds(h store.HostSummary) string {
+	var parts []string
+	for _, k := range []struct {
+		name string
+		t    *time.Time
+	}{{"frame", h.LastFrameSeen}, {"address confirmed", h.LastAddressConfirmed}, {"endpoint answer", h.LastEndpointAnswer}} {
+		if k.t != nil {
+			parts = append(parts, k.name+" "+a.ago(*k.t))
 		}
 	}
-	if len(h.Services) > 0 {
-		fmt.Fprintln(w, "\nServices:")
-		for _, s := range h.Services {
-			fmt.Fprintf(w, "  %-8s %-11s %s\n", s.Proto+"/"+strconv.Itoa(s.Port), s.State, a.ago(s.LastResultAt))
-		}
+	if len(parts) == 0 {
+		return ""
 	}
-	a.printIdentifications(w, h.Identifications, identPrint{currentOnly: true})
+	return "  (" + strings.Join(parts, ", ") + ")"
+}
+
+// printNames lists name records: the name, its type and record type, what
+// it describes, its freshness and, with detail, its advertiser and TTL.
+func (a *app) printNames(w io.Writer, names []store.Name, detail bool) {
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nNames:")
+	for _, n := range names {
+		what := n.Address
+		if what == "" {
+			what = n.Value
+		}
+		line := fmt.Sprintf("  %-24s %-7s %-5s %-16s %s %s", n.Name, n.Type, n.RecordType, dash(what), n.Freshness, a.ago(n.LastSeen))
+		if n.Legacy {
+			line += " (legacy: type, advertiser and TTL unknown)"
+		}
+		if n.EndedAt != nil {
+			line += "  ended " + a.stamp(*n.EndedAt) + " (" + n.EndReason + ")"
+		}
+		if detail {
+			line += "  " + n.Source
+			if n.AdvertiserMAC != "" && n.Link != "sender" {
+				line += " advertised by " + n.AdvertiserMAC
+			}
+			if n.TTL != nil {
+				line += fmt.Sprintf(" ttl %ds", *n.TTL)
+			}
+			line += " link " + n.Link
+		}
+		fmt.Fprintln(w, line)
+	}
+}
+
+// printEndpoints lists TCP endpoints: the last result and, apart from it,
+// the last definite answer.
+func (a *app) printEndpoints(w io.Writer, eps []store.Endpoint) {
+	if len(eps) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nTCP endpoints:")
+	for _, e := range eps {
+		line := fmt.Sprintf("  %-16s %-9s %-11s %s", e.IP, e.Proto+"/"+strconv.Itoa(e.Port), e.LastResult, a.ago(e.LastResultAt))
+		if e.LastDetail != "" {
+			line += " (" + e.LastDetail + ")"
+		}
+		if e.LastDefiniteAt != nil && (e.LastDefiniteResult != e.LastResult || !e.LastDefiniteAt.Equal(e.LastResultAt)) {
+			line += "  last definite: " + e.LastDefiniteResult + " " + a.ago(*e.LastDefiniteAt)
+		}
+		fmt.Fprintln(w, line)
+	}
+}
+
+// printLegacyServices lists LAN Sentinel's probe results, which have no
+// address.
+func (a *app) printLegacyServices(w io.Writer, svc []store.Service) {
+	if len(svc) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nLegacy services (recorded by LAN Sentinel, address unknown):")
+	for _, s := range svc {
+		fmt.Fprintf(w, "  %-9s %-11s %s\n", s.Proto+"/"+strconv.Itoa(s.Port), s.State, a.stamp(s.LastResultAt))
+	}
 }
 
 // bindingLine renders "IP  first → end|open  sources: …  CONFLICT".
@@ -284,128 +372,15 @@ func (a *app) bindingLine(b store.Binding, at *time.Time) string {
 	return line
 }
 
-// identPrint is how hosts show/find and hosts evidence render Identification.
-type identPrint struct {
-	currentOnly     bool // hosts show lists only each source's current claims
-	markCurrent     bool // hosts evidence: * on current
-	everyConfidence bool // hosts evidence: each claim's confidence, not only where it differs
-	withEvidence    bool
-}
-
-// maxValueWidth caps the padding of identification values, so one long
-// value (a certificate's SAN list) does not push the other rows' columns far
-// right; a longer value is printed whole.
-const maxValueWidth = 32
-
-type identGroup struct {
-	source     string
-	confidence float64
-	lastSeen   time.Time
-	claims     []store.Identification
-}
-
-// groupIdentifications groups claims by source, then field. Confidence is
-// the source's highest current claim (or highest of any claim if none is
-// current). Sources are ordered by that confidence, then last seen.
-func groupIdentifications(ids []store.Identification, currentOnly bool) []identGroup {
-	idx := map[string]int{}
-	var groups []identGroup
-	for _, i := range ids {
-		if currentOnly && !i.Current {
-			continue
-		}
-		if n, ok := idx[i.Source]; ok {
-			g := &groups[n]
-			g.claims = append(g.claims, i)
-			if i.LastSeen.After(g.lastSeen) {
-				g.lastSeen = i.LastSeen
-			}
-			continue
-		}
-		idx[i.Source] = len(groups)
-		groups = append(groups, identGroup{source: i.Source, lastSeen: i.LastSeen, claims: []store.Identification{i}})
-	}
-	for i := range groups {
-		g := &groups[i]
-		var maxCur, maxAny float64
-		hasCur := false
-		for _, c := range g.claims {
-			if c.Confidence > maxAny {
-				maxAny = c.Confidence
-			}
-			if c.Current && (!hasCur || c.Confidence > maxCur) {
-				maxCur, hasCur = c.Confidence, true
-			}
-		}
-		if hasCur {
-			g.confidence = maxCur
-		} else {
-			g.confidence = maxAny
-		}
-		sort.SliceStable(g.claims, func(x, y int) bool {
-			if g.claims[x].Field != g.claims[y].Field {
-				return g.claims[x].Field < g.claims[y].Field
-			}
-			if g.claims[x].Current != g.claims[y].Current {
-				return g.claims[x].Current
-			}
-			return g.claims[x].Confidence > g.claims[y].Confidence
-		})
-	}
-	sort.SliceStable(groups, func(i, j int) bool {
-		if groups[i].confidence != groups[j].confidence {
-			return groups[i].confidence > groups[j].confidence
-		}
-		if !groups[i].lastSeen.Equal(groups[j].lastSeen) {
-			return groups[i].lastSeen.After(groups[j].lastSeen)
-		}
-		return groups[i].source < groups[j].source
-	})
-	return groups
-}
-
-// printIdentifications writes the Identification block: source line with
-// confidence and last seen, then aligned field/value rows. A claim's own
-// confidence follows its value in evidence (it is why one claim is current
-// and a weaker one is not) and, elsewhere, where it differs from its
-// source's.
-func (a *app) printIdentifications(w io.Writer, ids []store.Identification, how identPrint) {
-	groups := groupIdentifications(ids, how.currentOnly)
-	if len(groups) == 0 {
+// printLegacy lists the identifications LAN Sentinel recorded. They are
+// history: nothing updates them since the migration (ADR 0012).
+func (a *app) printLegacy(w io.Writer, ids []store.Identification) {
+	if len(ids) == 0 {
 		return
 	}
-	srcW, fieldW, valW := 0, 0, 0
-	for _, g := range groups {
-		srcW = max(srcW, len(g.source))
-		for _, c := range g.claims {
-			fieldW = max(fieldW, len(c.Field))
-			valW = max(valW, len(c.Value))
-		}
-	}
-	valW = min(valW, maxValueWidth)
-	fmt.Fprintln(w, "\nIdentification:")
-	for _, g := range groups {
-		fmt.Fprintf(w, "  %-*s  (%.2f)  %s\n", srcW, g.source, g.confidence, a.ago(g.lastSeen))
-		for _, c := range g.claims {
-			mark := ""
-			if how.markCurrent {
-				mark = " "
-				if c.Current {
-					mark = "*"
-				}
-			}
-			line := fmt.Sprintf("    %s%-*s  %s", mark, fieldW, c.Field, c.Value)
-			if how.everyConfidence || c.Confidence != g.confidence {
-				line = fmt.Sprintf("    %s%-*s  %-*s  (%.2f)", mark, fieldW, c.Field, valW, c.Value, c.Confidence)
-			}
-			if how.withEvidence {
-				line += "  " + compact(c.Evidence)
-			}
-			fmt.Fprintln(w, line)
-		}
-	}
-	if how.markCurrent {
-		fmt.Fprintln(w, "  (* current: the value each source holds now)")
+	fmt.Fprintln(w, "\nLegacy identification (recorded by LAN Sentinel, no longer maintained):")
+	for _, i := range ids {
+		fmt.Fprintf(w, "  %-12s %s=%s  first %s  last %s\n", i.Source, i.Field, i.Value, a.stamp(i.FirstSeen), a.stamp(i.LastSeen))
 	}
 }
 
@@ -414,8 +389,8 @@ func (a *app) hostsFindCmd() *cobra.Command {
 	var iface, atFlag string
 	c := &cobra.Command{
 		Use:     "find <query>",
-		Short:   "Current or point-in-time holder(s) with addresses, names and services",
-		Example: "  sudo lan-sentinel hosts find 192.168.0.99",
+		Short:   "Current or point-in-time holder(s) with addresses, names and TCP endpoints",
+		Example: "  sudo lan-tracker hosts find 192.168.0.99",
 		Long: "Find hosts by host ID, MAC, IP or hostname (detected in that order). With --at,\n" +
 			"answer for that time: the holder of an IP with its binding and what replaced it,\n" +
 			"every holder of a duplicate IP, or the bindings before and after when nobody\n" +
@@ -461,6 +436,23 @@ func (a *app) hostsFindCmd() *cobra.Command {
 }
 
 func (a *app) findResult(w io.Writer, res store.FindResult) {
+	defer func() {
+		if len(res.Advertised) == 0 {
+			return
+		}
+		fmt.Fprintln(w, "\nAdvertised or resolved, but held by no single MAC (a name record, not a host):")
+		for _, n := range res.Advertised {
+			what := n.Address
+			if what == "" {
+				what = n.Value
+			}
+			line := fmt.Sprintf("  %-24s %-7s %-5s %-16s %s %s  %s", n.Name, n.Type, n.RecordType, dash(what), n.Freshness, a.ago(n.LastSeen), n.Source)
+			if n.AdvertiserMAC != "" {
+				line += " from " + n.AdvertiserMAC
+			}
+			fmt.Fprintln(w, line)
+		}
+	}()
 	if len(res.Hosts) == 0 {
 		when := "now"
 		if res.At != nil {
@@ -485,8 +477,8 @@ func (a *app) findResult(w io.Writer, res store.FindResult) {
 		}
 		// An IP at a point in time: the holder and its binding.
 		mac := h.MAC
-		if v := vendorOf(h.HostSummary); v != "" {
-			mac += "  " + v
+		if h.Vendor != "" {
+			mac += "  (OUI registrant: " + h.Vendor + ")"
 		}
 		fmt.Fprintf(w, "Host ID:     %s\nInterface:   %s\nMAC:         %s\n", h.HostID, h.Interface, mac)
 		if h.PreferredName != "" {
@@ -501,8 +493,9 @@ func (a *app) findResult(w io.Writer, res store.FindResult) {
 		if h.ReplacedBy != nil {
 			fmt.Fprintf(w, "Replaced by: %s → %s from %s\n", h.ReplacedBy.Binding.IP, h.ReplacedBy.MAC, a.stamp(h.ReplacedBy.Binding.FirstSeen))
 		}
-		if h.MovedTo != nil {
-			fmt.Fprintf(w, "Moved to:    %s at %s\n", h.MovedTo.Binding.IP, a.stamp(h.MovedTo.Binding.FirstSeen))
+		if h.NextAddress != nil {
+			fmt.Fprintf(w, "Next new address of this MAC: %s from %s (its addresses are independent; not proof it moved)\n",
+				h.NextAddress.Binding.IP, a.stamp(h.NextAddress.Binding.FirstSeen))
 		}
 		if h.ConflictEvent != nil {
 			e := h.ConflictEvent
@@ -517,7 +510,7 @@ func (a *app) hostsHistoryCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "history <query>",
 		Short:   "Event timeline for a host, MAC, IP or name",
-		Example: "  sudo lan-sentinel hosts history 192.168.0.99",
+		Example: "  sudo lan-tracker hosts history 192.168.0.99",
 		Long: "For a host ID or MAC, every event of the host; for an IP, every event whose\n" +
 			"old value, new value or evidence IP is that IP, across all its holders; for a\n" +
 			"name, every event of the hosts that ever had it.",
@@ -610,9 +603,9 @@ func (a *app) hostsEvidenceCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "evidence <query>",
 		Short:   "Why we believe what we believe about a host",
-		Example: "  sudo lan-sentinel hosts evidence 192.168.0.99",
-		Long: "For every host that ever matched the query: per address, name, service and\n" +
-			"identification the sources that confirmed it with first and last seen, the\n" +
+		Example: "  sudo lan-tracker hosts evidence 192.168.0.99",
+		Long: "For every host that ever matched the query: per address, name and TCP endpoint\n" +
+			"the sources that confirmed it with first and last seen, the\n" +
 			"observation counts per source within roll-up retention, and the host's events\n" +
 			"with their evidence snapshots.",
 		Args: cobra.MaximumNArgs(1),
@@ -678,19 +671,11 @@ func (a *app) evidenceTable(w io.Writer, all []store.Evidence) {
 				}
 			}
 		}
-		if len(h.Names) > 0 {
-			fmt.Fprintln(w, "\nNames:")
-			for _, n := range h.Names {
-				fmt.Fprintf(w, "  %-16s %-8s %-14s first %s  last %s\n", n.Name, n.Type, n.Source, a.stamp(n.FirstSeen), a.stamp(n.LastSeen))
-			}
-		}
-		if len(h.Services) > 0 {
-			fmt.Fprintln(w, "\nServices:")
-			for _, s := range h.Services {
-				fmt.Fprintf(w, "  %-8s %-11s first %s  last result %s\n", s.Proto+"/"+strconv.Itoa(s.Port), s.State, a.stamp(s.FirstSeen), a.stamp(s.LastResultAt))
-			}
-		}
-		a.printIdentifications(w, h.Identifications, identPrint{markCurrent: true, everyConfidence: true, withEvidence: true})
+		a.printNames(w, h.Names, true)
+		a.printEndpoints(w, h.Endpoints)
+		a.printLeases(w, h.DHCPLeases)
+		a.printLegacyServices(w, h.LegacyServices)
+		a.printLegacy(w, h.LegacyIdentifications)
 		if len(ev.Counts) > 0 {
 			fmt.Fprintln(w, "\nObservations (raw and roll-ups):")
 			for _, c := range ev.Counts {

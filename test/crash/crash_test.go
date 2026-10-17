@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // childEnv makes this test binary run the daemon instead of the tests.
@@ -98,7 +98,7 @@ func TestKillDuringWrites(t *testing.T) {
 	stream := replayFile(t, dir, 200_000)
 	db := filepath.Join(dir, "hosts.db")
 	cfg := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfg, []byte(fmt.Sprintf(`version: 1
+	if err := os.WriteFile(cfg, []byte(fmt.Sprintf(`version: 2
 interfaces:
   - name: eth1
     prefixes: [10.30.0.0/16]

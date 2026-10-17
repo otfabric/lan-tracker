@@ -46,7 +46,7 @@ func TestReadJSONL(t *testing.T) {
 		{"unknown field", `{"time":"2026-10-01T10:00:00Z","source":"passive_arp","ip":"10.0.0.1","bogus":1}`, 0, "line 1: json: unknown field"},
 		{"unknown source", `{"time":"2026-10-01T10:00:00Z","source":"telepathy","ip":"10.0.0.1"}`, 0, `unknown source "telepathy"`},
 		{"bad mac", `{"time":"2026-10-01T10:00:00Z","source":"passive_arp","mac":"zz"}`, 0, "mac:"},
-		{"empty observation", `{"time":"2026-10-01T10:00:00Z","source":"passive_arp"}`, 0, "neither mac, ip nor hostname"},
+		{"empty observation", `{"time":"2026-10-01T10:00:00Z","source":"passive_arp"}`, 0, "neither mac, ip, hostname nor records"},
 		{"missing time", `{"source":"passive_arp","ip":"10.0.0.1"}`, 0, "missing time"},
 		{"error on line 2", "{\"time\":\"2026-10-01T10:00:00Z\",\"source\":\"passive_arp\",\"ip\":\"10.0.0.1\"}\n{", 1, "line 2:"},
 	}
@@ -98,13 +98,13 @@ func TestBus(t *testing.T) {
 	}
 }
 
-func TestPublishWaitDoesNotDropIdentify(t *testing.T) {
+func TestPublishWaitDoesNotDrop(t *testing.T) {
 	b := NewBus(1)
 	fill := Observation{Time: time.Unix(1, 0), Source: PassiveARP, IP: netip.MustParseAddr("10.0.0.1")}
 	if !b.Publish(fill) {
 		t.Fatal("fill")
 	}
-	id := Observation{Time: time.Unix(2, 0), Source: IdentifyProbe, IP: netip.MustParseAddr("10.0.0.2")}
+	id := Observation{Time: time.Unix(2, 0), Source: TCPConnect, IP: netip.MustParseAddr("10.0.0.2")}
 	errc := make(chan error, 1)
 	go func() {
 		errc <- b.PublishWait(context.Background(), id)
@@ -117,8 +117,8 @@ func TestPublishWaitDoesNotDropIdentify(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = <-b.C()
-	if got.Observation.Source != IdentifyProbe {
-		t.Fatalf("identify = %s", got.Observation.Source)
+	if got.Observation.Source != TCPConnect {
+		t.Fatalf("second = %s", got.Observation.Source)
 	}
 	if b.Dropped() != 0 {
 		t.Errorf("Dropped = %d, want 0", b.Dropped())
@@ -186,25 +186,72 @@ func TestPublishOperatorWaitsForTheConsumer(t *testing.T) {
 	}
 }
 
-func TestProvesPresence(t *testing.T) {
+// The evidence kinds of docs/DATA_MODEL.md §2: a DHCP server's lease
+// assertion and a cache entry never make a host present; an answered
+// probe does, a timeout or a local failure does not.
+func TestEvidence(t *testing.T) {
 	ip := netip.MustParseAddr("10.0.0.1")
+	mac := net.HardwareAddr{0, 1, 2, 3, 4, 5}
 	svc := func(s ServiceState) *ServiceResult { return &ServiceResult{Proto: "tcp", Port: 502, State: s} }
 	tests := []struct {
 		o    Observation
-		want bool
+		want Evidence
 	}{
-		{Observation{Source: PassiveARP, MAC: net.HardwareAddr{0, 1, 2, 3, 4, 5}, IP: ip}, true},
-		{Observation{Source: PassiveDNS, IP: ip, Hostname: "x"}, false},
-		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceOpen)}, true},
-		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceRefused)}, true},
-		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceTimeout)}, false},
-		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceUnreachable)}, false},
-		{Observation{Source: ICMPScan, IP: ip}, true},
+		{Observation{Source: PassiveARP, MAC: mac, IP: ip}, EvidenceAddress},
+		{Observation{Source: ARPScan, MAC: mac, IP: ip}, EvidenceAddress},
+		{Observation{Source: PassiveIPv4, MAC: mac, IP: ip}, EvidenceFrame},
+		{Observation{Source: PassiveMDNS, MAC: mac, IP: ip}, EvidenceFrame},
+		{Observation{Source: PassiveDNS, IP: ip, Hostname: "x"}, EvidenceNone},
+		{Observation{Source: DNSQuery, Records: []Record{{Name: "x", Type: RecordA, Addr: ip}}}, EvidenceNone},
+		{Observation{Source: MDNSQuery, MAC: mac, IP: ip}, EvidenceFrame},
+		{Observation{Source: PassiveDHCPLease, MAC: mac, IP: ip}, EvidenceCached},
+		{Observation{Source: KernelNeighbor, MAC: mac, IP: ip, NeighborState: "REACHABLE"}, EvidenceAddress},
+		{Observation{Source: KernelNeighbor, MAC: mac, IP: ip, NeighborState: "STALE"}, EvidenceCached},
+		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceOpen)}, EvidenceAnswer},
+		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceRefused)}, EvidenceAnswer},
+		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceTimeout)}, EvidenceNone},
+		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceUnreachable)}, EvidenceNone},
+		{Observation{Source: TCPConnect, IP: ip, Service: svc(ServiceLocalError)}, EvidenceNone},
+		{Observation{Source: ICMPScan, IP: ip}, EvidenceAnswer},
 	}
 	for _, tt := range tests {
-		if got := tt.o.ProvesPresence(); got != tt.want {
-			t.Errorf("%s %v: ProvesPresence = %v", tt.o.Source, tt.o.Service, got)
+		if got := tt.o.Evidence(); got != tt.want {
+			t.Errorf("%s %s %v: Evidence = %d, want %d", tt.o.Source, tt.o.NeighborState, tt.o.Service, got, tt.want)
 		}
+	}
+	if EvidenceCached.Present() || EvidenceNone.Present() || !EvidenceAnswer.Present() {
+		t.Error("Present")
+	}
+}
+
+// Records round-trip through JSONL; a missing TTL is unknown, not a
+// goodbye.
+func TestRecordsJSON(t *testing.T) {
+	in := `{"time":"2026-10-01T10:00:00Z","source":"passive_mdns","mac":"00:01:02:03:04:05","ip":"10.0.0.1",` +
+		`"records":[{"name":"plc.local","type":"A","addr":"10.0.0.9","ttl":120,"flush":true},{"name":"plc.local","type":"AAAA","addr":"fd00::9"}]}`
+	var o Observation
+	if err := json.Unmarshal([]byte(in), &o); err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Records) != 2 || *o.Records[0].TTL != 120 || !o.Records[0].Flush || o.Records[1].TTL != nil {
+		t.Fatalf("records = %+v", o.Records)
+	}
+	out, _ := json.Marshal(o)
+	var back Observation
+	if err := json.Unmarshal(out, &back); err != nil || back.Records[0].Addr != o.Records[0].Addr {
+		t.Errorf("round trip %s: %v", out, err)
+	}
+	for _, bad := range []string{
+		`{"time":"2026-10-01T10:00:00Z","source":"passive_dns","records":[{"name":"x","type":"MX"}]}`,
+		`{"time":"2026-10-01T10:00:00Z","source":"passive_dns","records":[{"type":"A"}]}`,
+	} {
+		if err := json.Unmarshal([]byte(bad), &o); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	only := `{"time":"2026-10-01T10:00:00Z","source":"dns_query","records":[{"name":"x.example","type":"A","addr":"10.0.0.2"}]}`
+	if err := json.Unmarshal([]byte(only), &o); err != nil {
+		t.Errorf("records alone: %v", err)
 	}
 }
 

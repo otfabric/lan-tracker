@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
-	"lan-sentinel/internal/store/storetest"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store/storetest"
 )
 
 const golden = "../../test/golden/reconstruction/"
@@ -74,6 +74,7 @@ func serve(t *testing.T) *readFixture {
 	t.Helper()
 	st, db, exp := storetest.Seed(t, golden)
 	storetest.AddDHCPServers(t, st)
+	storetest.AddDHCPLeases(t, st)
 	storetest.AddIdentifications(t, st)
 	r, err := st.Reader(time.Hour)
 	if err != nil {
@@ -134,19 +135,19 @@ func TestReadCommands(t *testing.T) {
 		wantCode int
 		want     []string
 	}{
-		{"hosts list", []string{"hosts", "list"}, 0, []string{"MAC", a, "192.168.110.52", "Siemens AG", "STALE", "plc-b.local", "58m ago"}},
+		{"hosts list", []string{"hosts", "list"}, 0, []string{"MAC", "OUI REGISTRANT", a, "192.168.110.51 (+1)", "Siemens AG", "STALE", "plc-b.local", "58m ago"}},
 		{"hosts list active", []string{"hosts", "list", "--active", "--interface", "eth1"}, 0, []string{b}},
-		{"hosts list by device type", []string{"hosts", "list", "--device", "PRINT"}, 0, []string{"DEVICE", a, "Printer"}},
-		{"hosts list device csv", []string{"-o", "csv", "hosts", "list", "--device", "printer"}, 0, []string{"MAC,IP,HOSTNAME,VENDOR,DEVICE,IFACE,STATE,LAST SEEN,DESCRIPTION\n" + a + ","}},
+		{"hosts list by OUI registrant", []string{"hosts", "list", "--vendor", "SIEMENS"}, 0, []string{"OUI REGISTRANT", a, "Siemens AG"}},
+		{"hosts list csv header", []string{"-o", "csv", "hosts", "list", "--vendor", "siemens"}, 0, []string{"MAC,IP,HOSTNAME,OUI REGISTRANT,IFACE,STATE,LAST SEEN,DESCRIPTION\n"}},
 		{"hosts list csv", []string{"hosts", "list", "-o", "csv", "--port", "502"}, 0, []string{"MAC,IP,HOSTNAME", b + ",192.168.110.50,plc-b.local"}},
 		{"hosts list jsonl", []string{"hosts", "list", "-o", "jsonl", "--vendor", "siemens", "--seen-within", "2h"}, 0, []string{`"mac":"` + a + `"`}},
-		{"find current", []string{"hosts", "find", "192.168.110.50"}, 0, []string{"Host ID:", b, "Names:", "plc-b.local", "mdns", "Services:", "tcp/502", "OPEN"}},
+		{"find current", []string{"hosts", "find", "192.168.110.50"}, 0, []string{"Host ID:", b, "Names:", "plc-b.local", "mdns", "TCP endpoints:", "192.168.110.50", "tcp/502", "OPEN"}},
 		{"find conflict at", []string{"hosts", "find", "192.168.110.51", "--at", "2026-10-01 13:10"}, 0, []string{"13:00:00 → open   sources: passive_arp   CONFLICT", "Conflict:", "DUPLICATE_IP_DETECTED"}},
-		{"find nobody", []string{"hosts", "find", "--ip", "192.168.110.50", "--at", "2026-10-01T11:30:00Z"}, 1, []string{"No holder of 192.168.110.50", "Previous:", a, "Next:", b}},
+		{"find nobody", []string{"hosts", "find", "--ip", "192.168.110.51", "--at", "2026-10-01T10:30:00Z"}, 1, []string{"No holder of 192.168.110.51", "Next:", a}},
 		{"find unknown name", []string{"hosts", "find", "--hostname", "ghost"}, 1, []string{"No holder of ghost now"}},
-		{"find moved", []string{"hosts", "find", "192.168.110.50", "--at", "2026-10-01T10:30:00Z"}, 0, []string{"Moved to:    192.168.110.51", "Replaced by: 192.168.110.50 → " + b}},
+		{"find replaced", []string{"hosts", "find", "192.168.110.50", "--at", "2026-10-01T10:30:00Z"}, 0, []string{"Next new address of this MAC: 192.168.110.52", "not proof it moved", "Replaced by: 192.168.110.50 → " + b}},
 		{"find by mac json", []string{"-o", "json", "hosts", "find", "--mac", a}, 0, []string{`"kind": "mac"`}},
-		{"history ip", []string{"hosts", "history", "192.168.110.50", "--until", "2026-10-01T14:00:00Z"}, 0, []string{"HOST_DISCOVERED", "IP_CHANGED", "192.168.110.50 -> 192.168.110.51", "SERVICE_OPENED"}},
+		{"history ip", []string{"hosts", "history", "192.168.110.50", "--until", "2026-10-01T14:00:00Z"}, 0, []string{"HOST_DISCOVERED", "IP_REMOVED", "SERVICE_STATE_CHANGED"}},
 		{"history csv", []string{"-o", "csv", "hosts", "history", "--mac", a, "--since", "2026-10-01"}, 0, []string{"TIME,TYPE", "2026-10-01T10:00:00Z,HOST_DISCOVERED"}},
 		{"evidence", []string{"hosts", "evidence", a, "--since", "30d"}, 0, []string{"Addresses:", "passive_dhcp", "Observations (raw and roll-ups):", "Events:", "evidence {"}},
 		{"evidence jsonl", []string{"-o", "jsonl", "hosts", "evidence", "plant-sw-01"}, 0, []string{`"name":"plant-sw-01"`}},
@@ -154,10 +155,10 @@ func TestReadCommands(t *testing.T) {
 		{"observations", []string{"observations", "list", "--unbound"}, 0, []string{"tcp_connect", "192.168.110.99", `{"port":502,"proto":"tcp","state":"REFUSED"}`}},
 		{"observations jsonl", []string{"-o", "jsonl", "observations", "list", "--source", "passive_dhcp", "--limit", "1"}, 0, []string{`"source":"passive_dhcp"`}},
 		{"rollups", []string{"observations", "list", "--rollups"}, 0, []string{"HOUR", "COUNT"}},
-		{"events by type", []string{"events", "list", "--type", "duplicate-ip,DUPLICATE_IP_RESOLVED", "--interface", "eth1"}, 0, []string{"DUPLICATE_IP_DETECTED", "DUPLICATE_IP_RESOLVED", a}},
-		{"events json", []string{"-o", "json", "events", "list", "--ip", "192.168.110.52"}, 0, []string{`"type": "IP_CHANGED"`}},
+		{"events by type", []string{"events", "list", "--type", "duplicate-ip,IP_REMOVED", "--interface", "eth1"}, 0, []string{"DUPLICATE_IP_DETECTED", "IP_REMOVED", a}},
+		{"events json", []string{"-o", "json", "events", "list", "--ip", "192.168.110.52"}, 0, []string{`"type": "IP_ADDED"`}},
 		{"services", []string{"services", "list", "--port", "502"}, 0, []string{"502/tcp", "OPEN", "192.168.110.50"}},
-		{"services csv", []string{"-o", "csv", "services", "list", "--state", "open"}, 0, []string{"IP,MAC,IFACE,PORT,STATE,LAST CHECK"}},
+		{"services csv", []string{"-o", "csv", "services", "list", "--state", "open"}, 0, []string{"IP,PORT,LAST RESULT,CHECKED,LAST DEFINITE,MAC,IFACE\n192.168.110.50,502/tcp,OPEN,2026-10-01T14:00:00Z,OPEN 2026-10-01T14:00:00Z,"}},
 		{"interfaces", []string{"interfaces", "list"}, 0, []string{"eth1", "192.168.110.0/24", "on", "unknown"}},
 		{"dhcp servers", []string{"dhcp", "servers"}, 0, []string{
 			"SERVER ID      RELAY  MAC                IP              IFACE  STATUS      ROUTER         DNS            MASK           LAST SEEN",
@@ -167,6 +168,20 @@ func TestReadCommands(t *testing.T) {
 			"SERVER ID,RELAY,MAC,IP,IFACE,STATUS,ROUTER,DNS,MASK,LAST SEEN\nunknown,,02:00:00:00:00:66,192.168.110.66,eth1,unexpected,,,,2026-10-01T12:00:00Z"}},
 		{"dhcp servers json", []string{"-o", "json", "dhcp", "servers", "--interface", "eth1"}, 0, []string{`"server_id": "192.168.110.1"`, `"status": "unexpected"`}},
 		{"dhcp servers bad status", []string{"dhcp", "servers", "--status", "rogue"}, ExitUsage, nil},
+		{"dhcp leases", []string{"dhcp", "leases"}, 0, []string{
+			"CLIENT             IP              SERVER ID      RELAY  IFACE  FIRST ACK            LAST ACK             ACKS  LEASE     EXPIRES              GATEWAY        DNS                          STATE",
+			"00:1b:1b:aa:bb:01  192.168.110.52  192.168.110.1  -      eth1   2026-10-01 13:30:00  2026-10-01 14:00:00  2     infinite  -                    -              192.168.110.1,192.168.110.4  open",
+			"00:1b:1b:aa:bb:01  192.168.110.51  192.168.110.1  -      eth1   2026-10-01 11:00:00  2026-10-01 11:00:00  1     1h0m0s    2026-10-01 12:00:00  192.168.110.1  192.168.110.1                superseded,partial"}},
+		{"dhcp leases csv", []string{"-o", "csv", "dhcp", "leases", "--open", "--mac", "00:1b:1b:aa:bb:01"}, 0, []string{
+			"CLIENT,IP,SERVER ID,RELAY,IFACE,FIRST ACK,LAST ACK,ACKS,LEASE,EXPIRES,GATEWAY,DNS,STATE\n00:1b:1b:aa:bb:01,192.168.110.52,192.168.110.1,,eth1,2026-10-01T13:30:00Z,2026-10-01T14:00:00Z,2,infinite,,,\"192.168.110.1,192.168.110.4\",open\n"}},
+		{"dhcp leases bad mac", []string{"dhcp", "leases", "--mac", "plc"}, ExitUsage, nil},
+		{"dhcp exchanges", []string{"dhcp", "exchanges", "--since", "30d"}, 0, []string{
+			"CLIENT             XID         IFACE  FIRST SEEN           MESSAGES                                                  OFFERS  SELECTED       OUTCOME  VISIBILITY",
+			"00:1b:1b:aa:bb:01  0x00005e5e  eth1   2026-10-01 13:59:59  request(192.168.110.1) ack(192.168.110.1 192.168.110.52)  0       192.168.110.1  ack      complete"}},
+		{"dhcp exchanges json", []string{"-o", "json", "dhcp", "exchanges", "--mac", "00:1b:1b:aa:bb:01"}, 0, []string{`"xid": 24158`, `"lease_id": 2`}},
+		{"dhcp exchanges bad since", []string{"dhcp", "exchanges", "--since", "soon"}, ExitUsage, nil},
+		{"host shows its leases", []string{"hosts", "show", a}, 0, []string{"DHCP leases (the servers' statements",
+			"192.168.110.52   from 192.168.110.1   2026-10-01 13:30:00 → open  acks 2  lease infinite"}},
 		{"db info", []string{"db", "info"}, 0, []string{fmt.Sprintf("Schema:    %d", store.LatestSchemaVersion()), "Journal:   wal", "hosts", "4"}},
 		{"db info json", []string{"-o", "json", "db", "info"}, 0, []string{fmt.Sprintf(`"schema_version": %d`, store.LatestSchemaVersion())}},
 		{"db check", []string{"db", "check"}, 0, []string{"ok"}},
@@ -195,17 +210,10 @@ func TestReadCommands(t *testing.T) {
 	// hosts show with a real ID, table form.
 	hosts := f.hostIDs(t)
 	code, out, _ := f.run(t, "hosts", "show", hosts[a])
-	if code != 0 || !strings.Contains(out, "192.168.110.50   2026-10-01 10:00:00 → 2026-10-01 11:00:00") || !strings.Contains(out, "Identification:") {
+	// No device type or identification in hosts show (ADR 0012).
+	if code != 0 || !strings.Contains(out, "192.168.110.50   2026-10-01 10:00:00 → 2026-10-01 12:00:00") ||
+		!strings.Contains(out, "(OUI registrant: Siemens AG)") || strings.Contains(out, "Device:") || strings.Contains(out, "Printer") {
 		t.Errorf("hosts show: %d\n%s", code, out)
-	}
-	// --device keeps only the hosts of that device type.
-	if _, out, _ := f.run(t, "hosts", "list", "--device", "printer"); strings.Contains(out, b) {
-		t.Errorf("--device printer lists %s:\n%s", b, out)
-	}
-	// hosts show has the current claims, hosts evidence all of them.
-	if !strings.Contains(out, "Device:      Printer\n") || !strings.Contains(out, "  mdns  (0.70)  5h ago\n") ||
-		!strings.Contains(out, "device_type   Printer\n") || strings.Contains(out, "Media player") {
-		t.Errorf("hosts show identification:\n%s", out)
 	}
 	// The query is the same as hosts find: IP, MAC, or an explicit --ip.
 	if code, out, _ := f.run(t, "hosts", "show", "192.168.110.52"); code != 0 || !strings.Contains(out, hosts[a]) ||
@@ -222,9 +230,10 @@ func TestReadCommands(t *testing.T) {
 		t.Errorf("hosts show miss: %d %s", code, stderr)
 	}
 	_, out, _ = f.run(t, "hosts", "evidence", hosts[a], "--since", "30d")
-	if !strings.Contains(out, "*device_type   Printer") || !strings.Contains(out, "device_type   Media player") ||
-		!strings.Contains(out, "(* current: the value each source holds now)") {
-		t.Errorf("hosts evidence identification:\n%s", out)
+	// hosts evidence lists LAN Sentinel's claims as legacy history.
+	if !strings.Contains(out, "Legacy identification (recorded by LAN Sentinel, no longer maintained):") ||
+		!strings.Contains(out, "mdns         device_type=Printer") || !strings.Contains(out, "device_type=Media player") {
+		t.Errorf("hosts evidence legacy identification:\n%s", out)
 	}
 }
 
@@ -275,7 +284,9 @@ func TestOfflineAndUsage(t *testing.T) {
 		{"offline find", []string{"--offline", "hosts", "find", a}, 0, "192.168.110.52", ""},
 		{"offline interfaces", []string{"--offline", "interfaces", "list"}, 0, "eth1", ""},
 		{"offline dhcp servers", []string{"--offline", "dhcp", "servers", "--status", "allowed"}, 0, "192.168.110.1", ""},
-		{"offline hosts by device type", []string{"--offline", "hosts", "list", "--device", "printer"}, 0, "Printer", ""},
+		{"offline dhcp leases", []string{"--offline", "dhcp", "leases", "--ip", "192.168.110.51"}, 0, "superseded,partial", ""},
+		{"offline dhcp exchanges", []string{"--offline", "dhcp", "exchanges"}, 0, "0x00005e5e", ""},
+		{"offline hosts by OUI registrant", []string{"--offline", "hosts", "list", "--vendor", "siemens"}, 0, "Siemens AG", ""},
 		{"offline db check", []string{"--offline", "db", "check"}, 0, "ok", ""},
 		{"offline status refused", []string{"--offline", "daemon", "status"}, ExitUsage, "", "needs the running daemon"},
 		{"offline watch refused", []string{"--offline", "watch"}, ExitUsage, "", "needs the running daemon"},

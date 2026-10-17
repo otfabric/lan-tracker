@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/test/fixtures"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/test/fixtures"
 )
 
 // The committed pcap fixtures match their scenario descriptions.
@@ -35,10 +35,15 @@ func TestFixturesCurrent(t *testing.T) {
 }
 
 // TestCaptureScenario replays the site-a capture through the whole daemon:
-// the capture decoders, the correlator and the store. It reconstructs the
-// injected IP change and the duplicate IP from frames alone, and with a
-// DHCP allowlist it reports the rogue server and the allowed server's new
-// DNS server.
+// the capture decoders, the correlator and the store. It reconstructs A's
+// addresses (kept side by side: a new one never ends another), B's
+// takeover of .50 and the duplicate IP from frames alone, and with a DHCP
+// allowlist it reports the rogue server and the allowed server's new DNS
+// server. A server's lease ACK binds no address: A's .51 is bound only when
+// A itself uses it, its .52 lease never (A sends nothing from it), and the
+// HMI's PTR name stays an unlinked record until a MAC holds its address.
+// The switch port that sent the LLDP frames is the attachment; its chassis
+// ID is metadata. Nothing is identified (ADR 0012).
 func TestCaptureScenario(t *testing.T) {
 	dir := t.TempDir()
 	pcap, err := filepath.Abs("../fixtures/site-a-eth1.pcapng")
@@ -47,7 +52,7 @@ func TestCaptureScenario(t *testing.T) {
 	}
 	db := filepath.Join(dir, "hosts.db")
 	cfgPath := filepath.Join(dir, "config.yaml")
-	cfg := "version: 1\ninterfaces:\n  - name: eth1\n    prefixes: [192.168.110.0/24]\n    dhcp: { servers: [192.168.110.2] }\n    replay: { file: " + pcap +
+	cfg := "version: 2\ninterfaces:\n  - name: eth1\n    prefixes: [192.168.110.0/24]\n    dhcp: { servers: [192.168.110.2] }\n    replay: { file: " + pcap +
 		" }\nreplay: { exit_when_done: true }\nstorage: { path: " + db + " }\napi: { socket: " + filepath.Join(dir, "api.sock") + " }\nlogging: { format: text, level: warn }\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -75,7 +80,7 @@ func TestCaptureScenario(t *testing.T) {
 	defer conn.Close()
 	label := map[string]string{
 		fixtures.PLCA.String(): "A", fixtures.PLCB.String(): "B", fixtures.PLCC.String(): "C",
-		fixtures.HMI.String(): "HMI", fixtures.Server.String(): "SRV", fixtures.Switch.String(): "SW", fixtures.Rogue.String(): "ROGUE",
+		fixtures.HMI.String(): "HMI", fixtures.Server.String(): "SRV", fixtures.SwitchPort.String(): "SW", fixtures.Rogue.String(): "ROGUE",
 	}
 	at := func(ms int64) string { return time.UnixMilli(ms).UTC().Sub(fixtures.SiteA).String() }
 	rows := func(q string, scan func(r *sql.Rows) string) []string {
@@ -115,24 +120,22 @@ func TestCaptureScenario(t *testing.T) {
 		"1s HOSTNAME_ADDED A >mdns:plc-a.local",
 		"2s HOST_DISCOVERED SW >mac",
 		"2s HOSTNAME_ADDED SW >lldp:plant-sw-01",
-		"2s VENDOR_IDENTIFIED SW >device_type=Switch",
 		"10m0s HOST_DISCOVERED SRV >mac",
 		"10m1s HOST_DISCOVERED HMI >mac",
 		"10m1s HOSTNAME_ADDED HMI >dhcp:HMI-LINE3",
-		"10m1s VENDOR_IDENTIFIED HMI >os=Windows",
-		"10m2s IP_ADDED HMI >192.168.110.20",
 		"10m2s DHCP_SERVER_DISCOVERED SRV >192.168.110.2",
-		"10m3s HOSTNAME_ADDED HMI >dns_ptr:hmi-line3.plant.example",
-		"1h0m0s IP_CHANGED A 192.168.110.50>192.168.110.51",
+		"10m2s DHCP_LEASE_ASSIGNED HMI >192.168.110.20",
+		"1h0m0s DHCP_LEASE_ASSIGNED A >192.168.110.51",
 		"2h0m0s HOST_DISCOVERED B >mac",
+		"2h0m0s IP_REMOVED A 192.168.110.50> (B)",
 		"2h30m0s HOST_DISCOVERED ROGUE >mac",
 		"2h30m0s DHCP_SERVER_DISCOVERED ROGUE >192.168.110.66",
 		"2h30m0s DHCP_SERVER_UNEXPECTED ROGUE >192.168.110.66",
+		"2h50m0s IP_ADDED A >192.168.110.51",
 		"3h0m0s HOST_DISCOVERED C >mac",
 		"3h0m0s DUPLICATE_IP_DETECTED C >192.168.110.51 (A)",
-		"3h30m0s IP_CHANGED A 192.168.110.51>192.168.110.52",
-		"3h30m0s DUPLICATE_IP_RESOLVED C >192.168.110.51 (A)",
-		"3h30m0s DHCP_CONFIG_CHANGED SRV dns=192.168.110.2>dns=192.168.110.2,192.168.110.4",
+		"3h30m0s DHCP_LEASE_ASSIGNED A 192.168.110.51>192.168.110.52",
+		"4h0m0s IP_ADDED HMI >192.168.110.20",
 	})
 
 	// The servers, kept apart from the hosts they are; the rogue's offer
@@ -150,33 +153,55 @@ func TestCaptureScenario(t *testing.T) {
 		`192.168.110.2 "" SRV 192.168.110.2 allowed {"dns":"192.168.110.2,192.168.110.4","router":"192.168.110.1","subnet_mask":"255.255.255.0"} 10m2s..3h30m0s`,
 		`192.168.110.66 "" ROGUE 192.168.110.66 unexpected {"router":"192.168.110.66","subnet_mask":"255.255.255.0"} 2h30m0s..2h30m0s`,
 	})
-	// Passive identification (§5.7): the switch from its LLDP capabilities,
-	// the HMI's OS from its DHCP vendor class.
-	idents := rows(`SELECT h.mac, i.field, i.value, i.source, i.confidence FROM identifications i JOIN hosts h ON h.host_id = i.host_id
-		WHERE i.source NOT IN ('oui') ORDER BY h.mac, i.field`, func(r *sql.Rows) string {
-		var mac, field, value, source string
-		var conf float64
-		if err := r.Scan(&mac, &field, &value, &source, &conf); err != nil {
-			t.Fatal(err)
-		}
-		return fmt.Sprintf("%s %s=%s (%s %.1f)", label[mac], field, value, source, conf)
-	})
-	expect(t, "identifications", idents, []string{"HMI os=Windows (dhcp 0.6)", "SW device_type=Switch (lldp 0.8)"})
-	types := rows(`SELECT mac, device_type FROM hosts WHERE device_type IS NOT NULL ORDER BY mac`, func(r *sql.Rows) string {
-		var mac, typ string
-		_ = r.Scan(&mac, &typ)
-		return label[mac] + " " + typ
-	})
-	expect(t, "device types", types, []string{"SW Switch"})
+	// Nothing is identified: no identification rows, no device type.
+	if n := rows(`SELECT count(*) FROM identifications`, scanString); n[0] != "0" {
+		t.Errorf("%s identifications", n[0])
+	}
+	if n := rows(`SELECT count(*) FROM hosts WHERE device_type IS NOT NULL OR manufacturer IS NOT NULL`, scanString); n[0] != "0" {
+		t.Errorf("%s hosts with a device type or manufacturer", n[0])
+	}
 
-	// Server-confirmed leases keep their own provenance; the servers'
-	// addresses come from their replies.
+	// Leases bind nothing; the servers' addresses come from their replies.
 	leases := rows(`SELECT a.ip || ' ' || s.source FROM address_sources s JOIN addresses a ON a.id = s.address_id
 		WHERE s.source LIKE 'passive_dhcp%' ORDER BY a.ip, s.source`, scanString)
-	expect(t, "dhcp address sources", leases, []string{
-		"192.168.110.2 passive_dhcp_server", "192.168.110.20 passive_dhcp_lease", "192.168.110.51 passive_dhcp_lease",
-		"192.168.110.52 passive_dhcp_lease", "192.168.110.66 passive_dhcp_server",
+	expect(t, "dhcp address sources", leases, []string{"192.168.110.2 passive_dhcp_server", "192.168.110.66 passive_dhcp_server"})
+	// The lease history: per client, one row per address and configuration
+	// the server acknowledged. On a switched port the REQUESTs were not
+	// seen, so every lease is partial; the rogue's offer is an exchange,
+	// never a lease.
+	leaseRows := rows(`SELECT chaddr, ip, server_id, partial, coalesce(end_reason, 'open'), config_json FROM dhcp_leases ORDER BY id`,
+		func(r *sql.Rows) string {
+			var mac, ip, sid, reason, cfg string
+			var partial int
+			if err := r.Scan(&mac, &ip, &sid, &partial, &reason, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			return fmt.Sprintf("%s %s %s partial=%d %s %s", label[mac], ip, sid, partial, reason, cfg)
+		})
+	ackCfg := `{"dns":"192.168.110.2","gateway":"192.168.110.1","gateway_source":"option_3","prefix_length":24,"routers":"192.168.110.1","subnet_mask":"255.255.255.0"}`
+	expect(t, "dhcp leases", leaseRows, []string{
+		"HMI 192.168.110.20 192.168.110.2 partial=1 open " + ackCfg,
+		"A 192.168.110.51 192.168.110.2 partial=1 superseded " + ackCfg,
+		"A 192.168.110.52 192.168.110.2 partial=1 open " + strings.Replace(ackCfg, `"dns":"192.168.110.2"`, `"dns":"192.168.110.2,192.168.110.4"`, 1),
 	})
+	exchanges := rows(`SELECT chaddr || ' ' || messages || ' ' || outcome || ' ' || visibility FROM dhcp_exchanges ORDER BY id`, scanString)
+	for i, x := range exchanges {
+		for mac, l := range label {
+			exchanges[i] = strings.ReplaceAll(x, mac, l)
+			if exchanges[i] != x {
+				break
+			}
+		}
+	}
+	expect(t, "dhcp exchanges", exchanges, []string{
+		"HMI discover ack(192.168.110.2 192.168.110.20) ack complete",
+		"A ack(192.168.110.2 192.168.110.51) ack partial",
+		"HMI offer(192.168.110.66 192.168.110.200) offered partial",
+		"A ack(192.168.110.2 192.168.110.52) ack partial",
+	})
+	// The PTR answer for the HMI's address came before any MAC held it.
+	ptr := rows(`SELECT name || ' ' || coalesce(address, '') || ' ' || link FROM name_records WHERE name_type = 'dns_ptr'`, scanString)
+	expect(t, "dns ptr records", ptr, []string{"hmi-line3.plant.example 192.168.110.20 none"})
 
 	find := func(ip string, d time.Duration) []string {
 		t.Helper()
@@ -195,11 +220,11 @@ func TestCaptureScenario(t *testing.T) {
 		want string
 	}{
 		{"192.168.110.50", 30 * time.Minute, "A"},
-		{"192.168.110.50", 90 * time.Minute, ""},
+		{"192.168.110.50", 90 * time.Minute, "A"},
 		{"192.168.110.50", 150 * time.Minute, "B"},
 		{"192.168.110.51", 190 * time.Minute, "A C"},
-		{"192.168.110.51", 220 * time.Minute, "C"},
-		{"192.168.110.52", 4 * time.Hour, "A"},
+		{"192.168.110.51", 220 * time.Minute, "A C"},
+		{"192.168.110.52", 4 * time.Hour, ""},
 	} {
 		if got := strings.Join(find(q.ip, q.at), " "); got != q.want {
 			t.Errorf("find %s --at T0+%s = %q, want %q", q.ip, q.at, got, q.want)

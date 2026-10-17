@@ -22,13 +22,13 @@ import (
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
 
-	"lan-sentinel/internal/collect/capture"
-	"lan-sentinel/internal/collect/capture/decoders"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/internal/collect/capture"
+	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 // Simulated devices that exist only as injected frames.
@@ -109,6 +109,13 @@ func summary(o observation.Observation) string {
 	}
 	if o.Hostname != "" {
 		parts = append(parts, string(o.NameType)+":"+o.Hostname)
+	}
+	for _, r := range o.Records {
+		rec := string(r.Type) + ":" + r.Name
+		if r.Addr.IsValid() {
+			rec += ">" + r.Addr.String()
+		}
+		parts = append(parts, rec)
 	}
 	return strings.Join(parts, " ")
 }
@@ -196,10 +203,9 @@ func TestCaptureDecodesDiscoveryFrames(t *testing.T) {
 	want := []string{
 		"passive_arp " + injPLC.String() + " " + ipOf(101),
 		"passive_dhcp " + injHMI.String() + " dhcp:HMI-TEST",
-		"passive_dhcp " + injHMI.String(), // the offer to it binds nothing
-		"passive_dhcp_server " + injSRV.String() + " " + ipOf(103),
-		"passive_mdns " + injPLC.String() + " " + ipOf(101) + " mdns:plc-test.local",
-		"passive_dns " + ipOf(101) + " dns_ptr:plc-test.plant.example", // DNS answers carry no MAC
+		"passive_dhcp_server " + injSRV.String() + " " + ipOf(103),                                                      // the offer: its client is only in the message
+		"passive_mdns " + injPLC.String() + " " + ipOf(101) + " SRV:PLC._http._tcp.local A:plc-test.local>" + ipOf(101), // the sender, with its records
+		"passive_dns PTR:plc-test.plant.example>" + ipOf(101),                                                           // DNS answers carry no MAC
 		"passive_ipv4 " + injSRV.String() + " " + ipOf(103),
 		"passive_lldp " + injSW.String() + " lldp:test-sw-01",
 	}
@@ -362,7 +368,7 @@ func TestDaemonCapturesNames(t *testing.T) {
 	cfgPath, db := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "hosts.db")
 	server := prefix.Masked().Addr().As4()
 	server[3] = 103
-	cfg := "version: 1\ninterfaces:\n  - name: " + iface + "\n    dhcp: { servers: [" + prefix.Masked().Addr().Next().String() + "] }\n" +
+	cfg := "version: 2\ninterfaces:\n  - name: " + iface + "\n    dhcp: { servers: [" + prefix.Masked().Addr().Next().String() + "] }\n" +
 		"passive: { protocols: { ipv6: true } }\n" +
 		"storage: { path: " + db + " }\napi: { socket: " + filepath.Join(dir, "api.sock") + " }\nlogging: { format: text }\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
@@ -424,7 +430,8 @@ func TestDaemonCapturesNames(t *testing.T) {
 		t.Errorf("preferred name of the PLC = %q, %v", name, err)
 	}
 	var dnsNames int
-	if err := conn.QueryRow(`SELECT count(*) FROM names WHERE name_type = 'dns_ptr' AND name = 'plc-test.plant.example'`).Scan(&dnsNames); err != nil || dnsNames != 1 {
+	if err := conn.QueryRow(`SELECT count(*) FROM name_records WHERE name_type = 'dns_ptr' AND name = 'plc-test.plant.example'
+		AND host_id = (SELECT host_id FROM hosts WHERE mac = ?)`, injPLC.String()).Scan(&dnsNames); err != nil || dnsNames != 1 {
 		t.Errorf("dns_ptr names = %d, %v; want the PTR answer attached to the PLC", dnsNames, err)
 	}
 }

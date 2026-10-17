@@ -9,21 +9,20 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/metrics"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/metrics"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 var plcMAC = frames.MAC("00:1b:1b:aa:bb:01")
@@ -104,10 +103,10 @@ func TestOperatorScanThroughTheDaemon(t *testing.T) {
 	}
 	m := metricsText(h.d.gather(ctx))
 	for _, want := range []string{
-		`lan_sentinel_probe_total{interface="eth1",protocol="arp",port="",result="reply"} 1`,
-		`lan_sentinel_probe_total{interface="eth1",protocol="arp",port="",result="no_reply"} 4`,
-		`lan_sentinel_probe_throttled_total{protocol="arp",reason="protocol"}`,
-		`lan_sentinel_scan_duration_seconds{interface="eth1",protocol="arp"}`,
+		`lan_tracker_probe_total{interface="eth1",protocol="arp",port="",result="reply"} 1`,
+		`lan_tracker_probe_total{interface="eth1",protocol="arp",port="",result="no_reply"} 4`,
+		`lan_tracker_probe_throttled_total{protocol="arp",reason="protocol"}`,
+		`lan_tracker_scan_duration_seconds{interface="eth1",protocol="arp"}`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("metrics lack %q:\n%s", want, m)
@@ -150,7 +149,7 @@ func TestKillSwitchPersistsAcrossRestarts(t *testing.T) {
 	if !status.Active.Disabled || status.Active.Reason != "PLC fault on line 3" {
 		t.Errorf("status active = %+v", status.Active)
 	}
-	if m := metricsText(h.d.gather(ctx)); !strings.Contains(m, "lan_sentinel_active_disabled 1") {
+	if m := metricsText(h.d.gather(ctx)); !strings.Contains(m, "lan_tracker_active_disabled 1") {
 		t.Error("active_disabled metric not 1")
 	}
 	h.waitLog("ACTIVE_DISABLED")
@@ -224,7 +223,7 @@ func TestEnvironmentSwitchCannotBeCleared(t *testing.T) {
 	}
 	got := queryDB(t, filepath.Join(dir, "data", "hosts.db"),
 		`SELECT json_extract(evidence_json, '$.actor') || ' ' || new_value FROM events WHERE type = 'ACTIVE_DISABLED' ORDER BY id`)
-	if len(got) != 2 || !strings.HasPrefix(got[0], "env active discovery disabled by env: LAN_SENTINEL_ACTIVE_DISABLED=1") {
+	if len(got) != 2 || !strings.HasPrefix(got[0], "env active discovery disabled by env: LAN_TRACKER_ACTIVE_DISABLED=1") {
 		t.Errorf("events = %v", got)
 	}
 }
@@ -245,14 +244,21 @@ func TestNoScannerInReplay(t *testing.T) {
 func TestReloadAppliesBudgets(t *testing.T) {
 	h := startWith(t, testConfig("$DIR", "info", activeConfig), 0, activeLinks)
 	defer h.stop()
-	h.writeConfig(testConfig(h.dir, "info", "active: { startup_delay: 24h, max_packets_per_second: 30 }\n"))
-	h.signals <- syscall.SIGHUP
-	h.waitLog("configuration reloaded")
-	if got := h.d.Config().Active.MaxPacketsPerSecond; got != 30 {
-		t.Errorf("max_packets_per_second = %v", got)
+	h.writeConfig(testConfig(h.dir, "info", "active: { startup_delay: 24h, max_starts_per_second: 30, max_concurrent_jobs: 3 }\nidentity: { oui_override: /nonexistent.tsv }\n"))
+	res, err := h.d.ReloadConfig(context.Background(), "bart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.d.Config().Active.MaxStartsPerSecond; got != 30 {
+		t.Errorf("max_starts_per_second = %v", got)
+	}
+	// The concurrency caps keep their size until restart, and say so.
+	if got := h.d.Config().Active.MaxConcurrentJobs; got != 4 || len(res.NotApplied) != 2 || res.NotApplied[0].Key != "active.max_concurrent_jobs" ||
+		res.NotApplied[1].Key != "identity.oui_override" {
+		t.Errorf("max_concurrent_jobs = %d, not applied %+v", got, res.NotApplied)
 	}
 	plan, err := h.d.PlanScan(context.Background(), probe.Request{})
-	if err != nil || plan.Rates.GlobalPPS != 30 {
+	if err != nil || plan.Rates.GlobalStarts != 30 {
 		t.Errorf("plan rates = %+v, %v", plan.Rates, err)
 	}
 }
@@ -280,7 +286,7 @@ func TestReloadConfigThroughTheAPI(t *testing.T) {
 	h.waitLog("applied=[interfaces[0].active.enabled]")
 	// The log says what runs, at start-up and in the reload's message.
 	h.waitLog("msg=\"active discovery: off\"")
-	h.waitLog("msg=\"configuration reloaded; active discovery: arp every 5m on eth1 (192.168.110.0/24)\"")
+	h.waitLog("msg=\"configuration reloaded; active discovery: arp every 15m on eth1 (192.168.110.0/24)\"")
 
 	// A new interface needs a restart; the active change beside it applies.
 	h.writeConfig(strings.Replace(testConfig(h.dir, "debug", activeConfig), eth1,
@@ -321,7 +327,7 @@ func TestReloadConfigThroughTheAPI(t *testing.T) {
 	if _, err := client.ReloadConfig(ctx); err != nil {
 		t.Fatal(err)
 	}
-	h.waitLog("active discovery: stopped by the kill switch (arp every 5m on eth1 (192.168.110.0/24))")
+	h.waitLog("active discovery: stopped by the kill switch (arp every 15m on eth1 (192.168.110.0/24))")
 }
 
 // An interface's DHCP allowlist changes on reload, beside a restart-only
@@ -350,7 +356,7 @@ func TestReloadAppliesDHCPAllowlist(t *testing.T) {
 // file no longer allows, so the reload is rejected.
 func TestReloadRevalidatesKeptValues(t *testing.T) {
 	wide := strings.Replace(testConfig("$DIR", "info", "active: { startup_delay: 24h, allow_wide_scan: true }\n"),
-		"storage:", "  - name: eth2\n    active: { enabled: true, networks: [10.0.0.0/20] }\nstorage:", 1)
+		"storage:", "  - name: eth2\n    active: { enabled: true, networks: [10.0.0.0/23] }\nstorage:", 1)
 	h := startWith(t, wide, 0, activeLinks)
 	defer h.stop()
 	h.writeConfig(testConfig(h.dir, "info", activeConfig))

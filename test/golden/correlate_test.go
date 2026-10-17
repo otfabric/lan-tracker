@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/correlate"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/correlate"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // pointInTimeSQL is the query of docs/DATA_MODEL.md §4, as `hosts find

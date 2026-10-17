@@ -1,0 +1,61 @@
+# Reference systemd unit for LAN Tracker (docs/ARCHITECTURE.md §8).
+# Install: /etc/systemd/system/lan-tracker.service
+[Unit]
+Description=LAN Tracker
+Documentation=https://github.com/otfabric/lan-tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/lan-tracker daemon run --config /etc/lan-tracker/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+# Runs as root (decided 6 Oct 2026), but the bounding set below leaves root
+# only CAP_NET_RAW, and the sandbox keeps the rest of the system read-only.
+UMask=0027
+WatchdogSec=60
+Restart=on-failure
+RuntimeDirectory=lan-tracker
+RuntimeDirectoryMode=0750
+ReadWritePaths=/data/lan-tracker
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateMounts=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# The daemon reads the kernel clock's sync state with a read-only adjtimex
+# (NFR-REL-2), which ProtectClock=true would block. The clock still cannot
+# be changed: no CAP_SYS_TIME (the kernel refuses any change without it),
+# the call filter below allows no other @clock call, and PrivateDevices
+# hides /dev/rtc.
+ProtectClock=false
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+PrivateIPC=true
+DevicePolicy=closed
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Read-only clock sync state (see ProtectClock= above); listed after the
+# deny line because @privileged contains @clock.
+SystemCallFilter=adjtimex
+SystemCallErrorNumber=EPERM
+MemoryMax=128M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

@@ -12,7 +12,7 @@ The daemon must report readiness, be restarted if it hangs, reload its configura
 
 - **Foreground process.** The daemon runs in the foreground; systemd owns its lifecycle, with no double-fork and no PID file.
 - **Readiness and watchdog.** It uses `Type=notify` with `READY=1` once serving and `WATCHDOG=1` within `WatchdogSec=60`, and stops gracefully on SIGTERM.
-- **Reload.** SIGHUP (`ExecReload`, `systemctl reload`) and `lan-sentinel config reload` re-read the configuration, all or nothing.
+- **Reload.** SIGHUP (`ExecReload`, `systemctl reload`) and `lan-tracker config reload` re-read the configuration, all or nothing.
 - **Logging.** Through a journald slog handler, with structured fields per event.
 - **The unit.** The reference unit in `deploy/` is the tested unit. `make test-systemd` runs it unchanged on Debian 11, 12 and 13, and fails if `systemd-analyze security` exposure exceeds 2.5.
 

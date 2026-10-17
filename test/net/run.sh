@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-NET=lan-sentinel-test NET2=lan-sentinel-test2
+NET=lan-tracker-test NET2=lan-tracker-test2
 SUBNET4=172.31.250.0/24 GW4=172.31.250.1 SUBNET6=fd5e:5e:1::/64
 SUBNET2=172.31.251.0/24 GW2=172.31.251.1 RUNNER_IP2=172.31.251.2
 RUNNER=ls-runner RUNNER_IP=172.31.250.2

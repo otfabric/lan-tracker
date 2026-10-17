@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // control is a fake api.Control.
@@ -64,15 +64,6 @@ func (c *control) Scan(_ context.Context, req probe.Request, actor string) (sche
 func (c *control) DescribeHost(_ context.Context, actor, hostID, description string) (store.HostSummary, error) {
 	c.note(actor, hostID+"="+description)
 	return store.HostSummary{HostID: hostID, Description: description}, c.err
-}
-
-func (c *control) IdentifyRun(_ context.Context, actor, hostID, probe, sni string) (store.IdentifyAttempt, error) {
-	note := hostID + "=" + probe
-	if sni != "" {
-		note += " sni=" + sni
-	}
-	c.note(actor, note)
-	return store.IdentifyAttempt{Probe: probe, Result: "ok", Trigger: "operator"}, c.err
 }
 
 func (c *control) ReloadConfig(_ context.Context, actor string) (api.ReloadResult, error) {
@@ -129,7 +120,7 @@ func TestKillSwitchEndpoints(t *testing.T) {
 		t.Errorf("enable = %+v, %v", st, err)
 	}
 	ctl.err = api.ErrForced
-	if _, err := c.EnableActive(ctx, ""); status(err) != http.StatusConflict || !strings.Contains(err.Error(), "LAN_SENTINEL_ACTIVE_DISABLED") {
+	if _, err := c.EnableActive(ctx, ""); status(err) != http.StatusConflict || !strings.Contains(err.Error(), "LAN_TRACKER_ACTIVE_DISABLED") {
 		t.Errorf("enable while forced: %v", err)
 	}
 	if _, err := c.DisableActive(ctx, "x"); status(err) != http.StatusConflict {
@@ -188,33 +179,9 @@ func TestScanEndpoints(t *testing.T) {
 	}
 }
 
-func TestIdentifyEndpoint(t *testing.T) {
-	ctl := &control{}
-	c, _, _ := startControl(t, ctl)
-	ctx := context.Background()
-	a, err := c.IdentifyRun(ctx, "host-1", "modbus", "")
-	if err != nil || a.Probe != "modbus" || a.Result != "ok" || a.Trigger != "operator" || ctl.reasons[0] != "host-1=modbus" {
-		t.Fatalf("identify = %+v, %v (calls %v)", a, err, ctl.reasons)
-	}
-	ctl.err = fmt.Errorf("%w: stale", api.ErrIdentifyRefused)
-	_, err = c.IdentifyRun(ctx, "host-1", "modbus", "")
-	var ae *api.Error
-	if status(err) != http.StatusConflict || !errors.As(err, &ae) || ae.Code != api.CodeIdentifyRefused || !errors.Is(err, api.ErrIdentifyRefused) {
-		t.Errorf("refused: %v", err)
-	}
-	ctl.err = fmt.Errorf("host x: %w", store.ErrNotFound)
-	if _, err := c.IdentifyRun(ctx, "x", "modbus", ""); status(err) != http.StatusNotFound {
-		t.Errorf("unknown host: %v", err)
-	}
-	ctl.err = nil
-	if _, err := c.IdentifyRun(ctx, "host-1", "tls", "plc.local"); err != nil || ctl.reasons[len(ctl.reasons)-1] != "host-1=tls sni=plc.local" {
-		t.Errorf("sni: %v (calls %v)", err, ctl.reasons)
-	}
-}
-
 func TestConfigReloadEndpoint(t *testing.T) {
 	ctl := &control{reload: api.ReloadResult{
-		Path:       "/etc/lan-sentinel/config.yaml",
+		Path:       "/etc/lan-tracker/config.yaml",
 		Applied:    []config.Change{{Key: "interfaces[0].active.enabled", Old: "false", New: "true"}},
 		NotApplied: []config.Change{{Key: "storage.path", Old: "/data/a.db", New: "/data/b.db"}},
 	}}
@@ -229,7 +196,7 @@ func TestConfigReloadEndpoint(t *testing.T) {
 		t.Errorf("actor = %q, want the caller (SO_PEERCRED)", ctl.actors[0])
 	}
 
-	ctl.err = fmt.Errorf("%w: %w", api.ErrConfigRejected, errors.New("invalid configuration /etc/lan-sentinel/config.yaml:\n  active.arp.interval: must be positive"))
+	ctl.err = fmt.Errorf("%w: %w", api.ErrConfigRejected, errors.New("invalid configuration /etc/lan-tracker/config.yaml:\n  active.arp.interval: must be positive"))
 	_, err = c.ReloadConfig(ctx)
 	if status(err) != http.StatusUnprocessableEntity || !errors.Is(err, api.ErrConfigRejected) || !strings.Contains(err.Error(), "active.arp.interval") {
 		t.Errorf("rejected file: %v", err)
@@ -301,11 +268,6 @@ func TestOperatorRequestsAreChecked(t *testing.T) {
 		{"description is required", http.MethodPost, "/v1/hosts/h1/description", `{}`, http.StatusBadRequest},
 		{"description takes no other fields", http.MethodPost, "/v1/hosts/h1/description", `{"description":"x","tags":[]}`, http.StatusBadRequest},
 		{"get description is not allowed", http.MethodGet, "/v1/hosts/h1/description", "", http.StatusMethodNotAllowed},
-		{"identify probe required", http.MethodPost, "/v1/hosts/h1/identify", `{}`, http.StatusBadRequest},
-		{"identify unknown probe", http.MethodPost, "/v1/hosts/h1/identify", `{"probe":"ssh-kex"}`, http.StatusBadRequest},
-		{"identify sni on http", http.MethodPost, "/v1/hosts/h1/identify", `{"probe":"http","sni":"plc.local"}`, http.StatusBadRequest},
-		{"identify bad sni", http.MethodPost, "/v1/hosts/h1/identify", `{"probe":"tls","sni":"HMI1"}`, http.StatusBadRequest},
-		{"get identify is not allowed", http.MethodGet, "/v1/hosts/h1/identify", "", http.StatusMethodNotAllowed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -349,7 +311,7 @@ func TestOperatorWithoutControlOrPeer(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("without control: %d", rec.Code)
 	}
-	for _, path := range []string{"/v1/active/disable", "/v1/active/enable", "/v1/scans/plan", "/v1/config/reload", "/v1/hosts/h1/description", "/v1/hosts/h1/identify"} {
+	for _, path := range []string{"/v1/active/disable", "/v1/active/enable", "/v1/scans/plan", "/v1/config/reload", "/v1/hosts/h1/description"} {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"reason":"x"}`)))
 		if rec.Code != http.StatusServiceUnavailable {
@@ -363,16 +325,5 @@ func TestOperatorWithoutControlOrPeer(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/active/disable", strings.NewReader(`{"reason":"x"}`)))
 	if rec.Code != http.StatusOK || ctl.actors[0] != "unknown" {
 		t.Errorf("actor without peer = %q (%d)", ctl.actors, rec.Code)
-	}
-}
-
-// A refusal is recognised by its code, not its wording; another 409 (a scan
-// already running, say) is not a refusal.
-func TestIdentifyRefusedByCode(t *testing.T) {
-	if err := error(&api.Error{Status: http.StatusConflict, Message: "worded differently", Code: api.CodeIdentifyRefused}); !errors.Is(err, api.ErrIdentifyRefused) {
-		t.Errorf("coded 409 = %v", err)
-	}
-	if err := error(&api.Error{Status: http.StatusConflict, Message: api.ErrIdentifyRefused.Error()}); errors.Is(err, api.ErrIdentifyRefused) {
-		t.Errorf("uncoded 409 taken as a refusal: %v", err)
 	}
 }

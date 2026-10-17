@@ -1,8 +1,13 @@
 // Package probe holds what every active probe engine shares
 // (docs/ARCHITECTURE.md §5): the safety budget, the kill switch, target
-// enumeration, back-off and the scan planner. Engines (arp, icmp, tcp, udp)
+// enumeration, back-off and the scan planner. Engines (arp, icmp, tcp)
 // build packets themselves, send through platform.Transmitter and only emit
 // observations; the scheduler runs them.
+//
+// The budget counts probe starts (ADR 0012): one ARP request, ICMP echo,
+// name query or TCP connect initiation is one start. The kernel's own
+// packets (TCP handshake ACKs, retransmissions, the close, ACKs of data a
+// server sends) are bounded by timeouts and concurrency, not paced.
 package probe
 
 import (
@@ -10,27 +15,27 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
+	"sort"
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
 )
 
 // Protocol names a probe engine.
 type Protocol string
 
-// Probe protocols. IPv6 NDP is deferred (v1 is IPv4-first).
+// Probe protocols. IPv6 NDP is deferred (v1 is IPv4-first). Name is a
+// DNS or mDNS query (FR-AC-12): paced by its own rate and the global one,
+// but not by the target spacing, which is for probes of one device.
 const (
-	ARP      Protocol = "arp"
-	ICMP     Protocol = "icmp"
-	TCP      Protocol = "tcp"
-	UDP      Protocol = "udp"
-	Identify Protocol = "identify"
+	ARP  Protocol = "arp"
+	ICMP Protocol = "icmp"
+	TCP  Protocol = "tcp"
+	Name Protocol = "name"
 )
-
-// TCPTokens is how many global packet tokens a TCP connect costs.
-const TCPTokens = config.TCPConnectTokens
 
 // paceMargin paces sends slightly below the budget, and window is the
 // sliding window a budget is enforced over: slightly longer than a second,
@@ -54,8 +59,8 @@ type Policy interface {
 
 // Limits are the safety limits of docs/ARCHITECTURE.md §5.
 type Limits struct {
-	GlobalPPS       float64
-	Rates           map[Protocol]float64 // packets/s; TCP in connects/s
+	GlobalStarts    float64              // probe starts/s across every engine and interface
+	Rates           map[Protocol]float64 // starts/s; TCP in connects/s
 	MaxConcurrent   int
 	TCPPerInterface int
 	TCPPerHost      int
@@ -65,12 +70,12 @@ type Limits struct {
 // LimitsFrom reads the limits from the configuration.
 func LimitsFrom(a config.ActiveConfig) Limits {
 	return Limits{
-		GlobalPPS: a.MaxPacketsPerSecond,
+		GlobalStarts: a.MaxStartsPerSecond,
 		Rates: map[Protocol]float64{
-			ARP: a.Budgets.ARP.PacketsPerSecond, ICMP: a.Budgets.ICMP.PacketsPerSecond,
-			UDP: a.Budgets.UDP.PacketsPerSecond, TCP: a.Budgets.TCP.ConnectsPerSecond,
+			ARP: a.Budgets.ARP.StartsPerSecond, ICMP: a.Budgets.ICMP.StartsPerSecond, TCP: a.Budgets.TCP.ConnectsPerSecond,
+			Name: a.Budgets.Names.StartsPerSecond,
 		},
-		MaxConcurrent: a.MaxConcurrentProbes, TCPPerInterface: a.Budgets.TCP.MaxConcurrentPerInterface,
+		MaxConcurrent: a.MaxConcurrentJobs, TCPPerInterface: a.Budgets.TCP.MaxConcurrentPerInterface,
 		TCPPerHost: a.Budgets.TCP.MaxConcurrentPerHost, TargetSpacing: a.MinTargetInterval.D(),
 	}
 }
@@ -149,7 +154,7 @@ func (k *bucket) move(from, to time.Time, cost, rate float64) {
 }
 
 // Budget enforces the limits across every engine and interface: one global
-// packet budget, one per protocol, a global concurrency cap, the TCP caps
+// start budget, one per protocol, a global concurrency cap, the TCP caps
 // per interface and per host, and the minimum spacing between two probes to
 // one target.
 type Budget struct {
@@ -168,7 +173,7 @@ type Budget struct {
 }
 
 // Throttle is a reason a probe waited, for
-// lan_sentinel_probe_throttled_total{protocol,reason}.
+// lan_tracker_probe_throttled_total{protocol,reason}.
 type Throttle struct {
 	Protocol Protocol
 	Reason   string // global, protocol, target_spacing, concurrency, tcp_interface, tcp_host
@@ -248,18 +253,10 @@ func (b *Budget) take(ctx context.Context, ch chan struct{}, p Protocol, reason 
 // the interface and host slots) until then. The policy is checked before
 // the wait and again just before returning.
 func (b *Budget) Acquire(ctx context.Context, p Protocol, iface string, target netip.Addr) (func(), error) {
-	return b.acquire(ctx, p, iface, target, 0)
+	return b.acquire(ctx, p, iface, target)
 }
 
-// AcquirePackets is Acquire with an explicit global packet charge
-// (identification probes: BudgetCost). The protocol rate still counts one
-// probe (one TCP connect or one UDP datagram). packets <= 0 uses the
-// usual charge (1, or 3 for TCP).
-func (b *Budget) AcquirePackets(ctx context.Context, p Protocol, iface string, target netip.Addr, packets int) (func(), error) {
-	return b.acquire(ctx, p, iface, target, packets)
-}
-
-func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target netip.Addr, packets int) (func(), error) {
+func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target netip.Addr) (func(), error) {
 	if err := b.check(iface, p, target); err != nil {
 		return nil, err
 	}
@@ -289,14 +286,14 @@ func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target n
 	}
 	// Wait for the target's spacing before booking the budgets, so a probe
 	// that must wait for its target does not hold up probes to others.
-	if due := b.spacing(iface, target); due.After(b.clock.Now()) {
+	if due := b.spacing(iface, target); p != Name && due.After(b.clock.Now()) {
 		b.count(p, "target_spacing")
 		if err := b.sleep(ctx, due.Sub(b.clock.Now())); err != nil {
 			release()
 			return nil, err
 		}
 	}
-	at, reason := b.reserve(p, iface, target, packets)
+	at, reason := b.reserve(p, iface, target)
 	if wait := at.Sub(b.clock.Now()); wait > 0 {
 		b.count(p, reason)
 		if err := b.sleep(ctx, wait); err != nil {
@@ -308,7 +305,7 @@ func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target n
 		release()
 		return nil, err
 	}
-	b.settle(p, iface, target, at, packets)
+	b.settle(p, iface, target, at)
 	return release, nil
 }
 
@@ -316,20 +313,19 @@ func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target n
 // late (a timer that fired late, a goroutine that was not scheduled at
 // once): the budgets then count when probes really leave, so a late send
 // cannot crowd the next ones into one window.
-func (b *Budget) settle(p Protocol, iface string, target netip.Addr, at time.Time, packets int) {
+func (b *Budget) settle(p Protocol, iface string, target netip.Addr, at time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.clock.Now()
 	if !now.After(at) {
 		return
 	}
-	cost := packetCost(p, packets)
 	if pb := b.proto[p]; pb != nil {
 		pb.move(at, now, 1, b.limits.Rates[p])
 	}
-	b.global.move(at, now, cost, b.limits.GlobalPPS)
+	b.global.move(at, now, 1, b.limits.GlobalStarts)
 	k := hostKey{iface, target}
-	if t := now.Add(b.limits.TargetSpacing); t.After(b.target[k]) {
+	if t := now.Add(b.limits.TargetSpacing); p != Name && t.After(b.target[k]) {
 		b.target[k] = t
 	}
 }
@@ -363,22 +359,11 @@ func (b *Budget) check(iface string, p Protocol, target netip.Addr) error {
 // reserve books the send time: the earliest moment that respects the
 // target's spacing and the protocol and global budgets, booked in all of
 // them in one step so the time booked everywhere is the time of the send.
-// It returns the binding constraint.
-func packetCost(p Protocol, packets int) float64 {
-	if packets > 0 {
-		return float64(packets)
-	}
-	if p == TCP {
-		return TCPTokens
-	}
-	return 1
-}
-
-func (b *Budget) reserve(p Protocol, iface string, target netip.Addr, packets int) (time.Time, string) {
+// Every probe is one start of each. It returns the binding constraint.
+func (b *Budget) reserve(p Protocol, iface string, target netip.Addr) (time.Time, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.clock.Now()
-	cost := packetCost(p, packets)
 	pb := b.proto[p]
 	if pb == nil {
 		pb = &bucket{}
@@ -386,21 +371,27 @@ func (b *Budget) reserve(p Protocol, iface string, target netip.Addr, packets in
 	}
 	k := hostKey{iface, target}
 	at, reason := now, ""
+	spacing := b.target[k]
+	if p == Name {
+		spacing = time.Time{}
+	}
 	for _, c := range []struct {
 		t      time.Time
 		reason string
 	}{
-		{b.target[k], "target_spacing"},
+		{spacing, "target_spacing"},
 		{pb.earliest(now, 1, b.limits.Rates[p]), "protocol"},
-		{b.global.earliest(now, cost, b.limits.GlobalPPS), "global"},
+		{b.global.earliest(now, 1, b.limits.GlobalStarts), "global"},
 	} {
 		if c.t.After(at) {
 			at, reason = c.t, c.reason
 		}
 	}
-	b.target[k] = at.Add(b.limits.TargetSpacing)
+	if p != Name {
+		b.target[k] = at.Add(b.limits.TargetSpacing)
+	}
 	pb.book(at, 1, b.limits.Rates[p])
-	b.global.book(at, cost, b.limits.GlobalPPS)
+	b.global.book(at, 1, b.limits.GlobalStarts)
 	b.prune(now)
 	return at, reason
 }
@@ -422,7 +413,8 @@ func interval(cost, rate float64) time.Duration {
 }
 
 // SetLimits applies reloaded limits to future reservations. The
-// concurrency caps keep their size until restart.
+// concurrency caps keep their size until restart; the reload answer lists
+// them as needing one (config.RestartKeys).
 func (b *Budget) SetLimits(l Limits) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -435,21 +427,44 @@ func refusal(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrRefused}, args...)...)
 }
 
-// Simulate returns when the last of the probes would be sent under the
-// limits if the first could go at start: the budget's own pacing, run on
-// a simulated clock, ignoring replies. The planner uses it to estimate
-// scan durations.
-func Simulate(limits Limits, start time.Time, probes []SimProbe) time.Duration {
+// Simulate returns how long the probes take under the limits if the first
+// could start at start, as Acquire paces them: each waits for its target's
+// spacing, the budgets and a free concurrency slot, and holds that slot
+// for its Hold (its reply wait). Phases run one after the other, each
+// starting once the previous one's last probe is done, as a scan's phases
+// do. It returns when the last probe is done. The planner uses it to
+// estimate scan durations.
+func Simulate(limits Limits, start time.Time, phases ...[]SimProbe) time.Duration {
 	sim := clock.NewSim(start)
 	b := NewBudget(sim, limits, nil)
-	last := start
-	for _, p := range probes {
-		sim.Set(b.spacing(p.Interface, p.Target)) // as Acquire: the spacing first
-		at, _ := b.reserve(p.Protocol, p.Interface, p.Target, p.Packets)
-		sim.Set(at)
-		last = at
+	slots := max(limits.MaxConcurrent, 1)
+	end := start
+	for _, probes := range phases {
+		sim.Set(end)
+		var busy []time.Time // when held slots free up, earliest first
+		for _, p := range probes {
+			t := sim.Now()
+			if len(busy) >= slots {
+				if busy[0].After(t) {
+					t = busy[0]
+				}
+				busy = busy[1:]
+			}
+			if due := b.spacing(p.Interface, p.Target); due.After(t) && p.Protocol != Name {
+				t = due
+			}
+			sim.Set(t)
+			at, _ := b.reserve(p.Protocol, p.Interface, p.Target)
+			sim.Set(at)
+			done := at.Add(p.Hold)
+			i := sort.Search(len(busy), func(i int) bool { return busy[i].After(done) })
+			busy = slices.Insert(busy, i, done)
+			if done.After(end) {
+				end = done
+			}
+		}
 	}
-	return last.Sub(start)
+	return end.Sub(start)
 }
 
 // SimProbe is one probe of a simulated run.
@@ -457,5 +472,5 @@ type SimProbe struct {
 	Protocol  Protocol
 	Interface string
 	Target    netip.Addr
-	Packets   int // 0: the usual charge
+	Hold      time.Duration // how long the probe holds its concurrency slot
 }

@@ -8,21 +8,21 @@ import (
 	"sort"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/buildinfo"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/metrics"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/buildinfo"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/metrics"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // presences are the presence states, for status and metrics.
 var presences = []string{"ACTIVE", "RECENT", "STALE", "MISSING"}
 
-// dhcpStatuses are the DHCP server allowlist verdicts (lan_sentinel_dhcp_servers).
+// dhcpStatuses are the DHCP server allowlist verdicts (lan_tracker_dhcp_servers).
 var dhcpStatuses = []string{"allowed", "unexpected", "unchecked"}
 
 // startAPI opens the reader and starts the API server on the configured
@@ -282,29 +282,4 @@ func (d *Daemon) probeMetrics(add func(name, help, typ string, samples ...metric
 		ds = append(ds, metrics.Sample{Labels: metrics.L("interface", k[0], "protocol", k[1]), Value: durations[k]})
 	}
 	add("scan_duration_seconds", "Duration of the last probe pass or operator scan, per interface and protocol.", metrics.Gauge, ds...)
-
-	eng := d.identify
-	if eng == nil {
-		return
-	}
-	var attempts []metrics.Sample
-	for k, n := range eng.Attempts() {
-		attempts = append(attempts, metrics.Sample{Labels: metrics.L("probe", k[0], "result", k[1]), Value: float64(n)})
-	}
-	add("identify_attempts_total", "Identification exchanges that left the box, per probe and result.", metrics.Counter, attempts...)
-	var durs []metrics.Sample
-	for name, v := range eng.Durations() {
-		durs = append(durs, metrics.Sample{Labels: metrics.L("probe", name), Value: v})
-	}
-	add("identify_duration_seconds", "Duration of the last completed identification exchange.", metrics.Gauge, durs...)
-	var suppressed []metrics.Sample
-	for k, n := range d.sched.IdentifySuppressed() {
-		suppressed = append(suppressed, metrics.Sample{Labels: metrics.L("probe", k[0], "reason", k[1]), Value: float64(n)})
-	}
-	add("identify_suppressed_total", "Eligible-looking hosts not sent to, per probe and reason.", metrics.Counter, suppressed...)
-	var claims []metrics.Sample
-	for k, n := range eng.Claims() {
-		claims = append(claims, metrics.Sample{Labels: metrics.L("probe", k[0], "field", k[1]), Value: float64(n)})
-	}
-	add("identify_claims_total", "Identity claims adopted from a successful identification exchange.", metrics.Counter, claims...)
 }

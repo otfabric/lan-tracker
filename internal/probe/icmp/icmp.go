@@ -14,9 +14,9 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/probe"
 )
 
 // Engine sends echo requests through a platform ICMP connection.
@@ -28,7 +28,7 @@ type Engine struct {
 func (Engine) Protocol() probe.Protocol { return probe.ICMP }
 
 // payload is the fixed echo payload.
-var payload = []byte("lan-sentinel")
+var payload = []byte("lan-tracker")
 
 // Request builds an echo request. On a ping socket the kernel replaces id
 // with the socket's own identifier.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // Events written before the clock was synchronised are flagged in tables

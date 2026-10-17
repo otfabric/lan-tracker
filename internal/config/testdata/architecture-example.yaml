@@ -1,4 +1,4 @@
-version: 1
+version: 2                           # LAN Tracker schema; `lan-tracker config convert` converts a LAN Sentinel (1) file
 interfaces:
   - name: eth0
     passive: { enabled: true, promiscuous: false }
@@ -7,71 +7,67 @@ interfaces:
     passive: { enabled: true, promiscuous: false }   # true only on a mirror/SPAN port
     active:
       enabled: true
-      networks: [192.168.110.0/24]
+      networks: [192.168.110.0/24, 192.168.120.0/24]  # candidate IPv4 ranges on this one Ethernet segment
       exclude:  [192.168.110.1]
-      identify: []                   # empty: no identification payload; names: modbus, http, tls, snmp, ssh-banner, telnet, ftp
+    dhcp:
+      servers: [192.168.110.1]       # expected DHCP server identifiers (option 54); omit for no verdict
 passive:
   protocols: { arp: true, ipv4: true, ipv6: false, dhcp: true, mdns: true, dns: true, lldp: true }
   ring_size: 2MiB                   # AF_PACKET ring per captured interface (256KiB-256MiB)
 neighbor:
   resync_interval: 10m              # full neighbour-table dump in addition to notifications
-active:
+active:                             # rates are probe starts per second, not packets (ADR 0012)
   startup_delay: 30s
   jitter: 0.1
-  max_packets_per_second: 20       # global ceiling; a TCP connect costs 3
-  max_concurrent_probes: 10
-  min_target_interval: 1s          # spacing between probes to one IP
-  budgets:                         # each <= the global ceiling; tcp connects × 3 <= it too
-    arp:  { packets_per_second: 10 }
-    icmp: { packets_per_second: 5 }
-    ndp:  { packets_per_second: 5 }
-    udp:  { packets_per_second: 5 }
-    tcp:  { connects_per_second: 5, max_concurrent_per_interface: 4, max_concurrent_per_host: 1 }
+  max_starts_per_second: 5          # every ARP request, ICMP echo, name query and TCP connect start, together
+  max_concurrent_jobs: 4            # probes in flight across engines and interfaces; restart to change
+  min_target_interval: 5s           # spacing between probes to one IP
+  budgets:                          # each <= the global start rate
+    arp:   { starts_per_second: 5 }
+    icmp:  { starts_per_second: 1 }
+    names: { starts_per_second: 1 }  # DNS and mDNS query sends
+    tcp:   { connects_per_second: 1, max_concurrent_per_interface: 2, max_concurrent_per_host: 1 }
   max_auto_scan_prefix_v4: 24
-  max_sweep_targets: 65536         # addresses one interface's sweep may cover (with allow_wide_scan); above: expert override
+  max_sweep_targets: 1024           # addresses one interface's sweep may cover; above: expert override with allow_wide_scan
   allow_wide_scan: false
-  arp:  { enabled: true,  interval: 5m }
-  icmp: { enabled: false, interval: 10m }
+  arp:  { enabled: true,  interval: 15m }
+  icmp: { enabled: false, interval: 15m }   # extra positive evidence only; never gates TCP
   tcp:
     enabled: true
-    interval: 5m
-    targets:
-      - { port: 502, name: modbus, timeout: 750ms }
-  udp:                             # protocol-specific probes only; no reply means nothing
-    enabled: false
     interval: 15m
-    probes: [ntp, enip]            # NTP (123), EtherNet/IP ListIdentity (44818)
-  identify:
-    interval: 1h
-    timeout: 2s
-    host_max_age: 30m
-    probes:
-      modbus: { unit_id: 1 }
-      tls: { sni: auto }            # off unless set; auto sends preferred_name when it is a DNS name
-      snmp: { community: public }   # required when an interface names snmp; no compiled default
+    targets:                        # connect only, closed at once, no payload; names are labels, not protocol proof
+      - { port: 80,   name: http,     timeout: 750ms }
+      - { port: 443,  name: https,    timeout: 750ms }
+      - { port: 8080, name: http-alt, timeout: 750ms }
+      - { port: 502,  name: modbus,   timeout: 750ms }
+  names:                            # questions about known names and addresses only (FR-AC-12)
+    enabled: true
+    interval: 30m
+    mdns: true                      # one-shot mDNS queries for known .local names and service_types
+    service_types: [_http._tcp]     # DNS-SD types to enumerate; none by default
+    enumerate_services: false       # one _services._dns-sd._udp.local query per pass; its answers are not chased
+    resolvers: [192.168.110.1]      # unicast DNS for PTR of known addresses and A of known names; none: no unicast DNS
+    max_queries_per_pass: 64
 profiles:
   modbus:
     arp: true
     tcp: [502]
-  identify:
-    udp: [enip]
 presence: { active: 5m, recent: 30m, stale: 24h }
 identity:
-  hostname_preference: [mdns, dhcp, dns_ptr, lldp]
-  address_overlap: 5m         # older open IPv4 binding is replaced, not kept alongside
-  address_expiry: 24h         # unconfirmed binding closed while host is otherwise seen
-  name_expiry: 168h           # names not confirmed this long show as stale; they are never closed by time
+  hostname_preference: [mdns, dhcp, dns, dns_ptr, lldp]
+  address_expiry: 24h         # an address not confirmed this long while its host is seen is closed (an inference)
+  name_expiry: 168h           # names without a TTL not confirmed this long show as stale; time never closes them
   proxy_arp_threshold: 16
   oui_override: ""            # optional path
 storage:
-  path: /data/lan-sentinel/hosts.db
+  path: /data/lan-tracker/hosts.db
   retention:
     observations: 168h    # raw
     rollups: 2160h        # hourly roll-ups
     events: 17520h
     max_db_size: 200MB    # prune observations, then roll-ups, then oldest events
 api:
-  socket: /run/lan-sentinel/api.sock
+  socket: /run/lan-tracker/api.sock
   listen: ""              # e.g. 127.0.0.1:9734 (also serves /metrics)
 metrics: { enabled: true }
 logging:

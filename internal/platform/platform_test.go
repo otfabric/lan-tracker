@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
 )
 
 func TestNewBackends(t *testing.T) {

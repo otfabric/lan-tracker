@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"lan-sentinel/internal/netrange"
+	"github.com/otfabric/lan-tracker/internal/netrange"
 )
 
 var (
@@ -19,7 +19,7 @@ var (
 
 	logLevels  = []string{"trace", "debug", "info", "warn", "error"}
 	logFormats = []string{"journald", "text", "json"}
-	nameTypes  = []string{"mdns", "dhcp", "dns_ptr", "lldp", "netbios"}
+	nameTypes  = []string{"mdns", "dhcp", "dns", "dns_ptr", "lldp", "netbios"}
 	replayExts = []string{".pcap", ".pcapng", ".pcap.gz", ".pcapng.gz", ".jsonl"}
 	minDBSize  = ByteSize(10 * 1000 * 1000)
 	// minProbeInterval keeps periodic probing from becoming a flood.
@@ -33,8 +33,12 @@ var (
 func Validate(cfg *Config) []FieldError {
 	v := &validator{}
 
-	if cfg.Version != 1 {
-		v.add("version", "must be 1, got %d", cfg.Version)
+	switch cfg.Version {
+	case SchemaVersion:
+	case 1:
+		v.add("version", "1 is the LAN Sentinel schema; convert the file with `lan-tracker config convert` (docs/MIGRATION.md)")
+	default:
+		v.add("version", "must be %d, got %d", SchemaVersion, cfg.Version)
 	}
 	v.interfaces(cfg)
 
@@ -168,63 +172,14 @@ func (v *validator) activeInterface(k string, ic InterfaceConfig, ac ActiveConfi
 			v.add(fmt.Sprintf("%s.active.exclude[%d]", k, j), "%s has host bits set; use %s", e.Prefix, e.Masked())
 		}
 	}
-	v.identifyList(k+".active.identify", ic.Active.Identify, ac.Identify)
-}
-
-// maxSNMPCommunity bounds the SNMPv2c community so a typo cannot send
-// a huge GetRequest (ADR 0011: one datagram).
-const maxSNMPCommunity = 128
-
-func (v *validator) identifyList(key string, list []InterfaceIdentify, defaults IdentifyConfig) {
-	seen := map[string]bool{}
-	for i, e := range list {
-		k := fmt.Sprintf("%s[%d]", key, i)
-		switch {
-		case e.Name == "":
-			v.add(k+".name", "is required")
-		case !slices.Contains(IdentifyProbeNames, e.Name):
-			v.add(k+".name", "must be one of %v, got %q", IdentifyProbeNames, e.Name)
-		case seen[e.Name]:
-			v.add(k+".name", "%q is listed more than once", e.Name)
-		}
-		seen[e.Name] = true
-		if e.Name != "modbus" && e.UnitID != nil {
-			v.add(k+".unit_id", "does not apply to %s", e.Name)
-		}
-		if e.Name != "snmp" && e.Community != "" {
-			v.add(k+".community", "does not apply to %s", e.Name)
-		}
-		if e.Name != "tls" && e.SNI != "" {
-			v.add(k+".sni", "does not apply to %s", e.Name)
-		}
-		if e.Name == "modbus" {
-			id := defaults.UnitIDOf(e)
-			if id < 1 || id > 255 {
-				v.add(k+".unit_id", "must be between 1 and 255, got %d", id)
-			}
-		}
-		if e.Name == "snmp" {
-			c := defaults.CommunityOf(e)
-			switch {
-			case c == "":
-				v.add(k+".community", "is required")
-			case len(c) > maxSNMPCommunity:
-				v.add(k+".community", "must be at most %d characters, got %d", maxSNMPCommunity, len(c))
-			}
-		}
-		if e.Name == "tls" {
-			if mode := defaults.SNIModeOf(e); mode != "" && mode != SNIModeAuto {
-				v.add(k+".sni", "must be empty or %q, got %q", SNIModeAuto, mode)
-			}
-		}
-	}
 }
 
 // Sweep limits: DefaultMaxSweepTargets is active.max_sweep_targets' default
-// (a /16: nearly two hours at 10 pps); above it is an expert override.
-// MaxSweepTargetsCeiling (a /8) only keeps the value sane.
+// (four /24s: about 3.5 minutes at 5 ARP requests/s); above it is an
+// expert override. MaxSweepTargetsCeiling (a /8) only keeps the value
+// sane.
 const (
-	DefaultMaxSweepTargets = 1 << 16
+	DefaultMaxSweepTargets = 1024
 	MaxSweepTargetsCeiling = 1 << 24
 )
 
@@ -266,9 +221,9 @@ func (v *validator) sweepOverride(a ActiveConfig) {
 		key        string
 		got, limit float64
 	}{
-		{"active.max_packets_per_second", a.MaxPacketsPerSecond, d.MaxPacketsPerSecond},
-		{"active.budgets.arp.packets_per_second", a.Budgets.ARP.PacketsPerSecond, d.Budgets.ARP.PacketsPerSecond},
-		{"active.max_concurrent_probes", float64(a.MaxConcurrentProbes), float64(d.MaxConcurrentProbes)},
+		{"active.max_starts_per_second", a.MaxStartsPerSecond, d.MaxStartsPerSecond},
+		{"active.budgets.arp.starts_per_second", a.Budgets.ARP.StartsPerSecond, d.Budgets.ARP.StartsPerSecond},
+		{"active.max_concurrent_jobs", float64(a.MaxConcurrentJobs), float64(d.MaxConcurrentJobs)},
 	} {
 		if c.got > c.limit {
 			v.add(c.key, "%v exceeds its default %v, which the expert override active.max_sweep_targets above %d does not allow",
@@ -288,11 +243,11 @@ func (v *validator) active(cfg *Config) {
 	if a.Jitter < 0 || a.Jitter > 0.5 {
 		v.add("active.jitter", "must be between 0 and 0.5, got %v", a.Jitter)
 	}
-	if a.MaxPacketsPerSecond <= 0 {
-		v.add("active.max_packets_per_second", "must be greater than zero, got %v", a.MaxPacketsPerSecond)
+	if a.MaxStartsPerSecond <= 0 {
+		v.add("active.max_starts_per_second", "must be greater than zero, got %v", a.MaxStartsPerSecond)
 	}
-	if a.MaxConcurrentProbes < 1 {
-		v.add("active.max_concurrent_probes", "must be at least 1, got %d", a.MaxConcurrentProbes)
+	if a.MaxConcurrentJobs < 1 {
+		v.add("active.max_concurrent_jobs", "must be at least 1, got %d", a.MaxConcurrentJobs)
 	}
 	if a.MinTargetInterval.D() < 0 {
 		v.add("active.min_target_interval", "must not be negative")
@@ -304,56 +259,41 @@ func (v *validator) active(cfg *Config) {
 
 	for _, nb := range []struct {
 		name string
-		b    RateBudget
-	}{{"arp", a.Budgets.ARP}, {"icmp", a.Budgets.ICMP}, {"ndp", a.Budgets.NDP}, {"udp", a.Budgets.UDP}} {
-		k, b := "active.budgets."+nb.name+".packets_per_second", nb.b
-		if b.PacketsPerSecond <= 0 {
-			v.add(k, "must be greater than zero, got %v", b.PacketsPerSecond)
-		} else if b.PacketsPerSecond > a.MaxPacketsPerSecond {
-			v.add(k, "%v exceeds the global active.max_packets_per_second (%v)", b.PacketsPerSecond, a.MaxPacketsPerSecond)
+		b    StartBudget
+	}{{"arp", a.Budgets.ARP}, {"icmp", a.Budgets.ICMP}, {"names", a.Budgets.Names}} {
+		k, b := "active.budgets."+nb.name+".starts_per_second", nb.b
+		if b.StartsPerSecond <= 0 {
+			v.add(k, "must be greater than zero, got %v", b.StartsPerSecond)
+		} else if b.StartsPerSecond > a.MaxStartsPerSecond {
+			v.add(k, "%v exceeds the global active.max_starts_per_second (%v)", b.StartsPerSecond, a.MaxStartsPerSecond)
 		}
 	}
 	t := a.Budgets.TCP
 	if t.ConnectsPerSecond <= 0 {
 		v.add("active.budgets.tcp.connects_per_second", "must be greater than zero, got %v", t.ConnectsPerSecond)
-	} else if t.ConnectsPerSecond*TCPConnectTokens > a.MaxPacketsPerSecond {
-		v.add("active.budgets.tcp.connects_per_second", "%v connects/s × %d packets exceeds the global active.max_packets_per_second (%v)",
-			t.ConnectsPerSecond, TCPConnectTokens, a.MaxPacketsPerSecond)
+	} else if t.ConnectsPerSecond > a.MaxStartsPerSecond {
+		v.add("active.budgets.tcp.connects_per_second", "%v exceeds the global active.max_starts_per_second (%v)",
+			t.ConnectsPerSecond, a.MaxStartsPerSecond)
 	}
 	if t.MaxConcurrentPerHost < 1 {
 		v.add("active.budgets.tcp.max_concurrent_per_host", "must be at least 1, got %d", t.MaxConcurrentPerHost)
 	}
 	if t.MaxConcurrentPerInterface < t.MaxConcurrentPerHost {
 		v.add("active.budgets.tcp.max_concurrent_per_interface", "must be at least max_concurrent_per_host (%d), got %d", t.MaxConcurrentPerHost, t.MaxConcurrentPerInterface)
-	} else if t.MaxConcurrentPerInterface > a.MaxConcurrentProbes {
-		v.add("active.budgets.tcp.max_concurrent_per_interface", "must not exceed active.max_concurrent_probes (%d), got %d", a.MaxConcurrentProbes, t.MaxConcurrentPerInterface)
+	} else if t.MaxConcurrentPerInterface > a.MaxConcurrentJobs {
+		v.add("active.budgets.tcp.max_concurrent_per_interface", "must not exceed active.max_concurrent_jobs (%d), got %d", a.MaxConcurrentJobs, t.MaxConcurrentPerInterface)
 	}
 
 	for _, iv := range []struct {
 		key string
 		d   Duration
 	}{{"active.arp.interval", a.ARP.Interval}, {"active.icmp.interval", a.ICMP.Interval},
-		{"active.tcp.interval", a.TCP.Interval}, {"active.udp.interval", a.UDP.Interval},
-		{"active.identify.interval", a.Identify.Interval}} {
+		{"active.tcp.interval", a.TCP.Interval}, {"active.names.interval", a.Names.Interval}} {
 		if iv.d.D() < minProbeInterval {
 			v.add(iv.key, "must be at least %s, got %s", Duration(minProbeInterval), iv.d)
 		}
 	}
-	v.positive("active.identify.timeout", a.Identify.Timeout)
-	v.positive("active.identify.host_max_age", a.Identify.HostMaxAge)
-	if id := a.Identify.Probes.Modbus.UnitID; id < 1 || id > 255 {
-		v.add("active.identify.probes.modbus.unit_id", "must be between 1 and 255, got %d", id)
-	}
-	if c := a.Identify.Probes.SNMP.Community; len(c) > maxSNMPCommunity {
-		v.add("active.identify.probes.snmp.community", "must be at most %d characters, got %d", maxSNMPCommunity, len(c))
-	}
-	if s := a.Identify.Probes.TLS.SNI; s != "" && s != SNIModeAuto {
-		v.add("active.identify.probes.tls.sni", "must be empty or %q, got %q", SNIModeAuto, s)
-	}
-	v.udpProbes("active.udp.probes", a.UDP.Probes)
-	if a.UDP.Enabled && len(a.UDP.Probes) == 0 {
-		v.add("active.udp.probes", "at least one probe is required when active.udp.enabled is true")
-	}
+	v.names(a.Names)
 	if a.TCP.Enabled && len(a.TCP.Targets) == 0 {
 		v.add("active.tcp.targets", "at least one target is required when active.tcp.enabled is true")
 	}
@@ -371,17 +311,34 @@ func (v *validator) active(cfg *Config) {
 	}
 }
 
-func (v *validator) udpProbes(key string, probes []string) {
+// serviceTypeRe is a DNS-SD service type: _name._tcp or _name._udp.
+var serviceTypeRe = regexp.MustCompile(`^_[a-z0-9][a-z0-9-]{0,14}\._(tcp|udp)$`)
+
+// maxNameQueries bounds active.names.max_queries_per_pass.
+const maxNameQueries = 1024
+
+func (v *validator) names(n NamesConfig) {
+	if n.MaxQueriesPerPass < 1 || n.MaxQueriesPerPass > maxNameQueries {
+		v.add("active.names.max_queries_per_pass", "must be between 1 and %d, got %d", maxNameQueries, n.MaxQueriesPerPass)
+	}
 	seen := map[string]bool{}
-	for i, p := range probes {
-		k := fmt.Sprintf("%s[%d]", key, i)
+	for i, st := range n.ServiceTypes {
+		k := fmt.Sprintf("active.names.service_types[%d]", i)
 		switch {
-		case !slices.Contains(UDPProbeNames, p):
-			v.add(k, "must be one of %v, got %q", UDPProbeNames, p)
-		case seen[p]:
-			v.add(k, "%q is listed more than once", p)
+		case !serviceTypeRe.MatchString(st):
+			v.add(k, "must be a DNS-SD service type such as _http._tcp, got %q", st)
+		case seen[st]:
+			v.add(k, "%q is listed more than once", st)
 		}
-		seen[p] = true
+		seen[st] = true
+	}
+	for i, r := range n.Resolvers {
+		if !r.IsValid() || !r.IsGlobalUnicast() && !r.IsLoopback() {
+			v.add(fmt.Sprintf("active.names.resolvers[%d]", i), "%s is not a unicast address", r)
+		}
+	}
+	if n.Enabled && !n.MDNS && len(n.Resolvers) == 0 {
+		v.add("active.names", "enabled, but mdns is off and no resolver is configured: nothing would be asked")
 	}
 }
 
@@ -391,10 +348,9 @@ func (v *validator) profiles(cfg *Config) {
 		if !profileNameRe.MatchString(name) {
 			v.add(k, "profile names use lowercase letters, digits, '-' and '_'")
 		}
-		if !pr.ARP && !pr.ICMP && len(pr.TCP) == 0 && len(pr.UDP) == 0 {
+		if !pr.ARP && !pr.ICMP && len(pr.TCP) == 0 {
 			v.add(k, "enables no probe")
 		}
-		v.udpProbes(k+".udp", pr.UDP)
 		for i, port := range pr.TCP {
 			if port < 1 || port > 65535 {
 				v.add(fmt.Sprintf("%s.tcp[%d]", k, i), "must be between 1 and 65535, got %d", port)
@@ -427,12 +383,8 @@ func (v *validator) identity(cfg *Config) {
 		}
 		seen[t] = true
 	}
-	v.positive("identity.address_overlap", id.AddressOverlap)
 	v.positive("identity.address_expiry", id.AddressExpiry)
 	v.positive("identity.name_expiry", id.NameExpiry)
-	if id.AddressOverlap >= id.AddressExpiry {
-		v.add("identity.address_overlap", "must be shorter than identity.address_expiry (%s)", id.AddressExpiry)
-	}
 	if id.ProxyARPThreshold < 2 {
 		v.add("identity.proxy_arp_threshold", "must be at least 2, got %d", id.ProxyARPThreshold)
 	}

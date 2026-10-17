@@ -5,8 +5,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // LLDP TLV types (IEEE 802.1AB).
@@ -33,12 +32,13 @@ var lldpCapabilityNames = []string{
 	"other", "repeater", "bridge", "wlan_ap", "router", "telephone", "docsis", "station", "c_vlan", "s_vlan", "tpmr",
 }
 
-// lldp decodes an LLDPDU. The evidence is the chassis MAC when the chassis
-// ID is a MAC address, else the frame's source MAC; the system name is the
-// host's LLDP name. Port, descriptions, capabilities and the management
-// address go into meta: the management address may belong to another
-// interface of the device, so it is not attributed. A shutdown LLDPDU (TTL
-// 0) is ignored.
+// lldp decodes an LLDPDU. The evidence is the frame's source MAC, the port
+// that sent it: a chassis MAC is the device's identifier, which may be no
+// interface's address, so it is metadata (chassis_id), never an attachment.
+// The system name is the sender's LLDP name. Port, descriptions,
+// capabilities and the advertised management address go into meta: the
+// management address may belong to another interface of the device, so it
+// is not attributed. A shutdown LLDPDU (TTL 0) is ignored.
 func (f *frame) lldp(b []byte) {
 	var (
 		mac             = f.src
@@ -62,9 +62,6 @@ func (f *frame) lldp(b []byte) {
 			}
 			haveID = true
 			meta["chassis_id"] = lldpID(v[0], v[1:], lldpChassisMAC, lldpChassisNetwork)
-			if v[0] == lldpChassisMAC && n == 7 && identify.UnicastMAC(v[1:]) {
-				mac = copyMAC(v[1:])
-			}
 		case lldpPortID:
 			if n >= 2 {
 				meta["port_id"] = lldpID(v[0], v[1:], lldpPortMAC, lldpPortNetwork)

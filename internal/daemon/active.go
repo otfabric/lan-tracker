@@ -2,28 +2,25 @@ package daemon
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"slices"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/arp"
-	"lan-sentinel/internal/probe/icmp"
-	"lan-sentinel/internal/probe/idprobe"
-	"lan-sentinel/internal/probe/scheduler"
-	"lan-sentinel/internal/probe/tcp"
-	"lan-sentinel/internal/probe/udp"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/arp"
+	"github.com/otfabric/lan-tracker/internal/probe/icmp"
+	"github.com/otfabric/lan-tracker/internal/probe/names"
+	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
+	"github.com/otfabric/lan-tracker/internal/probe/tcp"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // envActor is the actor of a kill switch forced by the environment.
 const envActor = "env"
 
-// envForced reports whether LAN_SENTINEL_ACTIVE_DISABLED=1 is set.
+// envForced reports whether LAN_TRACKER_ACTIVE_DISABLED=1 is set.
 func (d *Daemon) envForced() bool {
 	return slices.Contains(d.opts.Load.Environ, config.EnvActiveDisabled+"=1")
 }
@@ -59,17 +56,14 @@ func (d *Daemon) startScheduler(ctx context.Context, start func(string, func(con
 	}
 	tx := d.backends.Transmitter
 	d.budget = probe.NewBudget(d.clock, probe.LimitsFrom(cfg.Active), probe.ConfigPolicy{Switch: d.sw, Config: d.cfg.Load})
-	kh := knownHosts{d.reader}
-	d.identify = &idprobe.Engine{TX: tx}
 	d.sched = scheduler.New(scheduler.Options{
-		Config: d.cfg.Load, Links: d.probeLinks, Known: kh, Identify: kh,
+		Config: d.cfg.Load, Links: d.probeLinks, Known: knownHosts{d.reader}, Names: d.reader,
 		Engines: map[probe.Protocol]probe.Engine{
-			probe.ARP: arp.Engine{TX: tx}, probe.ICMP: icmp.Engine{TX: tx},
-			probe.TCP: tcp.Engine{TX: tx}, probe.UDP: udp.Engine{TX: tx},
-			probe.Identify: d.identify,
+			probe.ARP: arp.Engine{TX: tx}, probe.ICMP: icmp.Engine{TX: tx}, probe.TCP: tcp.Engine{TX: tx},
+			probe.Name: &names.Engine{TX: tx},
 		},
 		Budget: d.budget, Switch: d.sw, Emit: d.emitObservation,
-		Operator: d.bus.PublishOperator, Registry: d.registry, Backend: tx.Backend, Clock: d.clock, Logger: d.log,
+		Operator: d.bus.PublishOperator, Registry: d.registry, Backend: tx.Backend, Route: tx.Route, Clock: d.clock, Logger: d.log,
 	})
 	start("scheduler", d.sched.Run)
 	return nil
@@ -85,10 +79,6 @@ func (k knownHosts) Known(ctx context.Context, iface string) ([]scheduler.Known,
 		out[i] = scheduler.Known{IP: a.IP, LastSeen: a.LastSeen}
 	}
 	return out, err
-}
-
-func (k knownHosts) IdentifyTargets(ctx context.Context, iface, probe string, since time.Time) ([]store.IdentifyCandidate, error) {
-	return k.r.IdentifyTargets(ctx, iface, probe, since)
 }
 
 // probeLinks returns the interfaces that are present and up.
@@ -193,92 +183,5 @@ func (d *Daemon) DescribeHost(ctx context.Context, actor, hostID, description st
 	return h.HostSummary, err
 }
 
-// emitObservation puts a probe observation on the bus. Identification
-// observations are the once-per-MAC latch (ADR 0011): they must not drop
-// when the bus is full. Other sources stay on the dropping Publish.
-func (d *Daemon) emitObservation(o observation.Observation) {
-	if o.Source != observation.IdentifyProbe {
-		d.bus.Publish(o)
-		return
-	}
-	// Background: PublishWait also returns when the bus is closed.
-	_ = d.bus.PublishWait(context.Background(), o)
-}
-
-// IdentifyRun implements api.Control: one forced identification exchange
-// (ADR 0011). It bypasses only the once-per-MAC latch.
-func (d *Daemon) IdentifyRun(ctx context.Context, actor, hostID, probeName, sni string) (store.IdentifyAttempt, error) {
-	if d.sched == nil {
-		return store.IdentifyAttempt{}, api.ErrNoScanner
-	}
-	h, err := d.reader.Host(ctx, hostID)
-	if err != nil {
-		return store.IdentifyAttempt{}, err
-	}
-	cfg := d.cfg.Load()
-	ic, ok := probe.InterfaceConfig(cfg, h.Interface)
-	if !ok {
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: interface %s is not configured", api.ErrIdentifyRefused, h.Interface)
-	}
-	if !ic.Active.Enabled {
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: active discovery is disabled on %s", api.ErrIdentifyRefused, h.Interface)
-	}
-	var entry config.InterfaceIdentify
-	found := false
-	for _, e := range ic.Active.Identify {
-		if e.Name == probeName {
-			entry, found = e, true
-			break
-		}
-	}
-	if !found {
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: %s is not enabled on %s", api.ErrIdentifyRefused, probeName, h.Interface)
-	}
-	since := d.clock.Now().Add(-cfg.Active.Identify.HostMaxAge.D())
-	cands, err := d.reader.IdentifyTargets(ctx, h.Interface, probeName, since)
-	if err != nil {
-		return store.IdentifyAttempt{}, err
-	}
-	var cand store.IdentifyCandidate
-	matched := false
-	for _, c := range cands {
-		if c.HostID == hostID {
-			cand, matched = c, true
-			break
-		}
-	}
-	if !matched {
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: no open IPv4 binding", api.ErrIdentifyRefused)
-	}
-	if cand.Suppress != "" && cand.Suppress != store.IdentifyAttempted {
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: %s", api.ErrIdentifyRefused, cand.Suppress)
-	}
-	job := probe.IdentifyJob{
-		HostID: hostID, IP: cand.IP, Probe: probeName,
-		UnitID:    uint8(cfg.Active.Identify.UnitIDOf(entry)), //nolint:gosec // validated 1–255
-		Community: cfg.Active.Identify.CommunityOf(entry),
-		SNI:       config.ResolveSNI(cfg.Active.Identify.SNIModeOf(entry), cand.PreferredName, sni),
-		Force:     true, Trigger: observation.TriggerOperator, Actor: actor,
-	}
-	results, err := d.sched.IdentifyRun(ctx, h.Interface, job)
-	if err != nil {
-		if errors.Is(err, probe.ErrDisabled) || errors.Is(err, probe.ErrRefused) {
-			return store.IdentifyAttempt{}, fmt.Errorf("%w: %w", api.ErrIdentifyRefused, err)
-		}
-		return store.IdentifyAttempt{}, err
-	}
-	if len(results) == 1 && results[0].State == probe.Blocked {
-		return store.IdentifyAttempt{}, fmt.Errorf("%w: probe blocked by policy", api.ErrIdentifyRefused)
-	}
-	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
-	defer cancel()
-	if err := d.bus.Barrier(pctx); err != nil {
-		return store.IdentifyAttempt{}, err
-	}
-	if err := d.store.Flush(pctx); err != nil {
-		return store.IdentifyAttempt{}, err
-	}
-	return d.reader.IdentifyAttemptOf(pctx, hostID, probeName)
-}
-
-var _ api.Control = (*Daemon)(nil)
+// emitObservation puts a probe observation on the bus.
+func (d *Daemon) emitObservation(o observation.Observation) { d.bus.Publish(o) }

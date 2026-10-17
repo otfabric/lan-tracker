@@ -21,9 +21,9 @@ import (
 	"golang.org/x/net/ipv4"
 	_ "modernc.org/sqlite"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/daemon"
-	"lan-sentinel/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+	"github.com/otfabric/lan-tracker/internal/platform"
 )
 
 func env(t *testing.T, name string) string {
@@ -53,7 +53,7 @@ func ping(t *testing.T, target netip.Addr) {
 		t.Fatalf("ping socket: %v", err)
 	}
 	defer c.Close()
-	msg := icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: 1, Seq: 1, Data: []byte("lan-sentinel")}}
+	msg := icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: 1, Seq: 1, Data: []byte("lan-tracker")}}
 	b, _ := msg.Marshal(nil)
 	_, _ = c.WriteTo(b, &net.UDPAddr{IP: target.AsSlice()})
 }
@@ -322,7 +322,7 @@ func (s *syncBuffer) String() string {
 // TestDaemonFindsHosts runs the daemon on two test networks (phase 1 exit
 // criterion, in Docker): hosts appear from the kernel neighbour table alone,
 // with their vendor, scoped per interface. The same MAC on both networks is
-// two hosts, one per interface, linked by MAC_MOVED.
+// two hosts, one per interface, linked by MAC_ALSO_OBSERVED.
 func TestDaemonFindsHosts(t *testing.T) {
 	iface, prefix := env(t, "LS_TEST_IFACE"), env(t, "LS_TEST_PREFIX")
 	prefix2 := env(t, "LS_TEST_NET2_PREFIX")
@@ -335,7 +335,7 @@ func TestDaemonFindsHosts(t *testing.T) {
 
 	dir := t.TempDir()
 	cfgPath, db := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "hosts.db")
-	cfg := "version: 1\ninterfaces:\n" +
+	cfg := "version: 2\ninterfaces:\n" +
 		"  - name: " + iface + "\n    passive: { enabled: false }\n" +
 		"  - name: " + iface2 + "\n    passive: { enabled: false }\n" +
 		"storage: { path: " + db + " }\napi: { socket: " + filepath.Join(dir, "api.sock") + " }\nlogging: { format: text }\n"
@@ -348,7 +348,7 @@ func TestDaemonFindsHosts(t *testing.T) {
 	go func() {
 		errc <- daemon.Run(context.Background(), daemon.Options{Load: config.LoadOptions{Path: cfgPath}, Stderr: log, Signals: signals})
 	}()
-	// The MAC seen on two interfaces is two hosts linked by MAC_MOVED on
+	// The MAC seen on two interfaces is two hosts linked by MAC_ALSO_OBSERVED on
 	// whichever was discovered second (that depends on the neighbour dump's
 	// order).
 	for _, want := range []string{
@@ -356,7 +356,7 @@ func TestDaemonFindsHosts(t *testing.T) {
 		"HOST_DISCOVERED " + iface + " " + closedMAC,
 		"HOST_DISCOVERED " + iface + " " + plcMAC,
 		"HOST_DISCOVERED " + iface2 + " " + openMAC,
-		"MAC_MOVED ",
+		"MAC_ALSO_OBSERVED ",
 	} {
 		deadline := time.Now().Add(30 * time.Second)
 		for !strings.Contains(log.String(), want) {
@@ -411,9 +411,9 @@ func TestDaemonFindsHosts(t *testing.T) {
 	if got := query(`SELECT count(DISTINCT host_id) FROM hosts WHERE mac = '` + openMAC + `'`); got[0] != "2" {
 		t.Errorf("hosts with MAC %s = %v, want 2 (one per interface)", openMAC, got)
 	}
-	if got := query(`SELECT old_value || '>' || new_value FROM events WHERE type = 'MAC_MOVED'`); len(got) != 1 ||
+	if got := query(`SELECT old_value || '>' || new_value FROM events WHERE type = 'MAC_ALSO_OBSERVED'`); len(got) != 1 ||
 		got[0] != iface+">"+iface2 && got[0] != iface2+">"+iface {
-		t.Errorf("MAC_MOVED events = %v, want one between %s and %s", got, iface, iface2)
+		t.Errorf("MAC_ALSO_OBSERVED events = %v, want one between %s and %s", got, iface, iface2)
 	}
 	prefixes := query(`SELECT c.interface || ' ' || p.prefix FROM context_prefixes p
 		JOIN network_contexts c ON c.id = p.context_id WHERE p.ended_at IS NULL`)

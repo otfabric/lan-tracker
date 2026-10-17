@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform"
 )
 
 // ErrClosed is returned by a closed fake frame source.
@@ -289,8 +289,29 @@ type Transmitter struct {
 	EchoReply func(dst netip.Addr, msg []byte) []byte
 	// UDPReply answers a UDP payload sent to addr (nil: no reply).
 	UDPReply func(addr netip.AddrPort, payload []byte) []byte
+	// PacketReply answers a datagram written to an unconnected socket
+	// (ListenUDP), from any number of senders.
+	PacketReply func(to netip.AddrPort, payload []byte) []Datagram
 	// FramesErr and ICMPErr, if set, are returned when opening.
 	FramesErr, ICMPErr error
+	// Routes maps a destination to its route; missing means directly
+	// connected on the interface asked about, with source 192.0.2.1.
+	Routes map[netip.Addr]platform.Route
+	// RouteErr maps a destination to the error Route returns.
+	RouteErr map[netip.Addr]error
+}
+
+// Route implements platform.Transmitter.
+func (t *Transmitter) Route(iface string, dst netip.Addr) (platform.Route, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.RouteErr[dst]; err != nil {
+		return platform.Route{}, err
+	}
+	if r, ok := t.Routes[dst]; ok {
+		return r, nil
+	}
+	return platform.Route{Iface: iface, Src: netip.MustParseAddr("192.0.2.1")}, nil
 }
 
 // UDPDatagram is a UDP payload sent by a probe.
@@ -416,6 +437,64 @@ func (u *udpConn) Read(p []byte) (int, error) {
 func (u *udpConn) SetReadDeadline(t time.Time) error { u.deadline = t; return nil }
 func (u *udpConn) SetDeadline(t time.Time) error     { u.deadline = t; return nil }
 func (u *udpConn) Close() error                      { return nil }
+
+// Datagram is a reply delivered to an unconnected UDP socket.
+type Datagram struct {
+	From netip.AddrPort
+	Data []byte
+}
+
+// ListenUDP implements platform.Transmitter.
+func (t *Transmitter) ListenUDP(_ context.Context, iface string) (net.PacketConn, error) {
+	return &packetConn{t: t, iface: iface, in: make(chan Datagram, 16)}, nil
+}
+
+// packetConn is an unconnected UDP socket whose replies come from
+// PacketReply.
+type packetConn struct {
+	net.PacketConn // unused methods
+	t              *Transmitter
+	iface          string
+	in             chan Datagram
+	deadline       time.Time
+}
+
+func (u *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	ap := addr.(*net.UDPAddr).AddrPort()
+	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	u.t.mu.Lock()
+	u.t.udp = append(u.t.udp, UDPDatagram{Interface: u.iface, Addr: ap, Payload: append([]byte(nil), p...)})
+	reply := u.t.PacketReply
+	u.t.mu.Unlock()
+	if reply != nil {
+		for _, d := range reply(ap, p) {
+			select {
+			case u.in <- d:
+			default: // a full socket buffer drops, as the kernel would
+			}
+		}
+	}
+	return len(p), nil
+}
+
+func (u *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	var timeout <-chan time.Time
+	if !u.deadline.IsZero() {
+		timer := time.NewTimer(time.Until(u.deadline))
+		defer timer.Stop()
+		timeout = timer.C
+	}
+	select {
+	case d := <-u.in:
+		return copy(p, d.Data), net.UDPAddrFromAddrPort(d.From), nil
+	case <-timeout:
+		return 0, nil, os.ErrDeadlineExceeded
+	}
+}
+
+func (u *packetConn) SetReadDeadline(t time.Time) error { u.deadline = t; return nil }
+func (u *packetConn) SetDeadline(t time.Time) error     { u.deadline = t; return nil }
+func (u *packetConn) Close() error                      { return nil }
 
 // ICMPConn implements platform.Transmitter: a ping socket answering from
 // EchoReply.

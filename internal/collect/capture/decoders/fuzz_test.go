@@ -6,7 +6,7 @@ import (
 
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 // Every decoder has a fuzz target (AGENTS.md §7). Each feeds a
@@ -16,14 +16,28 @@ import (
 func checkFrame(t *testing.T, f *frame) {
 	t.Helper()
 	for _, o := range f.out {
-		if o.MAC == nil && !o.IP.IsValid() {
+		if o.MAC == nil && !o.IP.IsValid() && len(o.Records) == 0 {
 			t.Fatalf("observation without evidence: %+v", o)
 		}
 		if o.Hostname == "" && o.NameType != "" || len(o.Hostname) > maxName {
 			t.Fatalf("bad name: %+v", o)
 		}
+		if len(o.Records) > maxRecords {
+			t.Fatalf("%d records", len(o.Records))
+		}
+		for _, r := range o.Records {
+			if r.Name == "" || len(r.Name) > maxName || len(r.Value) > maxName+6 && len(r.Value) > maxText || r.TTL == nil ||
+				r.Addr.IsValid() && !usableIP(r.Addr) {
+				t.Fatalf("bad record: %+v", r)
+			}
+		}
 		if !o.Time.Equal(t0) || o.Interface != "eth1" {
 			t.Fatalf("time or interface not set: %+v", o)
+		}
+		if m := o.DHCP; m != nil && (len(m.Routers) > maxAddrList || len(m.DNS) > maxAddrList || len(m.Routes) > maxRoutes ||
+			len(m.MSRoutes) > maxRoutes || len(m.Search) > maxSearch || len(m.ParamRequest) > maxParamRequest ||
+			len(m.ClientID) > 3*maxClientID || len(m.Hostname) > maxName || len(m.Domain) > maxName) {
+			t.Fatalf("unbounded DHCP message: %+v", m)
 		}
 	}
 }

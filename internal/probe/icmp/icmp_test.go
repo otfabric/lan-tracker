@@ -9,11 +9,11 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/probe"
-	"lan-sentinel/internal/probe/probetest"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/probe/probetest"
 )
 
 // echo answers a request as a host would: same identifier and sequence.
@@ -40,7 +40,7 @@ func TestRequestAndParse(t *testing.T) {
 	if err := m.DecodeFromBytes(msg, gopacket.NilDecodeFeedback); err != nil {
 		t.Fatal(err)
 	}
-	if m.TypeCode.Type() != layers.ICMPv4TypeEchoRequest || m.Id != 0x1234 || m.Seq != 7 || string(m.Payload) != "lan-sentinel" {
+	if m.TypeCode.Type() != layers.ICMPv4TypeEchoRequest || m.Id != 0x1234 || m.Seq != 7 || string(m.Payload) != "lan-tracker" {
 		t.Errorf("request = %+v", m)
 	}
 	if id, seq, ok := ParseReply(echo(msg, 0, 0, layers.ICMPv4TypeEchoReply)); !ok || id != 0x1234 || seq != 7 {

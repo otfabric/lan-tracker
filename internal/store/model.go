@@ -14,19 +14,29 @@ import (
 
 // HostSummary is one row of the inventory.
 type HostSummary struct {
-	HostID              string    `json:"host_id"`
-	Interface           string    `json:"interface"`
-	MAC                 string    `json:"mac"`
-	Vendor              string    `json:"vendor,omitempty"`
-	LocallyAdministered bool      `json:"locally_administered"`
-	Presence            string    `json:"presence"`
-	PreferredName       string    `json:"preferred_name,omitempty"`
-	Manufacturer        string    `json:"manufacturer,omitempty"`
-	DeviceType          string    `json:"device_type,omitempty"`
-	Description         string    `json:"description,omitempty"` // set by an operator (docs/DATA_MODEL.md §5.8)
-	IPs                 []string  `json:"ips"`                   // open address bindings
-	FirstSeen           time.Time `json:"first_seen"`
-	LastSeen            time.Time `json:"last_seen"`
+	HostID    string `json:"host_id"`
+	Interface string `json:"interface"`
+	MAC       string `json:"mac"`
+	// Vendor is the IEEE registrant of the MAC prefix (OUI): a hint about
+	// the network interface, never the equipment's manufacturer.
+	Vendor              string `json:"oui_registrant,omitempty"`
+	LocallyAdministered bool   `json:"locally_administered"`
+	Presence            string `json:"presence"`
+	PreferredName       string `json:"preferred_name,omitempty"`
+	// ProxyARP: the MAC answered ARP for addresses other live hosts held
+	// (docs/DATA_MODEL.md §5.2), so its ARP replies prove nothing.
+	ProxyARP    bool      `json:"proxy_arp,omitempty"`
+	Description string    `json:"description,omitempty"` // set by an operator (docs/DATA_MODEL.md §5.8)
+	IPs         []string  `json:"ips"`                   // open address bindings
+	FirstSeen   time.Time `json:"first_seen"`
+	// LastSeen is the latest presence evidence of any kind; the kinds
+	// apart (docs/DATA_MODEL.md §2): a frame directly observed from the
+	// MAC, an address confirmed at it, an endpoint it held alone that
+	// answered. Unknown (absent) for hosts recorded by LAN Sentinel.
+	LastSeen             time.Time  `json:"last_seen"`
+	LastFrameSeen        *time.Time `json:"last_frame_seen,omitempty"`
+	LastAddressConfirmed *time.Time `json:"last_address_confirmed,omitempty"`
+	LastEndpointAnswer   *time.Time `json:"last_endpoint_answer,omitempty"`
 }
 
 // Binding is an address binding with its interval (docs/DATA_MODEL.md §3).
@@ -46,19 +56,63 @@ type SourceSeen struct {
 	LastSeen  time.Time `json:"last_seen"`
 }
 
-// Name is a hostname binding. Stale: not confirmed for identity.name_expiry
-// (docs/DATA_MODEL.md §5.4); stale names stay in effect.
+// Name is a name record (docs/DATA_MODEL.md §5.4): what was advertised or
+// resolved, by whom, and how it is linked to a MAC.
 type Name struct {
-	Name      string     `json:"name"`
-	Type      string     `json:"type"`
-	Source    string     `json:"source"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`        // name type: mdns, dns, dns_ptr, dhcp, lldp
+	RecordType string `json:"record_type"` // A, AAAA, PTR, SRV, TXT, CNAME, NAME
+	// Address is what an A, AAAA or PTR record describes; Value a CNAME or
+	// SRV target, TXT text or a service instance.
+	Address string `json:"address,omitempty"`
+	Value   string `json:"value,omitempty"`
+	Source  string `json:"source"`
+	// The advertiser: the frame's sender (none for a resolver's answer).
+	AdvertiserMAC string `json:"advertiser_mac,omitempty"`
+	AdvertiserIP  string `json:"advertiser_ip,omitempty"`
+	// Link says how the record is tied to HostID: sender (a name the device
+	// gave itself), address (one MAC alone held the address), none, legacy
+	// (LAN Sentinel's name, without its record type, advertiser or TTL).
+	Link      string     `json:"link"`
+	HostID    string     `json:"host_id,omitempty"`
+	TTL       *int64     `json:"ttl_seconds,omitempty"`
 	FirstSeen time.Time  `json:"first_seen"`
 	LastSeen  time.Time  `json:"last_seen"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	EndedAt   *time.Time `json:"ended_at"`
-	Stale     bool       `json:"stale"`
+	EndReason string     `json:"end_reason,omitempty"`
+	Legacy    bool       `json:"legacy,omitempty"`
+	// Freshness when read: fresh, expired (its TTL ran out since it was
+	// last seen), stale (no TTL and not seen for identity.name_expiry) or
+	// ended. Expired and stale names stay in effect: time alone never
+	// ends a name.
+	Freshness string `json:"freshness"`
 }
 
-// Service is the current probe result for one protocol/port.
+// Endpoint is one TCP endpoint's results (docs/DATA_MODEL.md §5.5): an
+// address and port on an interface, with the MAC that alone held the
+// address at the last result (none when no MAC or several did). The last
+// result and the last definite answer are kept apart: a timeout never
+// erases that the endpoint last answered OPEN. OPEN is a completed connect
+// at that time, not proof of any protocol or device.
+type Endpoint struct {
+	Interface          string     `json:"interface"`
+	IP                 string     `json:"ip"`
+	Proto              string     `json:"proto"`
+	Port               int        `json:"port"`
+	HostID             string     `json:"host_id,omitempty"`
+	MAC                string     `json:"mac,omitempty"`
+	LastResult         string     `json:"last_result"`
+	LastResultAt       time.Time  `json:"last_result_at"`
+	LastDetail         string     `json:"last_detail,omitempty"`
+	LastOpenAt         *time.Time `json:"last_open_at,omitempty"`
+	LastDefiniteResult string     `json:"last_definite_result,omitempty"`
+	LastDefiniteAt     *time.Time `json:"last_definite_at,omitempty"`
+	FirstSeen          time.Time  `json:"first_seen"`
+}
+
+// Service is a LAN Sentinel probe result for one protocol and port of a
+// host, without its address (legacy, read only).
 type Service struct {
 	Proto        string    `json:"proto"`
 	Port         int       `json:"port"`
@@ -66,12 +120,10 @@ type Service struct {
 	FirstSeen    time.Time `json:"first_seen"`
 	LastSeen     time.Time `json:"last_seen"`
 	LastResultAt time.Time `json:"last_result_at"`
-	// Detail is what a protocol-specific probe learnt about the service
-	// (e.g. the NTP stratum), empty for plain TCP connects.
-	Detail map[string]string `json:"detail,omitempty"`
 }
 
-// Identification is a derived fact with confidence and evidence.
+// Identification is a claim LAN Sentinel recorded (legacy, ADR 0012): kept
+// readable as history, never updated by LAN Tracker.
 type Identification struct {
 	Field      string          `json:"field"`
 	Value      string          `json:"value"`
@@ -80,18 +132,25 @@ type Identification struct {
 	Evidence   json.RawMessage `json:"evidence"`
 	FirstSeen  time.Time       `json:"first_seen"`
 	LastSeen   time.Time       `json:"last_seen"`
-	// Current marks the source's current value for the field; the others
-	// are history or weaker claims (docs/DATA_MODEL.md §5.7).
-	Current bool `json:"current"`
+	Current    bool            `json:"current"`
 }
 
 // Host is a full host record.
 type Host struct {
 	HostSummary
-	Addresses       []Binding        `json:"addresses"`
-	Names           []Name           `json:"names"`
-	Services        []Service        `json:"services"`
-	Identifications []Identification `json:"identifications"`
+	Addresses []Binding `json:"addresses"`
+	Names     []Name    `json:"names"`
+	// Endpoints are the TCP endpoints attributed to the host at their last
+	// result.
+	Endpoints []Endpoint `json:"endpoints"`
+	// DHCPLeases are the leases servers acknowledged for the host's MAC on
+	// its interface, newest first: what the servers said, not proof the
+	// host holds the address.
+	DHCPLeases []DHCPLease `json:"dhcp_leases"`
+	// LegacyServices are LAN Sentinel's results, without an address.
+	LegacyServices []Service `json:"legacy_services,omitempty"`
+	// LegacyIdentifications are LAN Sentinel's identification rows.
+	LegacyIdentifications []Identification `json:"legacy_identifications,omitempty"`
 }
 
 // Event is a stored event (docs/DATA_MODEL.md §7).
@@ -150,15 +209,6 @@ type Rollup struct {
 	Count     int64     `json:"count"`
 	FirstTS   time.Time `json:"first_ts"`
 	LastTS    time.Time `json:"last_ts"`
-}
-
-// ServiceRow is one row of `services list`.
-type ServiceRow struct {
-	Service
-	Interface string   `json:"interface"`
-	HostID    string   `json:"host_id"`
-	MAC       string   `json:"mac"`
-	IPs       []string `json:"ips"`
 }
 
 // DHCPServer is a DHCP server identity seen on an interface through one
@@ -268,12 +318,11 @@ type HostFilter struct {
 	// Query restricts to hosts that ever matched it (any kind).
 	Query       string
 	QueryKind   QueryKind
-	Live        bool // ACTIVE or RECENT
-	NotLive     bool // STALE or MISSING
-	Vendor      string
-	Device      string // device_type contains this text
+	Live        bool   // ACTIVE or RECENT
+	NotLive     bool   // STALE or MISSING
+	Vendor      string // the OUI registrant contains this text
 	Description string // the description contains this text
-	Port        int    // an OPEN service on this TCP or UDP port
+	Port        int    // an endpoint of the host on this TCP port last answered OPEN
 	SeenSince   time.Time
 }
 
@@ -295,6 +344,9 @@ type FindResult struct {
 	// interface.
 	Previous []Holding `json:"previous,omitempty"`
 	Next     []Holding `json:"next,omitempty"`
+	// Advertised are the name records of a name query linked to no MAC:
+	// what was advertised or resolved, unmapped.
+	Advertised []Name `json:"advertised,omitempty"`
 }
 
 // FoundHost is one holder or match.
@@ -304,9 +356,12 @@ type FoundHost struct {
 	Binding     *Binding `json:"binding,omitempty"`
 	Unconfirmed bool     `json:"unconfirmed,omitempty"`
 	Conflict    bool     `json:"conflict,omitempty"`
-	// With At: the next holder of the address and the host's next address.
+	// With At: the next holder of the address, and the first address the
+	// host gained after this binding ended. A MAC's addresses are
+	// independent (docs/DATA_MODEL.md §5.3): NextAddress is not proof that
+	// the device moved.
 	ReplacedBy    *Holding `json:"replaced_by,omitempty"`
-	MovedTo       *Holding `json:"moved_to,omitempty"`
+	NextAddress   *Holding `json:"next_address,omitempty"`
 	ConflictEvent *Event   `json:"conflict_event,omitempty"`
 }
 
@@ -350,11 +405,14 @@ type ObservationFilter struct {
 	Limit        int
 }
 
-// ServiceFilter selects services (`services list`).
+// ServiceFilter selects endpoints (`services list`). State matches the
+// last result; At reads the results in effect then.
 type ServiceFilter struct {
 	Port      int
 	State     string
 	Interface string
+	IP        string
+	At        *time.Time
 }
 
 // Evidence answers `hosts evidence`: the host, per source and address the

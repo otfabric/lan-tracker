@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/clock"
 )
 
 func TestCorruptDatabaseIsQuarantined(t *testing.T) {

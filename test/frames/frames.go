@@ -1,7 +1,7 @@
 // Package frames builds Ethernet frames for tests, the pcap fixture
 // generator (test/fixtures/gen) and the Docker frame injector
 // (test/net/inject). It serialises with gopacket's layers, an encoder
-// independent of LAN Sentinel's decoders.
+// independent of LAN Tracker's decoders.
 package frames
 
 import (
@@ -129,6 +129,16 @@ type DHCP struct {
 	LeaseSeconds uint32   // option 51; 0: none
 	Relay        string   // giaddr
 	RelayAgent   []byte   // option 82
+	// Wire details: the transaction ID (0: 0x5e5e), options appended
+	// as given (repeats are split options, RFC 3396), the sname and file
+	// fields (for option overload), and the ports and destination (zero:
+	// the client's or server's usual ones, broadcast).
+	XID              uint32
+	Options          []layers.DHCPOption
+	SName, File      []byte
+	SrcPort, DstPort uint16
+	DstIP            string
+	DstMAC           net.HardwareAddr
 }
 
 // Frame builds the DHCP message as a client (discover, request, decline,
@@ -136,7 +146,7 @@ type DHCP struct {
 func (d DHCP) Frame() []byte {
 	msg := &layers.DHCPv4{
 		Operation: layers.DHCPOpRequest, HardwareType: layers.LinkTypeEthernet, HardwareLen: 6, Xid: 0x5e5e,
-		ClientHWAddr: d.Client, ClientIP: net.IPv4zero, YourClientIP: net.IPv4zero,
+		ClientHWAddr: d.Client, ClientIP: net.IPv4zero, YourClientIP: net.IPv4zero, ServerName: d.SName, File: d.File,
 		Options: layers.DHCPOptions{layers.NewDHCPOption(layers.DHCPOptMessageType, []byte{byte(d.Type)})},
 	}
 	if d.ClientIP != "" {
@@ -174,16 +184,36 @@ func (d DHCP) Frame() []byte {
 		add(layers.DHCPOptLeaseTime, binary.BigEndian.AppendUint32(nil, d.LeaseSeconds))
 	}
 	add(layers.DHCPOpt(82), d.RelayAgent)
+	msg.Options = append(msg.Options, d.Options...)
+	if d.XID != 0 {
+		msg.Xid = d.XID
+	}
+	or := func(v, def uint16) uint16 {
+		if v != 0 {
+			return v
+		}
+		return def
+	}
+	dst, dmac := "255.255.255.255", Broadcast
+	if d.DstIP != "" {
+		dst = d.DstIP
+	}
+	if d.DstMAC != nil {
+		dmac = d.DstMAC
+	}
 	switch d.Type {
 	case layers.DHCPMsgTypeOffer, layers.DHCPMsgTypeAck, layers.DHCPMsgTypeNak:
 		msg.Operation = layers.DHCPOpReply
-		return UDP4(d.Server, Broadcast, d.ServerIP, "255.255.255.255", 67, 68, msg)
+		return UDP4(d.Server, dmac, d.ServerIP, dst, or(d.SrcPort, 67), or(d.DstPort, 68), msg)
 	}
-	src := "0.0.0.0"
+	src, smac := "0.0.0.0", d.Client
 	if d.ClientIP != "" {
 		src = d.ClientIP
 	}
-	return UDP4(d.Client, Broadcast, src, "255.255.255.255", 68, 67, msg)
+	if d.Server != nil { // a relay forwarding the client's message
+		src, smac = d.ServerIP, d.Server
+	}
+	return UDP4(smac, dmac, src, dst, or(d.SrcPort, 68), or(d.DstPort, 67), msg)
 }
 
 // A returns an mDNS/DNS A or AAAA record.
@@ -212,6 +242,23 @@ func TXT(name string, txt ...string) layers.DNSResourceRecord {
 	for _, s := range txt {
 		r.TXTs = append(r.TXTs, []byte(s))
 	}
+	return r
+}
+
+// CNAME returns a CNAME record.
+func CNAME(name, target string) layers.DNSResourceRecord {
+	return layers.DNSResourceRecord{Name: []byte(name), Type: layers.DNSTypeCNAME, Class: layers.DNSClassIN, TTL: 300, CNAME: []byte(target)}
+}
+
+// Flush sets a record's mDNS cache-flush bit (RFC 6762 §10.2).
+func Flush(r layers.DNSResourceRecord) layers.DNSResourceRecord {
+	r.Class |= 0x8000
+	return r
+}
+
+// TTL sets a record's TTL; 0 is an mDNS goodbye.
+func TTL(r layers.DNSResourceRecord, ttl uint32) layers.DNSResourceRecord {
+	r.TTL = ttl
 	return r
 }
 

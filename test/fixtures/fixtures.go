@@ -14,7 +14,7 @@ import (
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
 
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 // Packet is one captured frame.
@@ -33,8 +33,11 @@ var (
 	PLCC   = frames.MAC("00:1b:1b:aa:bb:03")
 	HMI    = frames.MAC("00:0e:8c:11:22:33")
 	Server = frames.MAC("00:15:5d:00:00:02")
-	Switch = frames.MAC("00:1e:c9:00:00:01")
-	Rogue  = frames.MAC("02:00:00:00:00:66") // a laptop running a DHCP server
+	Switch = frames.MAC("00:1e:c9:00:00:01") // the chassis ID it advertises
+	// SwitchPort is the switch port that sends its LLDP frames: the
+	// attachment, where the chassis ID is only metadata.
+	SwitchPort = frames.MAC("00:1e:c9:00:00:17")
+	Rogue      = frames.MAC("02:00:00:00:00:66") // a laptop running a DHCP server
 )
 
 // SiteAPackets is a site on 192.168.110.0/24 seen from a switch port over
@@ -60,7 +63,7 @@ func SiteAPackets() []Packet {
 			frames.SRV("PLC A._http._tcp.local", "plc-a.local", 80),
 			frames.A("plc-a.local", "192.168.110.50"),
 		}, nil)),
-		at(2*s, frames.LLDP{Source: frames.MAC("00:1e:c9:00:00:17"), ChassisMAC: Switch, PortID: "ge-0/0/23", TTL: 120,
+		at(2*s, frames.LLDP{Source: SwitchPort, ChassisMAC: Switch, PortID: "ge-0/0/23", TTL: 120,
 			SystemName: "plant-sw-01", SystemDesc: "Industrial Ethernet Switch", Caps: 0x04, MgmtIP: "192.168.110.3"}.Frame()),
 		at(10*m, frames.ARP(layers.ARPRequest, Server, "192.168.110.2", frames.MAC("00:00:00:00:00:00"), "192.168.110.20")),
 		at(10*m+1*s, frames.DHCP{Type: layers.DHCPMsgTypeDiscover, Client: HMI, Hostname: "HMI-LINE3",
@@ -87,7 +90,7 @@ func SiteAPackets() []Packet {
 func WritePcapng(w io.Writer, pkts []Packet) error {
 	intf := pcapgo.NgInterface{Name: "eth1", LinkType: layers.LinkTypeEthernet, SnapLength: 0, TimestampResolution: 9}
 	nw, err := pcapgo.NewNgWriterInterface(w, intf, pcapgo.NgWriterOptions{
-		SectionInfo: pcapgo.NgSectionInfo{Application: "lan-sentinel test/fixtures/gen"},
+		SectionInfo: pcapgo.NgSectionInfo{Application: "lan-tracker test/fixtures/gen"},
 	})
 	if err != nil {
 		return err

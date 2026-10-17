@@ -1,9 +1,9 @@
-# LAN Sentinel build. LAN Sentinel is Linux only: the deliverables are static
+# LAN Tracker build. LAN Tracker is Linux only: the deliverables are static
 # linux/amd64 and linux/arm64 binaries (CGO_ENABLED=0), and every Go command
 # below (build, vet, lint, vuln, test, fuzz, release) runs in the Linux dev
 # container (build/dev.Dockerfile), on any host with Docker.
-BIN      := lan-sentinel
-PKG      := lan-sentinel
+BIN      := lan-tracker
+PKG      := github.com/otfabric/lan-tracker
 PKGS     ?= ./...
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -24,8 +24,8 @@ COVER_MIN ?= 90
 # Dev container: the image tag follows the Dockerfile's content, caches live on
 # a named volume, and commands run as the calling user so files in the
 # checkout stay yours.
-DEV_IMAGE := lan-sentinel-dev:$(shell git hash-object build/dev.Dockerfile 2>/dev/null | cut -c1-12)
-CACHE_VOL := lan-sentinel-cache
+DEV_IMAGE := lan-tracker-dev:$(shell git hash-object build/dev.Dockerfile 2>/dev/null | cut -c1-12)
+CACHE_VOL := lan-tracker-cache
 USER_ID   := $(shell id -u):$(shell id -g)
 RUN       := docker run --rm -v "$(CURDIR)":/src -w /src -v $(CACHE_VOL):/cache --user $(USER_ID) \
 	-e LDFLAGS="$(LDFLAGS)" -e FUZZTIME=$(FUZZTIME) -e VERSION=$(VERSION) -e SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(DEV_IMAGE)
@@ -53,7 +53,7 @@ shell: dev-image ## Open a shell in the dev container
 
 # --- build -------------------------------------------------------------------
 
-build: dev-image ## Build bin/lan-sentinel for the Docker host's architecture
+build: dev-image ## Build bin/lan-tracker for the Docker host's architecture
 	@echo "Building bin/$(BIN) ($(VERSION))"
 	@$(RUN) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BIN) ./cmd/$(BIN)
 

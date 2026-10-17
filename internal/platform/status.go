@@ -17,7 +17,7 @@ const (
 	StateFailed      State = "failed"
 )
 
-// Collector names used in status output and the lan_sentinel_collector_up
+// Collector names used in status output and the lan_tracker_collector_up
 // metric.
 const (
 	CollectorCapture   = "capture"
@@ -28,8 +28,7 @@ const (
 	CollectorICMP      = "icmp"
 	CollectorNDP       = "ndp"
 	CollectorTCP       = "tcp"
-	CollectorUDP       = "udp"
-	CollectorIdentify  = "identify"
+	CollectorNames     = "names"
 )
 
 // CollectorStatus is the state of one collector on one interface.
@@ -46,9 +45,18 @@ type CollectorStatus struct {
 // Collectors report transitions; the registry keeps the latest per
 // (interface, collector).
 type Registry struct {
-	mu  sync.Mutex
-	now func() time.Time
-	m   map[[2]string]CollectorStatus
+	mu    sync.Mutex
+	now   func() time.Time
+	m     map[[2]string]CollectorStatus
+	watch func(CollectorStatus)
+}
+
+// Watch calls fn with every change Set records, after recording it. fn
+// must not call back into the registry.
+func (r *Registry) Watch(fn func(CollectorStatus)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.watch = fn
 }
 
 // NewRegistry returns an empty registry using now for timestamps.
@@ -64,13 +72,19 @@ func (r *Registry) Set(iface, collector, backend string, state State, err error)
 		msg = err.Error()
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	k := [2]string{iface, collector}
 	prev, ok := r.m[k]
 	if ok && prev.State == state && prev.Error == msg && prev.Backend == backend {
+		r.mu.Unlock()
 		return
 	}
-	r.m[k] = CollectorStatus{Interface: iface, Collector: collector, Backend: backend, State: state, Error: msg, Since: r.now()}
+	s := CollectorStatus{Interface: iface, Collector: collector, Backend: backend, State: state, Error: msg, Since: r.now()}
+	r.m[k] = s
+	watch := r.watch
+	r.mu.Unlock()
+	if watch != nil {
+		watch(s)
+	}
 }
 
 // List returns all statuses sorted by interface and collector.

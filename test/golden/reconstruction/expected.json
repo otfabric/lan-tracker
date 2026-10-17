@@ -1,5 +1,5 @@
 {
-  "description": "Golden reconstruction scenario, docs/DATA_MODEL.md \u00a710. Default thresholds.",
+  "description": "Golden reconstruction scenario, docs/DATA_MODEL.md \u00a710. Default thresholds. A MAC's addresses are independent: A keeps .51 when it gains .52, so the duplicate with C stays visible; A loses .50 only when B claims it while A is not live.",
   "interface": "eth1",
   "prefixes": [
     "192.168.110.0/24"
@@ -15,7 +15,7 @@
       "ip": "192.168.110.50",
       "first_seen": "2026-10-01T10:00:00Z",
       "last_seen": "2026-10-01T10:00:00Z",
-      "ended_at": "2026-10-01T11:00:00Z",
+      "ended_at": "2026-10-01T12:00:00Z",
       "conflict": false
     },
     {
@@ -23,7 +23,7 @@
       "ip": "192.168.110.51",
       "first_seen": "2026-10-01T11:00:00Z",
       "last_seen": "2026-10-01T12:58:00Z",
-      "ended_at": "2026-10-01T13:30:00Z",
+      "ended_at": null,
       "conflict": true
     },
     {
@@ -40,7 +40,7 @@
       "first_seen": "2026-10-01T13:00:00Z",
       "last_seen": "2026-10-01T13:00:00Z",
       "ended_at": null,
-      "conflict": false
+      "conflict": true
     },
     {
       "host": "A",
@@ -62,9 +62,8 @@
     },
     {
       "ts": "2026-10-01T11:00:00Z",
-      "type": "IP_CHANGED",
+      "type": "IP_ADDED",
       "host": "A",
-      "old": "192.168.110.50",
       "new": "192.168.110.51",
       "cause": "passive_dhcp",
       "evidence_ip": "192.168.110.51"
@@ -74,6 +73,15 @@
       "type": "HOST_DISCOVERED",
       "host": "B",
       "new": "00:1b:1b:aa:bb:02",
+      "cause": "passive_arp",
+      "evidence_ip": "192.168.110.50"
+    },
+    {
+      "ts": "2026-10-01T12:00:00Z",
+      "type": "IP_REMOVED",
+      "host": "A",
+      "related": "B",
+      "old": "192.168.110.50",
       "cause": "passive_arp",
       "evidence_ip": "192.168.110.50"
     },
@@ -96,27 +104,17 @@
     },
     {
       "ts": "2026-10-01T13:30:00Z",
-      "type": "IP_CHANGED",
+      "type": "IP_ADDED",
       "host": "A",
-      "old": "192.168.110.51",
       "new": "192.168.110.52",
       "cause": "passive_dhcp",
       "evidence_ip": "192.168.110.52"
     },
     {
-      "ts": "2026-10-01T13:30:00Z",
-      "type": "DUPLICATE_IP_RESOLVED",
-      "host": "C",
-      "related": "A",
-      "new": "192.168.110.51",
-      "cause": "passive_dhcp",
-      "evidence_ip": "192.168.110.52"
-    },
-    {
       "ts": "2026-10-01T14:00:00Z",
-      "type": "SERVICE_OPENED",
+      "type": "SERVICE_STATE_CHANGED",
       "host": "B",
-      "new": "tcp/502",
+      "new": "tcp/502 OPEN",
       "cause": "tcp_connect",
       "evidence_ip": "192.168.110.50"
     }
@@ -130,24 +128,20 @@
         {
           "host": "A",
           "first_seen": "2026-10-01T10:00:00Z",
-          "ended_at": "2026-10-01T11:00:00Z",
+          "ended_at": "2026-10-01T12:00:00Z",
           "unconfirmed": true
         }
       ],
       "conflict": false
     },
     {
-      "find": "192.168.110.50",
-      "at": "2026-10-01T11:30:00Z",
+      "find": "192.168.110.51",
+      "at": "2026-10-01T10:30:00Z",
       "holders": [],
       "conflict": false,
-      "previous": {
+      "next": {
         "host": "A",
         "at": "2026-10-01T11:00:00Z"
-      },
-      "next": {
-        "host": "B",
-        "at": "2026-10-01T12:00:00Z"
       }
     },
     {
@@ -170,7 +164,7 @@
         {
           "host": "A",
           "first_seen": "2026-10-01T11:00:00Z",
-          "ended_at": "2026-10-01T13:30:00Z",
+          "ended_at": null,
           "unconfirmed": true
         },
         {
@@ -187,13 +181,19 @@
       "at": "2026-10-01T13:40:00Z",
       "holders": [
         {
+          "host": "A",
+          "first_seen": "2026-10-01T11:00:00Z",
+          "ended_at": null,
+          "unconfirmed": true
+        },
+        {
           "host": "C",
           "first_seen": "2026-10-01T13:00:00Z",
           "ended_at": null,
           "unconfirmed": true
         }
       ],
-      "conflict": false
+      "conflict": true
     }
   ],
   "history": [
@@ -201,8 +201,8 @@
       "ip": "192.168.110.50",
       "events": [
         0,
-        1,
         2,
+        3,
         7
       ]
     },
@@ -210,10 +210,8 @@
       "ip": "192.168.110.51",
       "events": [
         1,
-        3,
         4,
-        5,
-        6
+        5
       ]
     }
   ]

@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/collect/capture/decoders"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
 )
 
 // Reopen back-off after a failed open or a lost interface.
@@ -199,7 +199,7 @@ func (c *Collector) count(iface string, published bool) {
 }
 
 // Stats returns the counters of every interface
-// (lan_sentinel_capture_drops_total).
+// (lan_tracker_capture_drops_total).
 func (c *Collector) Stats() []Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()

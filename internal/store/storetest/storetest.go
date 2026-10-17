@@ -14,14 +14,14 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/correlate"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/correlate"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // T0 is the golden scenario's start.
@@ -148,7 +148,43 @@ func AddDHCPServers(t testing.TB, st *store.Store) {
 	}
 }
 
-// AddIdentifications gives host A (00:1b:1b:aa:bb:01) passive claims: a
+// AddDHCPLeases gives host A (00:1b:1b:aa:bb:01) on eth1 a lease history:
+// 192.168.110.51 at first, superseded at 3h30 by 192.168.110.52, still
+// open, which a renewal ACK extended; and the exchange of that renewal.
+func AddDHCPLeases(t testing.TB, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	ms := func(d time.Duration) int64 { return T0.Add(d).UnixMilli() }
+	err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO dhcp_leases (id, context_id, chaddr, host_id, ip, server_id, sender_mac, sender_ip, relay,
+				first_ack, last_ack, acks, lease_seconds, expires_at, t1_seconds, t2_seconds, t_derived, config_json, partial, ended_at, end_reason)
+			SELECT 1, context_id, mac, host_id, '192.168.110.51', '192.168.110.1', '00:00:5e:00:01:01', '192.168.110.1', '', ?, ?, 1, 3600, ?,
+				1800, 3150, 1, '{"dns":"192.168.110.1","gateway":"192.168.110.1","gateway_source":"option_3"}', 1, ?, 'superseded'
+				FROM hosts WHERE mac = '00:1b:1b:aa:bb:01'
+			UNION ALL
+			SELECT 2, context_id, mac, host_id, '192.168.110.52', '192.168.110.1', '00:00:5e:00:01:01', '192.168.110.1', '', ?, ?, 2, -1, NULL,
+				NULL, NULL, 0, '{"dns":"192.168.110.1,192.168.110.4"}', 0, NULL, NULL
+				FROM hosts WHERE mac = '00:1b:1b:aa:bb:01'`,
+			ms(time.Hour), ms(time.Hour), ms(2*time.Hour), ms(3*time.Hour+30*time.Minute),
+			ms(3*time.Hour+30*time.Minute), ms(4*time.Hour)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO dhcp_exchanges (context_id, xid, chaddr, host_id, first_seen, last_seen, messages, requested_ip,
+				offers_json, selected_server, outcome, visibility, lease_id)
+			SELECT context_id, 24158, mac, host_id, ?, ?, 'request(192.168.110.1) ack(192.168.110.1 192.168.110.52)', '192.168.110.52',
+				'[]', '192.168.110.1', 'ack', 'complete', 2 FROM hosts WHERE mac = '00:1b:1b:aa:bb:01'`, ms(4*time.Hour-time.Second), ms(4*time.Hour))
+		return err
+	})
+	if err == nil {
+		err = st.Flush(ctx)
+	}
+	if err != nil || st.OpErrors() != 0 {
+		t.Fatalf("dhcp leases: %v, %d op errors", err, st.OpErrors())
+	}
+}
+
+// AddIdentifications gives host A (00:1b:1b:aa:bb:01) the kind of rows LAN
+// Sentinel's passive identifiers left behind (legacy history, ADR 0012): a
 // current device type from mDNS, a weaker one it did not adopt, and the
 // device type chosen from them.
 func AddIdentifications(t testing.TB, st *store.Store) {

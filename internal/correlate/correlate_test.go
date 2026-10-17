@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
@@ -204,14 +204,16 @@ const (
 	macC = "00:1b:1b:00:00:0c"
 )
 
-func TestMACMovedIsAnotherHost(t *testing.T) {
+// The same MAC on another interface is another host, and only "also
+// observed" there: seeing it twice does not establish that it moved.
+func TestMACOnTwoInterfacesIsAnotherHost(t *testing.T) {
 	h := newHarness(t)
 	h.obs(0, observation.PassiveARP, "eth0", macA, "10.0.0.5")
 	h.obs(time.Minute, observation.PassiveARP, "eth1", macA, "10.1.0.5")
 	expect(t, "events", hostEvents(h.events()), []string{
 		"0s HOST_DISCOVERED host-01 >00:1b:1b:00:00:0a",
 		"1m0s HOST_DISCOVERED host-02 >00:1b:1b:00:00:0a",
-		"1m0s MAC_MOVED host-02 eth0>eth1",
+		"1m0s MAC_ALSO_OBSERVED host-02 eth0>eth1",
 	})
 }
 
@@ -227,13 +229,22 @@ func TestIPv6AddressesAccumulate(t *testing.T) {
 	})
 }
 
-func TestIPv4MultipleAddressesWithinOverlap(t *testing.T) {
+// A production and a maintenance address on one MAC stay independent,
+// however far apart they were first seen (docs/DATA_MODEL.md §5.3).
+func TestIPv4MultipleAddressesAreIndependent(t *testing.T) {
 	h := newHarness(t)
 	h.obs(0, observation.PassiveARP, "eth0", macA, "10.0.0.5")
-	h.obs(time.Minute, observation.PassiveARP, "eth0", macA, "10.0.0.6") // within 5m: added
+	h.obs(time.Minute, observation.PassiveARP, "eth0", macA, "10.0.0.6")
+	h.obs(3*time.Hour, observation.PassiveDHCP, "eth0", macA, "10.0.0.7") // a new address closes no other
+	expect(t, "bindings", h.bindings(), []string{
+		"host-01 10.0.0.5 [0s,open) c=0",
+		"host-01 10.0.0.6 [1m0s,open) c=0",
+		"host-01 10.0.0.7 [3h0m0s,open) c=0",
+	})
 	expect(t, "events", hostEvents(h.events()), []string{
 		"0s HOST_DISCOVERED host-01 >00:1b:1b:00:00:0a",
 		"1m0s IP_ADDED host-01 >10.0.0.6",
+		"3h0m0s IP_ADDED host-01 >10.0.0.7",
 	})
 }
 
@@ -320,11 +331,14 @@ func TestExpiryAndPresence(t *testing.T) {
 func TestLateObservationDoesNotReopen(t *testing.T) {
 	h := newHarness(t)
 	h.obs(0, observation.PassiveARP, "eth0", macA, "10.0.0.5")
-	h.obs(time.Hour, observation.PassiveDHCP, "eth0", macA, "10.0.0.6") // IP_CHANGED .5 -> .6
-	// A neighbour-table entry last confirmed before the change.
-	h.obs(30*time.Minute, observation.KernelNeighbor, "eth0", macA, "10.0.0.5")
+	h.obs(time.Hour, observation.PassiveDHCP, "eth0", macA, "10.0.0.6")
+	// A neighbour-table entry for an address the host has never had,
+	// confirmed before the host's last change: it opens nothing.
+	h.obs(30*time.Minute, observation.KernelNeighbor, "eth0", macA, "10.0.0.9")
+	// One for an address it holds refreshes it.
+	h.obs(40*time.Minute, observation.KernelNeighbor, "eth0", macA, "10.0.0.5")
 	expect(t, "bindings", h.bindings(), []string{
-		"host-01 10.0.0.5 [0s,1h0m0s) c=0",
+		"host-01 10.0.0.5 [0s,open) c=0",
 		"host-01 10.0.0.6 [1h0m0s,open) c=0",
 	})
 }
@@ -341,11 +355,17 @@ func TestServices(t *testing.T) {
 	probe(2*time.Minute, observation.ServiceOpen)
 	probe(3*time.Minute, observation.ServiceOpen) // no event
 	probe(4*time.Minute, observation.ServiceTimeout)
+	// Events mark the endpoint opening and leaving OPEN, with the exact
+	// results; repeats and the first REFUSED are no event.
 	expect(t, "events", hostEvents(h.events()), []string{
 		"0s HOST_DISCOVERED host-01 >00:1b:1b:00:00:0a",
-		"2m0s SERVICE_OPENED host-01 REFUSED>tcp/502",
-		"4m0s SERVICE_CLOSED host-01 tcp/502>TIMEOUT",
+		"2m0s SERVICE_STATE_CHANGED host-01 tcp/502 REFUSED>tcp/502 OPEN",
+		"4m0s SERVICE_STATE_CHANGED host-01 tcp/502 OPEN>tcp/502 TIMEOUT",
 	})
+	// The timeout did not erase that the endpoint last answered OPEN.
+	expect(t, "endpoint", h.query(`SELECT ip || ' ' || port || ' ' || last_result || ' ' || last_definite_result || ' ' ||
+		(last_definite_at - `+fmt.Sprint(t0.UnixMilli())+`) || ' ' || host_id FROM endpoints`, scanText), []string{"10.0.0.5 502 TIMEOUT OPEN 180000 host-01"})
+	expect(t, "history", h.query(`SELECT result FROM endpoint_results ORDER BY id`, scanText), []string{"REFUSED", "OPEN", "TIMEOUT"})
 }
 
 func TestLinkEvents(t *testing.T) {
@@ -379,16 +399,15 @@ func TestStateSurvivesRestart(t *testing.T) {
 	h.restart()
 	h.link("eth0", true, "10.0.0.0/24", "fd00::/64") // unchanged: no SUBNET_CHANGED
 	h.link("eth1", true, "10.1.0.0/24")
-	// Known host, known binding: no new events. Then A moves away, which
-	// resolves the conflict on .5 for B.
+	// Known host, known binding: no new events. A gains another address;
+	// the conflict on .5 stays until one side's binding ends.
 	h.obs(time.Minute, observation.PassiveARP, "eth0", macA, "10.0.0.5")
 	h.obs(time.Hour, observation.PassiveDHCP, "eth0", macA, "10.0.0.7")
 	expect(t, "events", hostEvents(h.events()), []string{
 		"0s HOST_DISCOVERED host-01 >00:1b:1b:00:00:0a",
 		"1s HOST_DISCOVERED host-02 >00:1b:1b:00:00:0b",
 		"1s DUPLICATE_IP_DETECTED host-02 >10.0.0.5",
-		"1h0m0s IP_CHANGED host-01 10.0.0.5>10.0.0.7",
-		"1h0m0s DUPLICATE_IP_RESOLVED host-02 >10.0.0.5",
+		"1h0m0s IP_ADDED host-01 >10.0.0.7",
 	})
 	if n := len(h.events()) - len(hostEvents(h.events())); n != 3 {
 		t.Errorf("%d context events, want only the 3 from the first start", n)
@@ -406,14 +425,35 @@ func TestVendorAndIdentification(t *testing.T) {
 			_ = r.Scan(&mac, &vendor, &la, &manu)
 			return fmt.Sprintf("%s %s la=%d %s", mac, vendor, la, manu)
 		})
+	// The OUI registrant is a hint on the MAC prefix: no manufacturer and
+	// no identification are recorded from it (ADR 0012).
 	expect(t, "hosts", got, []string{
-		"00:1b:1b:12:34:56 Siemens AG la=0 Siemens AG",
+		"00:1b:1b:12:34:56 Siemens AG la=0 -",
 		"02:42:ac:11:00:02 - la=1 -",
 	})
-	ids := h.query(`SELECT field || '=' || value || ' ' || source FROM identifications`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
+	if ids := h.query(`SELECT field FROM identifications`, scanText); len(ids) != 0 {
+		t.Errorf("identifications = %v", ids)
+	}
+}
+
+// The same address on two interfaces is two contexts: two hosts with one
+// binding each, no conflict, and one endpoint per interface.
+func TestSameIPOnTwoInterfaces(t *testing.T) {
+	h := newHarness(t)
+	h.obs(0, observation.PassiveARP, "eth0", macA, "192.168.1.10")
+	h.obs(time.Second, observation.PassiveARP, "eth1", macB, "192.168.1.10")
+	for _, iface := range []string{"eth0", "eth1"} {
+		o := tcpResult("192.168.1.10", 502, observation.ServiceOpen)
+		o.Time, o.Interface = h.at(time.Minute), iface
+		h.c.Handle(h.ctx, observation.Message{Observation: o})
+	}
+	expect(t, "bindings", h.bindings(), []string{
+		"host-01 192.168.1.10 [0s,open) c=0",
+		"host-02 192.168.1.10 [1s,open) c=0",
 	})
-	expect(t, "identifications", ids, []string{"manufacturer=Siemens AG oui"})
+	if got := h.query(`SELECT count(*) FROM events WHERE type = 'DUPLICATE_IP_DETECTED'`, scanText); got[0] != "0" {
+		t.Errorf("a conflict across interfaces: %v", got)
+	}
+	expect(t, "endpoints", h.query(`SELECT context_id || ' ' || host_id FROM endpoints ORDER BY context_id`, scanText),
+		[]string{"1 host-01", "2 host-02"})
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -9,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 func (a *app) observationsCmd() *cobra.Command {
@@ -22,7 +23,7 @@ func (a *app) observationsCmd() *cobra.Command {
 	list := &cobra.Command{
 		Use:     "list",
 		Short:   "Raw observations within retention; hourly roll-ups with --rollups",
-		Example: "  sudo lan-sentinel observations list --since 1h",
+		Example: "  sudo lan-tracker observations list --since 1h",
 		Long: "List the latest observations (default 1000) in time order. Observations older\n" +
 			"than raw retention exist only as hourly roll-ups (--rollups): one row per host,\n" +
 			"source, MAC, IP and hour, with a count.",
@@ -140,7 +141,7 @@ func (a *app) eventsCmd() *cobra.Command {
 	list := &cobra.Command{
 		Use:     "list",
 		Short:   "All events on this box",
-		Example: "  sudo lan-sentinel events list --type ip-changed --since 24h",
+		Example: "  sudo lan-tracker events list --type ip-added --since 24h",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			tf := &timeFlags{a: a}
@@ -164,7 +165,7 @@ func (a *app) eventsCmd() *cobra.Command {
 	fl := list.Flags()
 	fl.StringVar(&since, "since", "", "from this time or duration ago (24h, 7d)")
 	fl.StringVar(&until, "until", "", "up to this time")
-	fl.StringSliceVar(&types, "type", nil, "event types by CLI name, e.g. ip-changed, duplicate-ip (repeatable)")
+	fl.StringSliceVar(&types, "type", nil, "event types by CLI name, e.g. ip-added, duplicate-ip (repeatable)")
 	fl.StringVar(&f.Interface, "interface", "", "only this interface")
 	fl.StringVar(&f.MAC, "mac", "", "events of hosts with this MAC")
 	fl.StringVar(&f.IP, "ip", "", "events about this IP")
@@ -174,47 +175,73 @@ func (a *app) eventsCmd() *cobra.Command {
 }
 
 func (a *app) servicesCmd() *cobra.Command {
-	c := &cobra.Command{Use: "services", Short: "Probe results"}
+	c := &cobra.Command{Use: "services", Short: "TCP endpoint results"}
 	var f store.ServiceFilter
+	var at string
 	list := &cobra.Command{
 		Use:     "list",
-		Short:   "Probe results per host and port",
-		Example: "  sudo lan-sentinel services list --interface eth0",
-		Args:    cobra.NoArgs,
+		Short:   "TCP endpoint results per address and port, with the last definite answer",
+		Example: "  sudo lan-tracker services list --interface eth0 --ip 192.168.1.10",
+		Long: "Lists the TCP endpoints checked, per interface, address and port: the last result\n" +
+			"(OPEN, REFUSED, TIMEOUT, UNREACHABLE or LOCAL_ERROR, which is a failure here, not an\n" +
+			"answer), the last definite answer (OPEN or REFUSED) and the MAC that alone held the\n" +
+			"address then (- when none or several did). A timeout is not a closed port, and OPEN\n" +
+			"is a completed connect, not proof of any protocol: tcp/502 OPEN is not Modbus.\n" +
+			"--at shows the results in effect at a time.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			tf := &timeFlags{a: a}
+			if t := tf.at("at", at); !t.IsZero() {
+				f.At = &t
+			}
+			if tf.err != nil {
+				return tf.err
+			}
 			return a.run(cmd, false, func(ctx context.Context, b backend) error {
-				svc, err := b.Services(ctx, f)
+				eps, err := b.Services(ctx, f)
 				if err != nil {
 					return err
 				}
-				header := []string{"IP", "MAC", "IFACE", "PORT", "STATE", "LAST CHECK"}
-				rows := make([][]string, 0, len(svc))
-				for _, s := range svc {
-					last := a.ago(s.LastResultAt)
-					if a.g.output == "csv" {
-						last = s.LastResultAt.UTC().Format(time.RFC3339)
+				header := []string{"IP", "PORT", "LAST RESULT", "CHECKED", "LAST DEFINITE", "MAC", "IFACE"}
+				rows := make([][]string, 0, len(eps))
+				for _, e := range eps {
+					last, definite := a.ago(e.LastResultAt), "-"
+					if e.LastDefiniteAt != nil {
+						definite = e.LastDefiniteResult + " " + a.ago(*e.LastDefiniteAt)
 					}
-					rows = append(rows, []string{dash(strings.Join(s.IPs, " ")), s.MAC, s.Interface, strconv.Itoa(s.Port) + "/" + s.Proto, s.State, last})
+					if a.g.output == "csv" {
+						last = e.LastResultAt.UTC().Format(time.RFC3339)
+						if e.LastDefiniteAt != nil {
+							definite = e.LastDefiniteResult + " " + e.LastDefiniteAt.UTC().Format(time.RFC3339)
+						}
+					}
+					result := e.LastResult
+					if e.LastDetail != "" {
+						result += " (" + e.LastDetail + ")"
+					}
+					rows = append(rows, []string{e.IP, strconv.Itoa(e.Port) + "/" + e.Proto, result, last, definite, dash(e.MAC), e.Interface})
 				}
-				return a.listOut(header, rows, svc, func() error { return writeJSONL(a.output(), svc) })
+				return a.listOut(header, rows, eps, func() error { return writeJSONL(a.output(), eps) })
 			})
 		},
 	}
 	fl := list.Flags()
 	fl.IntVar(&f.Port, "port", 0, "only this port")
-	fl.StringVar(&f.State, "state", "", "only this state (OPEN, REFUSED, TIMEOUT, UNREACHABLE, UNKNOWN)")
+	fl.StringVar(&f.State, "state", "", "only this last result (OPEN, REFUSED, TIMEOUT, UNREACHABLE, LOCAL_ERROR)")
 	fl.StringVar(&f.Interface, "interface", "", "only this interface")
+	fl.StringVar(&f.IP, "ip", "", "only this address")
+	fl.StringVar(&at, "at", "", "the results in effect at this time")
 	c.AddCommand(list)
 	return c
 }
 
 func (a *app) dhcpCmd() *cobra.Command {
-	c := &cobra.Command{Use: "dhcp", Short: "DHCP servers seen on the interfaces"}
+	c := &cobra.Command{Use: "dhcp", Short: "DHCP servers, lease history and exchanges seen on the interfaces"}
 	var f store.DHCPServerFilter
 	servers := &cobra.Command{
 		Use:     "servers",
 		Short:   "DHCP servers: identity, relay, sender, allowlist verdict and what they advertise",
-		Example: "  sudo lan-sentinel dhcp servers",
+		Example: "  sudo lan-tracker dhcp servers",
 		Long: "Lists every DHCP server identity (option 54) seen in a reply, per interface, relay\n" +
 			"and sender MAC (the server's, or the relay's). STATUS is the allowlist verdict at the\n" +
 			"last reply: allowed, unexpected, or unchecked when the interface has no allowlist\n" +
@@ -254,8 +281,141 @@ func (a *app) dhcpCmd() *cobra.Command {
 	fl := servers.Flags()
 	fl.StringVar(&f.Interface, "interface", "", "only this interface")
 	fl.StringVar(&f.Status, "status", "", "only this verdict (allowed, unexpected, unchecked)")
-	c.AddCommand(servers)
+	c.AddCommand(servers, a.dhcpLeasesCmd(), a.dhcpExchangesCmd())
 	return c
+}
+
+func (a *app) dhcpLeasesCmd() *cobra.Command {
+	var f store.DHCPLeaseFilter
+	c := &cobra.Command{
+		Use:     "leases",
+		Short:   "Lease history: the addresses and configuration servers acknowledged per client",
+		Example: "  sudo lan-tracker dhcp leases --open\n  sudo lan-tracker dhcp leases --mac 00:1b:1b:aa:bb:01",
+		Long: "Lists one row per address and acknowledged configuration a server asserted for a client\n" +
+			"(an ACK with an address), newest first. A renewal with the same address, server and\n" +
+			"configuration extends its row (ACKS); anything else starts a new one and ends the old\n" +
+			"(superseded). A lease is the server's statement: it creates no host, does not make the\n" +
+			"client present and is not proof the client holds the address. EXPIRES is the expiry per\n" +
+			"the last ACK seen. PARTIAL marks a lease whose REQUEST was not seen (unicast on a switched\n" +
+			"port); BACKFILLED rows come from LAN Sentinel, with sender, relay and configuration unknown.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.run(cmd, false, func(ctx context.Context, b backend) error {
+				leases, err := b.DHCPLeases(ctx, f)
+				if err != nil {
+					return err
+				}
+				header := []string{"CLIENT", "IP", "SERVER ID", "RELAY", "IFACE", "FIRST ACK", "LAST ACK", "ACKS", "LEASE", "EXPIRES", "GATEWAY", "DNS", "STATE"}
+				rows := make([][]string, 0, len(leases))
+				for _, l := range leases {
+					rows = append(rows, []string{l.CHAddr, l.IP, dash(l.ServerID), dash(l.Relay), l.Interface, a.when(l.FirstACK), a.when(l.LastACK),
+						strconv.Itoa(l.ACKs), leaseText(l.LeaseSeconds), a.whenPtr(l.ExpiresAt), dash(configText(l.Config, "gateway")),
+						dash(configText(l.Config, "dns")), leaseState(l)})
+				}
+				return a.listOut(header, rows, leases, func() error { return writeJSONL(a.output(), leases) })
+			})
+		},
+	}
+	fl := c.Flags()
+	fl.StringVar(&f.Interface, "interface", "", "only this interface")
+	fl.StringVar(&f.MAC, "mac", "", "only this client")
+	fl.StringVar(&f.IP, "ip", "", "only this address")
+	fl.BoolVar(&f.Open, "open", false, "only the leases in effect")
+	fl.IntVar(&f.Limit, "limit", 0, "at most this many rows (default 1000)")
+	return c
+}
+
+func (a *app) dhcpExchangesCmd() *cobra.Command {
+	var f store.DHCPExchangeFilter
+	var since string
+	c := &cobra.Command{
+		Use:     "exchanges",
+		Short:   "DHCP transactions: each client's messages, the offers, its choice and the outcome",
+		Example: "  sudo lan-tracker dhcp exchanges --since 1h",
+		Long: "Lists the DHCP exchanges seen, newest first: one per client transaction (interface, xid,\n" +
+			"client hardware address), its messages in order with retransmissions counted, the servers\n" +
+			"that offered, the one the client selected and the outcome (ack, inform_ack, nak, offered,\n" +
+			"decline, release, or incomplete when it closed unanswered). VISIBILITY is partial when\n" +
+			"only one side was seen: on a switched port unicast replies and renewals are not.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			tf := &timeFlags{a: a}
+			if f.Since = tf.ago("since", since); tf.err != nil {
+				return tf.err
+			}
+			return a.run(cmd, false, func(ctx context.Context, b backend) error {
+				exchanges, err := b.DHCPExchanges(ctx, f)
+				if err != nil {
+					return err
+				}
+				header := []string{"CLIENT", "XID", "IFACE", "FIRST SEEN", "MESSAGES", "OFFERS", "SELECTED", "OUTCOME", "VISIBILITY"}
+				rows := make([][]string, 0, len(exchanges))
+				for _, x := range exchanges {
+					rows = append(rows, []string{x.CHAddr, fmt.Sprintf("%#08x", x.XID), x.Interface, a.when(x.FirstSeen), x.Messages,
+						strconv.Itoa(len(x.Offers)), dash(x.SelectedServer), x.Outcome, x.Visibility})
+				}
+				return a.listOut(header, rows, exchanges, func() error { return writeJSONL(a.output(), exchanges) })
+			})
+		},
+	}
+	fl := c.Flags()
+	fl.StringVar(&f.Interface, "interface", "", "only this interface")
+	fl.StringVar(&f.MAC, "mac", "", "only this client")
+	fl.StringVar(&since, "since", "", "only exchanges seen from this time or duration ago (24h, 7d)")
+	fl.IntVar(&f.Limit, "limit", 0, "at most this many rows (default 1000)")
+	return c
+}
+
+// when renders a time for a table: its age, or the time itself in CSV.
+func (a *app) when(t time.Time) string {
+	if a.g.output == "csv" {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return a.stamp(t)
+}
+
+func (a *app) whenPtr(t *time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	return a.when(*t)
+}
+
+// configText is a configuration snapshot's value for key, "" when the ACK
+// did not carry it.
+func configText(cfg map[string]any, key string) string {
+	v, ok := cfg[key]
+	if !ok {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+// leaseText renders a lease time: seconds, infinite, or a dash.
+func leaseText(v *int64) string {
+	switch {
+	case v == nil:
+		return "-"
+	case *v < 0:
+		return "infinite"
+	}
+	return (time.Duration(*v) * time.Second).String()
+}
+
+// leaseState is open, or how and when the lease row ended, with PARTIAL
+// and BACKFILLED appended.
+func leaseState(l store.DHCPLease) string {
+	s := "open"
+	if l.EndedAt != nil {
+		s = l.EndReason
+	}
+	if l.Partial {
+		s += ",partial"
+	}
+	if l.Backfilled {
+		s += ",backfilled"
+	}
+	return s
 }
 
 func (a *app) interfacesCmd() *cobra.Command {
@@ -263,7 +423,7 @@ func (a *app) interfacesCmd() *cobra.Command {
 	c.AddCommand(&cobra.Command{
 		Use:     "list",
 		Short:   "State, MAC, current prefixes, passive/active per interface",
-		Example: "  sudo lan-sentinel interfaces list",
+		Example: "  sudo lan-tracker interfaces list",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return a.run(cmd, false, func(ctx context.Context, b backend) error {

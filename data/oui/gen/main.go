@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"lan-sentinel/internal/ouitable"
+	"github.com/otfabric/lan-tracker/internal/ouitable"
 )
 
 var registries = []struct {
@@ -140,7 +140,7 @@ func open(name, url, dir string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "lan-sentinel-oui-generator")
+	req.Header.Set("User-Agent", "lan-tracker-oui-generator")
 	c := http.Client{Timeout: 2 * time.Minute}
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {

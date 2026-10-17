@@ -1,4 +1,4 @@
-// Package cli implements the lan-sentinel command line (docs/CLI.md).
+// Package cli implements the lan-tracker command line (docs/CLI.md).
 package cli
 
 import (
@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"lan-sentinel/internal/config"
+	"github.com/otfabric/lan-tracker/internal/config"
 )
 
 // Exit codes (docs/CLI.md §4).
@@ -122,20 +122,20 @@ func Execute(ctx context.Context, env Env) int {
 	}
 	var ee *exitError
 	if errors.As(err, &ee) {
-		fmt.Fprintln(env.Stderr, "lan-sentinel:", ee.err)
+		fmt.Fprintln(env.Stderr, "lan-tracker:", ee.err)
 		return ee.code
 	}
-	fmt.Fprintln(env.Stderr, "lan-sentinel:", err)
-	fmt.Fprintln(env.Stderr, "Run 'lan-sentinel --help' for usage.")
+	fmt.Fprintln(env.Stderr, "lan-tracker:", err)
+	fmt.Fprintln(env.Stderr, "Run 'lan-tracker --help' for usage.")
 	return ExitUsage
 }
 
 func (a *app) newRoot() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "lan-sentinel",
+		Use:           "lan-tracker",
 		Short:         "Persistent, interface-aware host inventory for OT networks",
-		Long:          "LAN Sentinel keeps a historical inventory of the hosts on local networks.\nThe same binary is the daemon, the CLI client, the database inspector and the scanner.",
-		Example:       "  sudo lan-sentinel hosts list --active\n  sudo lan-sentinel hosts show 192.168.0.99",
+		Long:          "LAN Tracker keeps a historical inventory of the hosts on local networks.\nThe same binary is the daemon, the CLI client, the database inspector and the scanner.",
+		Example:       "  sudo lan-tracker hosts list --active\n  sudo lan-tracker hosts show 192.168.0.99",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(*cobra.Command, []string) error {
@@ -157,7 +157,7 @@ func (a *app) newRoot() *cobra.Command {
 	f.BoolVar(&a.g.quiet, "quiet", false, "minimal output; rely on the exit code")
 
 	root.AddCommand(a.versionCmd(), a.configCmd(), a.daemonCmd(), a.hostsCmd(), a.observationsCmd(), a.eventsCmd(),
-		a.servicesCmd(), a.dhcpCmd(), a.interfacesCmd(), a.watchCmd(), a.dbCmd(), a.activeCmd(), a.scanCmd(), a.identifyCmd())
+		a.servicesCmd(), a.dhcpCmd(), a.interfacesCmd(), a.watchCmd(), a.dbCmd(), a.activeCmd(), a.scanCmd())
 	return root
 }
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/clock"
 )
 
 const (
@@ -89,6 +89,34 @@ func TestCompactRetention(t *testing.T) {
 				return err
 			}
 		}
+		// History as old as the pruned event: an endpoint's old result
+		// change and a name that ended; the endpoint itself and an open
+		// name stay.
+		ancient, recent := now.Add(-800*day).UnixMilli(), now.Add(-day).UnixMilli()
+		for _, q := range []struct {
+			sql  string
+			args []any
+		}{
+			{`INSERT INTO endpoints (id, context_id, ip, proto, port, last_result, last_result_at, first_seen) VALUES (1, 1, '10.0.0.1', 'tcp', 502, 'OPEN', ?, ?)`,
+				[]any{recent, ancient}},
+			{`INSERT INTO endpoint_results (endpoint_id, ts, result) VALUES (1, ?, 'REFUSED'), (1, ?, 'OPEN')`, []any{ancient, recent}},
+			{`INSERT INTO name_records (context_id, name, name_type, record_type, source, link, first_seen, last_seen, ended_at)
+				VALUES (1, 'old.local', 'mdns', 'A', 'passive_mdns', 'none', ?, ?, ?), (1, 'open.local', 'mdns', 'A', 'passive_mdns', 'none', ?, ?, NULL)`,
+				[]any{ancient, ancient, ancient, ancient, ancient}},
+			// A lease that ended goes with the events; an open one stays
+			// however old. Exchanges go with the roll-ups.
+			{`INSERT INTO dhcp_leases (context_id, chaddr, ip, server_id, sender_mac, sender_ip, relay, first_ack, last_ack, ended_at, end_reason)
+				VALUES (1, '00:1b:1b:00:00:01', '10.0.0.5', '10.0.0.2', '', '', '', ?, ?, ?, 'superseded'),
+				(1, '00:1b:1b:00:00:01', '10.0.0.6', '10.0.0.2', '', '', '', ?, ?, NULL, NULL)`,
+				[]any{ancient, ancient, ancient, ancient, ancient}},
+			{`INSERT INTO dhcp_exchanges (context_id, xid, chaddr, first_seen, last_seen, messages, outcome, visibility)
+				VALUES (1, 1, '00:1b:1b:00:00:01', ?, ?, 'ack', 'ack', 'partial'), (1, 2, '00:1b:1b:00:00:01', ?, ?, 'ack', 'ack', 'partial')`,
+				[]any{ancient, ancient, recent, recent}},
+		} {
+			if _, err := tx.ExecContext(ctx, q.sql, q.args...); err != nil {
+				return err
+			}
+		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO observation_rollups (hour, context_id, host_id, source, mac, ip, count, first_ts, last_ts)
 			VALUES (?, 1, 'h1', 'passive_arp', NULL, '10.0.0.1', 5, ?, ?)`, now.Add(-95*day).UnixMilli(), now.Add(-95*day).UnixMilli(), now.Add(-95*day).UnixMilli())
 		return err
@@ -97,8 +125,12 @@ func TestCompactRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RolledUp != 4 || res.RollupsPruned != 1 || res.EventsPruned != 1 {
+	if res.RolledUp != 4 || res.RollupsPruned != 1 || res.EventsPruned != 1 || res.HistoryPruned != 4 {
 		t.Errorf("result = %+v", res)
+	}
+	if got := strings.Join(queryStrings(t, inspect(t, s.Path()), `SELECT name FROM name_records UNION ALL SELECT result FROM endpoint_results
+		UNION ALL SELECT last_result FROM endpoints UNION ALL SELECT ip FROM dhcp_leases UNION ALL SELECT xid FROM dhcp_exchanges`), " "); got != "open.local OPEN OPEN 10.0.0.6 2" {
+		t.Errorf("history left = %s", got)
 	}
 	db := inspect(t, s.Path())
 	if n := count(t, db, `SELECT count(*) FROM observations`); n != 2 {

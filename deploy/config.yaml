@@ -1,58 +1,26 @@
-# LAN Sentinel default configuration (Linux). Install: /etc/lan-sentinel/config.yaml
-# Validate before rollout: lan-sentinel config validate --config /etc/lan-sentinel/config.yaml
-# Every key and its default: lan-sentinel config show --sources
-version: 1
+# OT Fabric LAN Tracker default configuration (Linux). Install: /etc/lan-tracker/config.yaml
+# Validate before rollout: lan-tracker config validate --config /etc/lan-tracker/config.yaml
+# Every key and its default: lan-tracker config show --sources
+# From LAN Sentinel: lan-tracker config convert /etc/lan-sentinel/config.yaml (docs/MIGRATION.md)
+# Active discovery stays off until an interface enables it; config.active-example.yaml
+# is the reviewed ARP + TCP profile.
+version: 2
 
 interfaces:
   - name: eth0
     passive: { enabled: true, promiscuous: false }   # promiscuous only on a mirror/SPAN port
-    active:  { enabled: false, identify: [] }        # discovery and identification stay off until reviewed
-    # dhcp: { servers: [192.168.0.1] }               # allowed DHCP server identifiers (option 54); others raise
+    active:  { enabled: false }                      # off until the networks are reviewed
+    # dhcp: { servers: [192.168.0.1] }               # expected DHCP server identifiers (option 54); others raise
     #                                                # DHCP_SERVER_UNEXPECTED; [] expects none; unset: no verdict
-  # - name: eth1
-  #   passive: { enabled: true }
-  #   active:
-  #     enabled: true
-  #     networks: [192.168.110.0/24]                 # explicitly configured networks only, /24 or narrower
-  #     exclude:  [192.168.110.1]                    # never probed
-  #     identify: []                                 # empty (the default) sends no identification payload
-  #     # identify:                                  # name only the probes this interface may send (once per MAC)
-  #     #   - { name: modbus }                       # FC 43/14 on tcp/502; unit_id from active.identify.probes
-  #     #   - { name: http }                         # GET / on tcp/80
-  #     #   - { name: tls }                          # certificate on tcp/443; add sni: auto to send preferred_name when it is a DNS name
-  #     #   - { name: snmp, community: public }      # one GetRequest on udp/161; community is required (no compiled default)
-  #     #   - { name: ssh-banner }                   # one server line on tcp/22; no client banner, no KEX
-  #     #   - { name: telnet }                       # IAC refuse only on tcp/23
-  #     #   - { name: ftp }                          # 220, SYST, QUIT on tcp/21
 
 passive:
   protocols: { arp: true, ipv4: true, ipv6: false, dhcp: true, mdns: true, dns: true, lldp: true }
 
-# Probes on interfaces with active.enabled (defaults shown; budgets and
-# limits: lan-sentinel config show --sources). Stop all probing at once:
-# lan-sentinel active disable --reason "..."
-# active:
-#   arp:  { enabled: true,  interval: 5m }     # ARP sweep of the configured networks
-#   icmp: { enabled: false, interval: 10m }    # known hosts only
-#   tcp:
-#     enabled: false
-#     interval: 5m
-#     targets: [{ port: 502, name: modbus, timeout: 750ms }]
-#   udp: { enabled: false, interval: 15m, probes: [ntp, enip] }   # NTP, EtherNet/IP ListIdentity
-#   identify:                                                    # payload identification, once per MAC (ADR 0011)
-#     interval: 1h                                               # look for hosts never attempted; not a repeat
-#     timeout: 2s
-#     host_max_age: 30m                                          # open binding must be this fresh
-#     probes:
-#       modbus: { unit_id: 1 }                                   # 1–255; 0 is rejected
-#       tls: { sni: auto }                                       # off unless set; auto sends preferred_name when it is a DNS name
-#       snmp: { community: public }                              # required when an interface names snmp; sent in the clear; no compiled default
-
 storage:
-  path: /data/lan-sentinel/hosts.db
+  path: /data/lan-tracker/hosts.db
 
 api:
-  socket: /run/lan-sentinel/api.sock
+  socket: /run/lan-tracker/api.sock
   listen: ""            # e.g. 127.0.0.1:9734 to serve /metrics
 
 logging: { level: info, format: journald }

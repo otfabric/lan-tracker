@@ -13,8 +13,8 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 var (
@@ -41,6 +41,25 @@ func summary(o observation.Observation) string {
 	if o.Hostname != "" {
 		parts = append(parts, fmt.Sprintf("name=%s:%s", o.NameType, o.Hostname))
 	}
+	for _, r := range o.Records {
+		rec := fmt.Sprintf("rec=%s:%s", r.Type, r.Name)
+		switch {
+		case r.Addr.IsValid():
+			rec += ">" + r.Addr.String()
+		case r.Value != "":
+			rec += ">" + r.Value
+		}
+		if r.TTL != nil {
+			rec += fmt.Sprintf("/%d", *r.TTL)
+		}
+		if r.Flush {
+			rec += "!"
+		}
+		parts = append(parts, rec)
+	}
+	if o.DHCP != nil {
+		parts = append(parts, dhcpSummary(o, o.DHCP)...)
+	}
 	keys := make([]string, 0, len(o.Meta))
 	for k := range o.Meta {
 		keys = append(keys, k)
@@ -50,6 +69,93 @@ func summary(o observation.Observation) string {
 		parts = append(parts, k+"="+o.Meta[k])
 	}
 	return strings.Join(parts, " ")
+}
+
+// dhcpSummary renders the fields a DHCP message carried, in a fixed order.
+func dhcpSummary(o observation.Observation, m *observation.DHCPMessage) []string {
+	var p []string
+	add := func(k string, v any) { p = append(p, fmt.Sprintf("%s=%v", k, v)) }
+	add("dhcp", m.Type)
+	if m.XID != 0x5e5e {
+		add("xid", fmt.Sprintf("%#x", m.XID))
+	}
+	if m.CHAddr != o.MAC.String() {
+		add("chaddr", m.CHAddr)
+	}
+	addr := func(k string, a netip.Addr) {
+		if a.IsValid() && !a.IsUnspecified() {
+			add(k, a)
+		}
+	}
+	addr("ciaddr", m.CIAddr)
+	addr("yiaddr", m.YIAddr)
+	addr("giaddr", m.GIAddr)
+	addr("requested", m.RequestedIP)
+	addr("server_id", m.ServerID)
+	addr("mask", m.SubnetMask)
+	str := func(k, v string) {
+		if v != "" {
+			add(k, v)
+		}
+	}
+	str("client_id", m.ClientID)
+	str("hostname", m.Hostname)
+	if m.FQDN != nil {
+		add("fqdn", fmt.Sprintf("%s/%d", m.FQDN.Name, m.FQDN.Flags))
+	}
+	secs := func(k string, v *uint32) {
+		switch {
+		case v == nil:
+		case *v == ^uint32(0):
+			add(k, "infinite")
+		default:
+			add(k, *v)
+		}
+	}
+	secs("lease", m.Lease)
+	secs("t1", m.T1)
+	secs("t2", m.T2)
+	addrs := func(k string, as []netip.Addr) {
+		var out []string
+		for _, a := range as {
+			out = append(out, a.String())
+		}
+		str(k, strings.Join(out, ","))
+	}
+	addrs("routers", m.Routers)
+	addrs("dns", m.DNS)
+	str("domain", m.Domain)
+	str("search", strings.Join(m.Search, ","))
+	routes := func(k string, rs []observation.DHCPRoute) {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.Destination.String()+">"+r.Router.String())
+		}
+		str(k, strings.Join(out, ","))
+	}
+	routes("routes", m.Routes)
+	routes("ms_routes", m.MSRoutes)
+	if m.RelayAgent != nil {
+		add("relay_agent", m.RelayAgent.CircuitID+"/"+m.RelayAgent.RemoteID)
+	}
+	if len(m.ParamRequest) > 0 {
+		add("prl", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(m.ParamRequest)), ","), "[]"))
+	}
+	str("vendor_class", m.VendorClass)
+	if gw, from := m.Gateway(); from != "" {
+		if gw.IsValid() {
+			add("gateway", from+":"+gw.String())
+		} else {
+			add("gateway", from+":none")
+		}
+	}
+	if len(m.Malformed) > 0 {
+		add("malformed", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(m.Malformed)), ","), "[]"))
+	}
+	if m.Truncated {
+		add("truncated", true)
+	}
+	return p
 }
 
 func summaries(obs []observation.Observation) []string {
@@ -92,48 +198,72 @@ func TestDecode(t *testing.T) {
 
 		{"dhcp discover", frames.DHCP{Type: layers.DHCPMsgTypeDiscover, Client: hmi, Hostname: "HMI-Line3",
 			ClientID: append([]byte{1}, hmi...), ParamRequest: pcPRL, VendorClass: "MSFT 5.0"}.Frame(), All,
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 name=dhcp:HMI-Line3 client_id=01:00:0e:8c:11:22:33 dhcp=discover " +
-				"parameter_request_list=1,3,6,15,31,33,43,44,46,47,119,121,249,252 vendor_class=MSFT 5.0"}},
-		{"dhcp ack is a lease for yiaddr", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, YourIP: "192.168.110.21",
+			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 name=dhcp:HMI-Line3 dhcp=discover client_id=01:00:0e:8c:11:22:33 hostname=HMI-Line3 " +
+				"prl=1,3,6,15,31,33,43,44,46,47,119,121,249,252 vendor_class=MSFT 5.0"}},
+		{"dhcp ack: the server's reply, the client only in the message", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, YourIP: "192.168.110.21",
 			Server: server, ServerIP: "192.168.110.2"}.Frame(), All,
-			[]string{"passive_dhcp_lease mac=00:0e:8c:11:22:33 ip=192.168.110.21 dhcp=ack",
-				"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack"}},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21"}},
 		{"dhcp ack with server options", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, YourIP: "192.168.110.21",
 			Server: server, ServerIP: "192.168.110.2", ServerID: "192.168.110.2", Router: []string{"192.168.110.1"},
 			DNS: []string{"192.168.110.2", "9.9.9.9"}, SubnetMask: "255.255.255.0", LeaseSeconds: 86400}.Frame(), All,
-			[]string{"passive_dhcp_lease mac=00:0e:8c:11:22:33 ip=192.168.110.21 dhcp=ack lease_seconds=86400 server_id=192.168.110.2",
-				"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack dns=192.168.110.2,9.9.9.9 router=192.168.110.1 " +
-					"server_id=192.168.110.2 subnet_mask=255.255.255.0"}},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21 " +
+				"server_id=192.168.110.2 mask=255.255.255.0 lease=86400 routers=192.168.110.1 dns=192.168.110.2,9.9.9.9 gateway=option_3:192.168.110.1"}},
 		{"dhcp relayed offer: the sender is the relay", frames.DHCP{Type: layers.DHCPMsgTypeOffer, Client: hmi, YourIP: "192.168.110.21",
-			Server: router, ServerIP: "192.168.110.1", ServerID: "10.1.0.5", Relay: "192.168.110.1", RelayAgent: []byte{1, 2, 'p', '7'},
+			Server: router, ServerIP: "192.168.110.1", ServerID: "10.1.0.5", Relay: "192.168.110.1", RelayAgent: []byte{1, 2, 'p', '7', 2, 1, 9},
 			Router: []string{"192.168.110.1"}}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=offer server_id=10.1.0.5",
-				"passive_dhcp_server mac=00:00:5e:00:01:01 ip=192.168.110.1 dhcp=offer relay=192.168.110.1 relay_agent=true " +
-					"router=192.168.110.1 server_id=10.1.0.5"}},
-		{"dhcp nak advertises nothing", frames.DHCP{Type: layers.DHCPMsgTypeNak, Client: hmi, Server: server, ServerIP: "192.168.110.2",
-			ServerID: "192.168.110.2", Router: []string{"192.168.110.1"}}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=nak server_id=192.168.110.2",
-				"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=nak server_id=192.168.110.2"}},
+			[]string{"passive_dhcp_server mac=00:00:5e:00:01:01 ip=192.168.110.1 dhcp=offer chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21 " +
+				"giaddr=192.168.110.1 server_id=10.1.0.5 routers=192.168.110.1 relay_agent=70:37/09 gateway=option_3:192.168.110.1"}},
+		{"dhcp request relayed from port 67 to 67: the client is not the sender", frames.DHCP{Type: layers.DHCPMsgTypeRequest, Client: hmi,
+			Hostname: "HMI-Line3", Server: router, ServerIP: "192.168.110.1", Relay: "192.168.110.1", SrcPort: 67, DstIP: "10.1.0.5", DstMAC: server,
+			Options: []layers.DHCPOption{layers.NewDHCPOption(layers.DHCPOptRequestIP, []byte{192, 168, 110, 21})}}.Frame(), Protocols{DHCP: true},
+			[]string{"passive_dhcp mac=00:00:5e:00:01:01 ip=192.168.110.1 dhcp=request chaddr=00:0e:8c:11:22:33 giaddr=192.168.110.1 " +
+				"requested=192.168.110.21 hostname=HMI-Line3"}},
+		{"dhcp ack from the server to the relay, port 67 to 67", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, YourIP: "192.168.110.21",
+			Server: server, ServerIP: "10.1.0.5", Relay: "192.168.110.1", DstIP: "192.168.110.1", DstMAC: router, DstPort: 67, XID: 0x1234}.Frame(),
+			Protocols{DHCP: true},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=10.1.0.5 dhcp=ack xid=0x1234 chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21 giaddr=192.168.110.1"}},
+		{"dhcp nak", frames.DHCP{Type: layers.DHCPMsgTypeNak, Client: hmi, Server: server, ServerIP: "192.168.110.2",
+			ServerID: "192.168.110.2"}.Frame(), Protocols{DHCP: true},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=nak chaddr=00:0e:8c:11:22:33 server_id=192.168.110.2"}},
 		{"dhcp ack to an inform: configuration only", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, ClientIP: "192.168.110.30",
 			Server: server, ServerIP: "192.168.110.2", ServerID: "192.168.110.2", DNS: []string{"192.168.110.2"}}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=ack server_id=192.168.110.2",
-				"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 config_only=true dhcp=ack dns=192.168.110.2 server_id=192.168.110.2"}},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack chaddr=00:0e:8c:11:22:33 ciaddr=192.168.110.30 " +
+				"server_id=192.168.110.2 dns=192.168.110.2"}},
 		{"dhcp invalid server identifier: identity unknown", frames.DHCP{Type: layers.DHCPMsgTypeOffer, Client: hmi, YourIP: "192.168.110.21",
 			Server: server, ServerIP: "192.168.110.2", ServerID: "255.255.255.255", LeaseSeconds: 0xffffffff}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=offer", "passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=offer"}},
-		{"dhcp infinite lease", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, YourIP: "192.168.110.21",
-			Server: server, ServerIP: "192.168.110.2", LeaseSeconds: 0xffffffff}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp_lease mac=00:0e:8c:11:22:33 ip=192.168.110.21 dhcp=ack lease_seconds=infinite",
-				"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack"}},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=offer chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21 " +
+				"lease=infinite malformed=54"}},
+		{"dhcp split options, overload, FQDN, search list and classless routes", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi,
+			YourIP: "192.168.110.21", Server: server, ServerIP: "192.168.110.2", ServerID: "192.168.110.2", LeaseSeconds: 3600,
+			Router: []string{"192.168.110.1"},
+			Options: []layers.DHCPOption{
+				layers.NewDHCPOption(layers.DHCPOptDomainName, []byte("plant")),
+				layers.NewDHCPOption(layers.DHCPOptDomainName, []byte(".example")), // joined (RFC 3396)
+				layers.NewDHCPOption(layers.DHCPOpt(58), []byte{0, 0, 3, 0xe8}),
+				layers.NewDHCPOption(layers.DHCPOpt(59), []byte{0, 0, 0x0b, 0xb8}),
+				layers.NewDHCPOption(layers.DHCPOpt(81), append([]byte{0x05, 0, 0}, "\x03hmi\x05plant\x07example\x00"...)),
+				layers.NewDHCPOption(layers.DHCPOpt(121), []byte{0, 10, 0, 0, 1, 24, 10, 1, 0, 10, 0, 0, 254}),
+				layers.NewDHCPOption(layers.DHCPOpt(52), []byte{3}),
+			},
+			File:  []byte{6, 4, 10, 0, 0, 9, 255},
+			SName: append(append([]byte{119, 22}, "\x05plant\x07example\x00\x04site\xc0\x00"...), 255)}.Frame(), Protocols{DHCP: true},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21 " +
+				"server_id=192.168.110.2 fqdn=hmi.plant.example/5 lease=3600 t1=1000 t2=3000 routers=192.168.110.1 dns=10.0.0.9 domain=plant.example " +
+				"search=plant.example,site.plant.example routes=0.0.0.0/0>10.0.0.1,10.1.0.0/24>10.0.0.254 gateway=option_121:10.0.0.1"}},
+		{"dhcp malformed options are named, the rest kept", frames.DHCP{Type: layers.DHCPMsgTypeAck, Client: hmi, YourIP: "192.168.110.21",
+			Server: server, ServerIP: "192.168.110.2", Router: []string{"192.168.110.1"},
+			Options: []layers.DHCPOption{
+				layers.NewDHCPOption(layers.DHCPOptLeaseTime, []byte{0, 1}),
+				layers.NewDHCPOption(layers.DHCPOpt(121), []byte{24, 10, 1, 0}),
+			}}.Frame(), Protocols{DHCP: true},
+			[]string{"passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=ack chaddr=00:0e:8c:11:22:33 yiaddr=192.168.110.21 " +
+				"routers=192.168.110.1 gateway=option_121:none malformed=51,121"}},
 		{"dhcp renewing request: the client's claim", frames.DHCP{Type: layers.DHCPMsgTypeRequest, Client: hmi, ClientIP: "192.168.110.21"}.Frame(), All,
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 ip=192.168.110.21 dhcp=request"}},
+			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 ip=192.168.110.21 dhcp=request ciaddr=192.168.110.21"}},
 		{"dhcp inform: an address the client already has", frames.DHCP{Type: layers.DHCPMsgTypeInform, Client: hmi, ClientIP: "192.168.110.30"}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 ip=192.168.110.30 dhcp=inform"}},
-		{"dhcp offer binds nothing", frames.DHCP{Type: layers.DHCPMsgTypeOffer, Client: hmi, YourIP: "192.168.110.21",
-			Server: server, ServerIP: "192.168.110.2"}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=offer", "passive_dhcp_server mac=02:00:00:00:00:53 ip=192.168.110.2 dhcp=offer"}},
+			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 ip=192.168.110.30 dhcp=inform ciaddr=192.168.110.30"}},
 		{"dhcp release binds nothing", frames.DHCP{Type: layers.DHCPMsgTypeRelease, Client: hmi, ClientIP: "192.168.110.21"}.Frame(), Protocols{DHCP: true},
-			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=release"}},
+			[]string{"passive_dhcp mac=00:0e:8c:11:22:33 dhcp=release ciaddr=192.168.110.21"}},
 		{"dhcp disabled", frames.DHCP{Type: layers.DHCPMsgTypeDiscover, Client: hmi}.Frame(), Protocols{IPv4: true}, nil},
 
 		{"mdns announcement", frames.MDNS4(plc, "192.168.110.50",
@@ -145,19 +275,26 @@ func TestDecode(t *testing.T) {
 				frames.A("plc-1.local", "192.168.110.50"),
 			},
 			[]layers.DNSResourceRecord{frames.A("plc-1.local", "fe80::21b:1bff:feaa:bb01"), frames.SRV("x._modbus._tcp.local", "plc-1.local", 502)}), All,
+			// One observation: the sender, with every record as advertised.
 			[]string{
-				"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 name=mdns:plc-1.local service_ports=_http._tcp=80,_modbus._tcp=502 services=_http._tcp,_modbus._tcp txt=model=S7-1500;path=/",
-				"passive_mdns mac=00:1b:1b:aa:bb:01 ip=fe80::21b:1bff:feaa:bb01 name=mdns:plc-1.local service_ports=_http._tcp=80,_modbus._tcp=502 services=_http._tcp,_modbus._tcp txt=model=S7-1500;path=/",
+				"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 rec=PTR:_services._dns-sd._udp.local>_http._tcp.local/120 " +
+					"rec=PTR:_http._tcp.local>PLC 1._http._tcp.local/120 rec=SRV:PLC 1._http._tcp.local>plc-1.local:80/120 " +
+					"rec=TXT:PLC 1._http._tcp.local>model=S7-1500;path=//120 rec=A:plc-1.local>192.168.110.50/120 " +
+					"rec=AAAA:plc-1.local>fe80::21b:1bff:feaa:bb01/120 rec=SRV:x._modbus._tcp.local>plc-1.local:502/120",
 			}},
-		{"mdns alias does not replace the hostname", frames.MDNS4(plc, "192.168.110.50",
-			[]layers.DNSResourceRecord{frames.A("alias.local", "192.168.110.60"), frames.A("plc-1.local", "192.168.110.50")}, nil), Protocols{MDNS: true},
-			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.60", "passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 name=mdns:plc-1.local"}},
+		{"mdns records for other addresses stay records", frames.MDNS4(plc, "192.168.110.50",
+			[]layers.DNSResourceRecord{frames.A("alias.local", "192.168.110.60"), frames.Flush(frames.A("plc-1.local", "192.168.110.50"))}, nil),
+			Protocols{MDNS: true},
+			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 rec=A:alias.local>192.168.110.60/120 rec=A:plc-1.local>192.168.110.50/120!"}},
+		{"mdns goodbye", frames.MDNS4(plc, "192.168.110.50",
+			[]layers.DNSResourceRecord{frames.TTL(frames.A("plc-1.local", "192.168.110.50"), 0)}, nil), Protocols{MDNS: true},
+			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 rec=A:plc-1.local>192.168.110.50/0"}},
 		{"mdns services only", frames.MDNS4(plc, "192.168.110.50",
 			[]layers.DNSResourceRecord{frames.SRV("x._workstation._tcp.local", "plc-1.local.", 9)}, nil), Protocols{MDNS: true},
-			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 name=mdns:plc-1.local service_ports=_workstation._tcp=9 services=_workstation._tcp"}},
+			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=192.168.110.50 rec=SRV:x._workstation._tcp.local>plc-1.local:9/120"}},
 		{"mdns over ipv6", frames.UDP6(plc, frames.MDNSv6, "fe80::21b:1bff:feaa:bb01", "ff02::fb", 5353, 5353,
 			frames.DNSResponse([]layers.DNSResourceRecord{frames.A("plc-1.local", "fe80::21b:1bff:feaa:bb01")}, nil)), All,
-			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=fe80::21b:1bff:feaa:bb01 name=mdns:plc-1.local"}},
+			[]string{"passive_mdns mac=00:1b:1b:aa:bb:01 ip=fe80::21b:1bff:feaa:bb01 rec=AAAA:plc-1.local>fe80::21b:1bff:feaa:bb01/120"}},
 		{"mdns over ipv6 with ipv6 disabled", frames.UDP6(plc, frames.MDNSv6, "fe80::21b:1bff:feaa:bb01", "ff02::fb", 5353, 5353,
 			frames.DNSResponse([]layers.DNSResourceRecord{frames.A("plc-1.local", "fe80::21b:1bff:feaa:bb01")}, nil)), Protocols{MDNS: true}, nil},
 		{"mdns query is ignored", frames.UDP4(plc, frames.MDNSv4, "192.168.110.50", "224.0.0.251", 5353, 5353, &layers.DNS{
@@ -168,8 +305,11 @@ func TestDecode(t *testing.T) {
 				frames.PTR("50.110.168.192.in-addr.arpa", "plc-1.plant.example."),
 				frames.PTR("1.0.b.b.a.a.e.f.f.f.b.1.b.1.2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa", "plc-1.plant.example."),
 				frames.A("plc-1.plant.example", "192.168.110.50"),
+				frames.CNAME("plc.plant.example", "plc-1.plant.example"),
 			}, nil)), Protocols{DNS: true},
-			[]string{"passive_dns ip=192.168.110.50 name=dns_ptr:plc-1.plant.example", "passive_dns ip=fe80::21b:1bff:feaa:bb01 name=dns_ptr:plc-1.plant.example"}},
+			// No MAC: a resolver's answer is about names, not about who it came from.
+			[]string{"passive_dns rec=PTR:plc-1.plant.example>192.168.110.50/120 rec=PTR:plc-1.plant.example>fe80::21b:1bff:feaa:bb01/120 " +
+				"rec=A:plc-1.plant.example>192.168.110.50/120 rec=CNAME:plc.plant.example>plc-1.plant.example/300"}},
 		{"dns ptr for a non-reverse name", frames.UDP4(server, hmi, "192.168.110.2", "192.168.110.20", 53, 40000, frames.DNSResponse(
 			[]layers.DNSResourceRecord{frames.PTR("_http._tcp.example", "x._http._tcp.example")}, nil)), Protocols{DNS: true}, nil},
 
@@ -187,7 +327,8 @@ func TestDecode(t *testing.T) {
 		{"lldp from a switch", frames.LLDP{Source: swPort, ChassisMAC: sw, PortID: "ge-0/0/23", TTL: 120,
 			SystemName: "plant-sw-01", SystemDesc: "Industrial Ethernet Switch\x00", PortDesc: "PLC line 3", Caps: 0x14,
 			MgmtIP: "192.168.110.2"}.Frame(), All,
-			[]string{"passive_lldp mac=00:1e:c9:00:00:01 name=lldp:plant-sw-01 capabilities=bridge,router chassis_id=00:1e:c9:00:00:01 " +
+			// The sender port, not the chassis MAC, is the attachment.
+			[]string{"passive_lldp mac=00:1e:c9:00:00:17 name=lldp:plant-sw-01 capabilities=bridge,router chassis_id=00:1e:c9:00:00:01 " +
 				"management_ip=192.168.110.2 port_description=PLC line 3 port_id=ge-0/0/23 system_description=Industrial Ethernet Switch"}},
 		{"lldp with a local chassis id", frames.LLDP{Source: swPort, ChassisText: "SN1234", PortID: "X1 P1", TTL: 20}.Frame(), All,
 			[]string{"passive_lldp mac=00:1e:c9:00:00:17 chassis_id=SN1234 port_id=X1 P1"}},
@@ -312,18 +453,4 @@ func TestReverseAddr(t *testing.T) {
 		}
 	}
 	_ = netip.Addr{}
-}
-
-func TestServiceType(t *testing.T) {
-	for in, want := range map[string]string{
-		"PLC 1._http._tcp.local.":       "_http._tcp",
-		"_printer._sub._ipp._tcp.local": "_ipp._tcp",
-		"_services._dns-sd._udp.local":  "_dns-sd._udp",
-		"plc-1.local":                   "",
-		"_._tcp.local":                  "",
-	} {
-		if got := serviceType(in); got != want {
-			t.Errorf("serviceType(%q) = %q, want %q", in, got, want)
-		}
-	}
 }

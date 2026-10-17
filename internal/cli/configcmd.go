@@ -4,21 +4,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
 )
 
 func (a *app) configCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
-		Short: "Show, validate or reload the configuration",
+		Short: "Show, validate, reload or convert the configuration",
 	}
-	c.AddCommand(a.configValidateCmd(), a.configShowCmd(), a.configReloadCmd())
+	c.AddCommand(a.configValidateCmd(), a.configShowCmd(), a.configReloadCmd(), a.configConvertCmd())
 	return c
 }
 
@@ -41,7 +42,7 @@ func (a *app) configValidateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "validate",
 		Short:   "Validate a config before rollout",
-		Example: "  sudo lan-sentinel config validate",
+		Example: "  sudo lan-tracker config validate",
 		Long: "Validate the configuration file, environment and flags. Prints the interfaces,\n" +
 			"active scan networks, enabled probes, budgets and the estimated maximum probe\n" +
 			"rate. Exit 0 if valid, 2 with per-key errors otherwise.",
@@ -109,17 +110,20 @@ func printSummary(w io.Writer, l *config.Loaded, s config.Summary) {
 	}
 	b := c.Active.Budgets
 	fmt.Fprintf(w, "\nProbes:   %s\n", probes)
-	fmt.Fprintf(w, "Budgets:  global %g pps; arp %g pps; icmp %g pps; ndp %g pps; udp %g pps; tcp %g connects/s (≤%d per interface, ≤%d per host)\n",
-		c.Active.MaxPacketsPerSecond, b.ARP.PacketsPerSecond, b.ICMP.PacketsPerSecond, b.NDP.PacketsPerSecond,
-		b.UDP.PacketsPerSecond, b.TCP.ConnectsPerSecond, b.TCP.MaxConcurrentPerInterface, b.TCP.MaxConcurrentPerHost)
+	fmt.Fprintf(w, "Budgets:  global %g starts/s; arp %g starts/s; icmp %g starts/s; tcp %g connects/s (≤%d per interface, ≤%d per host); ≤%d jobs at once\n",
+		c.Active.MaxStartsPerSecond, b.ARP.StartsPerSecond, b.ICMP.StartsPerSecond,
+		b.TCP.ConnectsPerSecond, b.TCP.MaxConcurrentPerInterface, b.TCP.MaxConcurrentPerHost, c.Active.MaxConcurrentJobs)
 	if c.Active.MaxSweepTargets > config.DefaultMaxSweepTargets {
 		fmt.Fprintf(w, "Expert override: active.max_sweep_targets %d (default %d); preview operator sweeps with scan plan\n",
 			c.Active.MaxSweepTargets, config.DefaultMaxSweepTargets)
 	}
-	if s.MaxPacketsPerSecond == 0 {
-		fmt.Fprintln(w, "Estimated maximum probe rate: 0 pps (active discovery is disabled on every interface)")
+	for _, warn := range s.Warnings {
+		fmt.Fprintf(w, "Warning:  %s\n", warn)
+	}
+	if s.MaxStartsPerSecond == 0 {
+		fmt.Fprintln(w, "Estimated maximum probe start rate: 0/s (active discovery is disabled on every interface)")
 	} else {
-		fmt.Fprintf(w, "Estimated maximum probe rate: %g pps\n", s.MaxPacketsPerSecond)
+		fmt.Fprintf(w, "Estimated maximum probe start rate: %g/s (kernel TCP packets come on top)\n", s.MaxStartsPerSecond)
 	}
 }
 
@@ -139,7 +143,7 @@ func (a *app) configShowCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "show",
 		Short:   "Show the effective configuration after merging defaults, file, env and flags",
-		Example: "  sudo lan-sentinel config show --sources",
+		Example: "  sudo lan-tracker config show --sources",
 		Args:    cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			l, loadErr := a.load()
@@ -202,7 +206,7 @@ func (a *app) configReloadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "reload",
 		Short:   "Make the running daemon re-read its configuration file",
-		Example: "  sudo lan-sentinel config reload",
+		Example: "  sudo lan-tracker config reload",
 		Long: "Makes the daemon re-read the configuration file it was started with (--config\n" +
 			"does not change which), as systemctl reload does, and prints what took effect.\n" +
 			"Probes, each interface's active settings, intervals, thresholds and the log\n" +
@@ -249,7 +253,89 @@ func printReload(w io.Writer, res api.ReloadResult) {
 		_ = writeTable(w, []string{"  KEY", "OLD", "NEW"}, changes(res.Applied))
 	}
 	if len(res.NotApplied) > 0 {
-		fmt.Fprintln(w, "\nNot applied, needs a restart (sudo systemctl restart lan-sentinel):")
+		fmt.Fprintln(w, "\nNot applied, needs a restart (sudo systemctl restart lan-tracker):")
 		_ = writeTable(w, []string{"  KEY", "RUNNING", "FILE"}, changes(res.NotApplied))
+	}
+}
+
+// configConvertCmd converts a LAN Sentinel configuration (docs/MIGRATION.md).
+// It reads one file and prints; it writes no file and sends nothing.
+func (a *app) configConvertCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "convert <lan-sentinel-config>",
+		Short:   "Convert a LAN Sentinel configuration (schema 1) to LAN Tracker (schema 2)",
+		Example: "  lan-tracker config convert /etc/lan-sentinel/config.yaml > config.yaml",
+		Long: "Reads a LAN Sentinel configuration and prints the LAN Tracker version on stdout,\n" +
+			"with a report on stderr: the keys of removed functionality (identification,\n" +
+			"UDP probes), keys whose meaning changed (packet rates became probe starts, so\n" +
+			"the conservative defaults apply), and what to review. Active discovery is off\n" +
+			"on every interface in the result: enable it after review. Nothing is written\n" +
+			"or sent. -o json prints the converted file and the report as one object. Exit 0\n" +
+			"when the result validates, 2 otherwise.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if err := onlyFormats(a.g.output, "table", "json"); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(args[0])
+			if err != nil {
+				return fail(ExitError, err)
+			}
+			out, r, err := config.Convert(data)
+			if err != nil {
+				return fail(ExitError, fmt.Errorf("%s: %w", args[0], err))
+			}
+			if a.g.output == "json" {
+				if err := writeJSON(a.out(), struct {
+					Config string               `json:"config"`
+					Report config.ConvertReport `json:"report"`
+				}{string(out), r}); err != nil {
+					return err
+				}
+			} else {
+				if _, err := a.out().Write(out); err != nil {
+					return err
+				}
+				printConvertReport(a.env.Stderr, args[0], r)
+			}
+			if len(r.Errors) > 0 {
+				return silent(ExitError)
+			}
+			return nil
+		},
+	}
+}
+
+func printConvertReport(w io.Writer, path string, r config.ConvertReport) {
+	fmt.Fprintf(w, "Converted %s (LAN Sentinel, schema 1) to schema 2.\n", path)
+	section := func(title string, notes []config.ConvertNote) {
+		if len(notes) == 0 {
+			return
+		}
+		fmt.Fprintf(w, "\n%s:\n", title)
+		for _, n := range notes {
+			line := "  " + n.Key
+			switch {
+			case n.Old != "" && n.New != "":
+				line += ": " + n.Old + " → " + n.New
+			case n.Old != "":
+				line += ": " + n.Old
+			}
+			fmt.Fprintf(w, "%s\n      %s\n", line, n.Why)
+		}
+	}
+	section("Removed", r.Removed)
+	section("Changed", r.Changed)
+	if len(r.Attention) > 0 {
+		fmt.Fprintln(w, "\nReview:")
+		for _, s := range r.Attention {
+			fmt.Fprintf(w, "  - %s\n", s)
+		}
+	}
+	if len(r.Errors) > 0 {
+		fmt.Fprintln(w, "\nThe result does not validate yet:")
+		for _, e := range r.Errors {
+			fmt.Fprintf(w, "  %s\n", e)
+		}
 	}
 }

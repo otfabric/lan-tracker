@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 const plc = "00:1b:1b:aa:bb:01"
@@ -51,14 +51,8 @@ func TestProbeResultsProvePresenceOnlyWhenAnswered(t *testing.T) {
 		{"tcp refused", tcp(observation.ServiceRefused), true},
 		{"tcp timeout", tcp(observation.ServiceTimeout), false},
 		{"tcp unreachable", tcp(observation.ServiceUnreachable), false},
+		{"tcp local error", tcp(observation.ServiceLocalError), false},
 		{"icmp reply", observation.Observation{Source: observation.ICMPScan, IP: ip}, true},
-		{"udp reply", observation.Observation{Source: observation.UDPProbe, IP: ip,
-			Service: &observation.ServiceResult{Proto: "udp", Port: 123, State: observation.ServiceOpen}, Meta: map[string]string{"probe": "ntp"}}, true},
-		{"identify ok", observation.Observation{Source: observation.IdentifyProbe, IP: ip,
-			Service: &observation.ServiceResult{Proto: "tcp", Port: 502, State: observation.ServiceOpen},
-			Meta:    map[string]string{observation.MetaProbe: "modbus", observation.MetaResult: observation.ResultOK}}, true},
-		{"identify timeout", observation.Observation{Source: observation.IdentifyProbe, IP: ip,
-			Meta: map[string]string{observation.MetaProbe: "modbus", observation.MetaResult: observation.ResultTimeout}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -78,13 +72,12 @@ func TestProbeResultsProvePresenceOnlyWhenAnswered(t *testing.T) {
 				t.Errorf("binding last_seen %s", binding[0])
 			}
 			if tt.o.Service != nil {
-				svc := h.query(`SELECT state FROM services`, func(r *sql.Rows) string {
-					var s string
-					_ = r.Scan(&s)
-					return s
-				})
-				if len(svc) != 1 || svc[0] != string(tt.o.Service.State) {
-					t.Errorf("services = %v: the result is recorded either way", svc)
+				svc := h.query(`SELECT last_result || ' ' || coalesce(host_id, '-') FROM endpoints`, scanText)
+				if len(svc) != 1 || svc[0] != string(tt.o.Service.State)+" host-01" {
+					t.Errorf("endpoints = %v: the result is recorded either way", svc)
+				}
+				if answer := h.query(`SELECT coalesce(last_endpoint_answer, 0) > 0 FROM hosts`, scanText); (answer[0] == "1") != tt.presence {
+					t.Errorf("last_endpoint_answer set = %s", answer[0])
 				}
 			}
 		})
@@ -96,87 +89,14 @@ func TestTimeoutDoesNotBringBackAMissingHost(t *testing.T) {
 	h.obs(0, observation.PassiveARP, "eth1", plc, "10.1.0.50")
 	h.probeObs(2*time.Hour, observation.Observation{Source: observation.TCPConnect, IP: netip.MustParseAddr("10.1.0.50"),
 		Service: &observation.ServiceResult{Proto: "tcp", Port: 502, State: observation.ServiceOpen}})
-	// Missing after 24 h; a timeout one hour later is no evidence.
+	// Missing after 24 h; a timeout one hour later is no evidence. Its
+	// binding was not confirmed for longer than address_expiry either, so
+	// the result is the endpoint's alone.
 	h.probeObs(27*time.Hour, observation.Observation{Source: observation.TCPConnect, IP: netip.MustParseAddr("10.1.0.50"),
 		Service: &observation.ServiceResult{Proto: "tcp", Port: 502, State: observation.ServiceTimeout}})
-	ev := strings.Join(hostEvents(h.events()), "\n")
-	if strings.Contains(ev, "HOST_REAPPEARED") || !strings.Contains(ev, "HOST_DISAPPEARED") || !strings.Contains(ev, "SERVICE_CLOSED host-01 tcp/502>TIMEOUT") {
+	ev := strings.Join(h.events(), "\n")
+	if strings.Contains(ev, "HOST_REAPPEARED") || !strings.Contains(ev, "HOST_DISAPPEARED") || !strings.Contains(ev, "SERVICE_STATE_CHANGED - tcp/502 OPEN>tcp/502 TIMEOUT") {
 		t.Errorf("events:\n%s", ev)
-	}
-}
-
-func enipObs(name, devType string) observation.Observation {
-	meta := map[string]string{
-		observation.MetaProbe: "enip", "vendor_id": "1", "product_name": name,
-		observation.MetaIdentityPrefix + "product": name, observation.MetaIdentityPrefix + "device_type": devType,
-		observation.MetaIdentityPrefix + "empty": "",
-	}
-	return observation.Observation{Source: observation.UDPProbe, IP: netip.MustParseAddr("10.1.0.50"),
-		Service: &observation.ServiceResult{Proto: "udp", Port: 44818, State: observation.ServiceOpen}, Meta: meta}
-}
-
-func TestProbeDetailsAndIdentity(t *testing.T) {
-	h := newHarness(t)
-	h.obs(0, observation.PassiveARP, "eth1", plc, "10.1.0.50")
-	h.probeObs(time.Hour, enipObs("1756-L71", "Programmable Logic Controller"))
-	h.probeObs(2*time.Hour, enipObs("1756-L71", "Programmable Logic Controller")) // same claims: no event
-	h.probeObs(3*time.Hour, enipObs("1756-L83E", "Programmable Logic Controller"))
-	h.probeObs(4*time.Hour, observation.Observation{Source: observation.UDPProbe, IP: netip.MustParseAddr("10.1.0.50"),
-		Service: &observation.ServiceResult{Proto: "udp", Port: 123, State: observation.ServiceOpen},
-		Meta:    map[string]string{observation.MetaProbe: "ntp", "stratum": "2"}})
-
-	var vendor []string
-	for _, e := range h.events() {
-		if strings.Contains(e, "VENDOR_IDENTIFIED") {
-			vendor = append(vendor, e)
-		}
-	}
-	expect(t, "identification events", vendor, []string{
-		"1h0m0s VENDOR_IDENTIFIED host-01 >device_type=Programmable Logic Controller",
-		"1h0m0s VENDOR_IDENTIFIED host-01 >product=1756-L71",
-		"3h0m0s VENDOR_IDENTIFIED host-01 product=1756-L71>product=1756-L83E",
-	})
-	details := h.query(`SELECT proto || '/' || port || ' ' || detail_json FROM services ORDER BY port`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
-	})
-	expect(t, "service details", details, []string{
-		`udp/123 {"probe":"ntp","stratum":"2"}`,
-		`udp/44818 {"probe":"enip","product_name":"1756-L83E","vendor_id":"1"}`,
-	})
-	ids := h.query(`SELECT field || '=' || value || ' ' || source || ' ' || confidence FROM identifications WHERE source = 'enip' ORDER BY id`,
-		func(r *sql.Rows) string {
-			var s string
-			_ = r.Scan(&s)
-			return s
-		})
-	expect(t, "identifications", ids, []string{
-		"device_type=Programmable Logic Controller enip 0.9",
-		"product=1756-L71 enip 0.9",
-		"product=1756-L83E enip 0.9",
-	})
-	dt := h.query(`SELECT coalesce(device_type, '') FROM hosts`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
-	})
-	if dt[0] != "Programmable Logic Controller" {
-		t.Errorf("hosts.device_type = %q", dt[0])
-	}
-
-	// After a restart the known claims are loaded: a repeat emits nothing.
-	h.restart()
-	h.link("eth1", true, "10.1.0.0/24")
-	h.probeObs(5*time.Hour, enipObs("1756-L83E", "Programmable Logic Controller"))
-	n := 0
-	for _, e := range h.events() {
-		if strings.Contains(e, "VENDOR_IDENTIFIED") {
-			n++
-		}
-	}
-	if n != 3 {
-		t.Errorf("%d identification events after restart, want 3", n)
 	}
 }
 
@@ -194,7 +114,7 @@ func TestOperatorActions(t *testing.T) {
 			return s
 		})
 	}
-	op(time.Minute, observation.Operator{Kind: observation.OpActiveDisabled, Actor: "env", Reason: "LAN_SENTINEL_ACTIVE_DISABLED=1"})
+	op(time.Minute, observation.Operator{Kind: observation.OpActiveDisabled, Actor: "env", Reason: "LAN_TRACKER_ACTIVE_DISABLED=1"})
 	if len(state()) != 0 {
 		t.Error("the environment switch was persisted")
 	}
@@ -231,7 +151,7 @@ func TestOperatorActions(t *testing.T) {
 		}
 	}
 	expect(t, "operator events", ops, []string{
-		"1m0s ACTIVE_DISABLED - >active discovery disabled by env: LAN_SENTINEL_ACTIVE_DISABLED=1",
+		"1m0s ACTIVE_DISABLED - >active discovery disabled by env: LAN_TRACKER_ACTIVE_DISABLED=1",
 		"2m0s ACTIVE_DISABLED - >active discovery disabled by bart: PLC fault",
 		"3m0s ACTIVE_ENABLED - >active discovery enabled by bart",
 		"4m0s SCAN_STARTED - >operator scan arp,tcp/502: 253 addresses to sweep, 3 known hosts",
@@ -281,65 +201,67 @@ func TestOperatorActions(t *testing.T) {
 	}
 }
 
-func TestIdentifyAttemptAndPerClaimConfidence(t *testing.T) {
+func tcpResult(ip string, port int, st observation.ServiceState) observation.Observation {
+	return observation.Observation{Source: observation.TCPConnect, IP: netip.MustParseAddr(ip),
+		Service: &observation.ServiceResult{Proto: "tcp", Port: port, State: st}}
+}
+
+// Endpoints are keyed by address: one MAC with a production and a
+// maintenance address keeps one port's results per address.
+func TestEndpointsPerAddress(t *testing.T) {
 	h := newHarness(t)
 	h.obs(0, observation.PassiveARP, "eth1", plc, "10.1.0.50")
-	ip := netip.MustParseAddr("10.1.0.50")
-	h.probeObs(time.Hour, observation.Observation{
-		Source: observation.IdentifyProbe, IP: ip,
-		Meta: map[string]string{
-			observation.MetaProbe: "modbus", observation.MetaResult: observation.ResultMalformed,
-			observation.MetaTrigger: observation.TriggerScheduled, observation.MetaHostID: "host-01",
-		},
-	})
-	rows := h.query(`SELECT probe || ' ' || result || ' ' || trigger FROM identify_attempts`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
-	})
-	expect(t, "failed attempt", rows, []string{"modbus malformed scheduled"})
-	if ev := strings.Join(h.events(), "\n"); strings.Contains(ev, "VENDOR_IDENTIFIED") {
-		t.Errorf("failed attempt wrote a claim:\n%s", ev)
+	h.obs(0, observation.PassiveARP, "eth1", plc, "10.1.0.60")
+	h.probeObs(time.Minute, tcpResult("10.1.0.50", 502, observation.ServiceOpen))
+	h.probeObs(2*time.Minute, tcpResult("10.1.0.60", 502, observation.ServiceRefused))
+	h.probeObs(3*time.Minute, tcpResult("10.1.0.50", 502, observation.ServiceOpen))
+	expect(t, "endpoints", h.query(`SELECT ip || ' ' || last_result || ' ' || host_id FROM endpoints ORDER BY ip`, scanText),
+		[]string{"10.1.0.50 OPEN host-01", "10.1.0.60 REFUSED host-01"})
+}
+
+// Two MACs claim the probed address: the result is kept for the endpoint
+// and attributed to neither; an address nobody holds keeps its result
+// too. A result after the address passed to another MAC is that MAC's,
+// never the previous holder's.
+func TestEndpointAttributionNeedsOneHolder(t *testing.T) {
+	h := newHarness(t)
+	h.obs(0, observation.PassiveARP, "eth1", plc, "10.1.0.50")
+	h.obs(time.Second, observation.PassiveARP, "eth1", "00:1b:1b:aa:bb:02", "10.1.0.50") // duplicate
+	h.probeObs(time.Minute, tcpResult("10.1.0.50", 502, observation.ServiceOpen))
+	h.probeObs(time.Minute, tcpResult("10.1.0.77", 502, observation.ServiceRefused))
+	expect(t, "endpoints", h.query(`SELECT ip || ' ' || last_result || ' ' || coalesce(host_id, '-') FROM endpoints ORDER BY ip`, scanText),
+		[]string{"10.1.0.50 OPEN -", "10.1.0.77 REFUSED -"})
+	if got := h.query(`SELECT count(*) FROM events WHERE type = 'SERVICE_STATE_CHANGED' AND host_id IS NULL`, scanText); got[0] != "1" {
+		t.Errorf("unattributed state changes = %v", got)
 	}
-	h.probeObs(2*time.Hour, observation.Observation{
-		Source: observation.IdentifyProbe, IP: ip,
-		Service: &observation.ServiceResult{Proto: "tcp", Port: 502, State: observation.ServiceOpen},
-		Meta: map[string]string{
-			observation.MetaProbe: "modbus", observation.MetaResult: observation.ResultOK,
-			observation.MetaTrigger:                       observation.TriggerOperator,
-			observation.MetaActor:                         "bart",
-			observation.MetaIdentityPrefix + "vendor":     "ACME",
-			observation.MetaIdentityConfPrefix + "vendor": "0.95",
-		},
-	})
-	rows = h.query(`SELECT probe || ' ' || result || ' ' || trigger FROM identify_attempts`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
-	})
-	expect(t, "upserted attempt", rows, []string{"modbus ok operator"})
-	rows = h.query(`SELECT actor FROM identify_attempts`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
-	})
-	expect(t, "attempt actor", rows, []string{"bart"})
-	if ev := strings.Join(h.events(), "\n"); !strings.Contains(ev, "IDENTIFY_RAN") {
-		t.Errorf("operator identify run events:\n%s", ev)
+	// Both holders go quiet; a third MAC takes the address over.
+	h.obs(3*time.Hour, observation.PassiveARP, "eth1", "00:1b:1b:aa:bb:03", "10.1.0.50")
+	h.probeObs(3*time.Hour+time.Minute, tcpResult("10.1.0.50", 502, observation.ServiceRefused))
+	expect(t, "after the takeover", h.query(`SELECT result || ' ' || coalesce(host_id, '-') FROM endpoint_results ORDER BY id`, scanText),
+		[]string{"OPEN -", "REFUSED -", "REFUSED host-03"})
+	// The takeover closed both conflicting holders: the conflict is over.
+	if ev := strings.Join(h.events(), "\n"); !strings.Contains(ev, "3h0m0s DUPLICATE_IP_RESOLVED host-03 >10.1.0.50") {
+		t.Errorf("events:\n%s", ev)
 	}
-	evj := h.query(`SELECT evidence_json FROM events WHERE type = 'IDENTIFY_RAN'`, func(r *sql.Rows) string {
-		var s string
-		_ = r.Scan(&s)
-		return s
-	})
-	if len(evj) != 1 || !strings.Contains(evj[0], `"actor":"bart"`) || !strings.Contains(evj[0], `"probe":"modbus"`) {
-		t.Errorf("IDENTIFY_RAN evidence = %v", evj)
+}
+
+// A holder whose binding nobody confirmed for identity.address_expiry is
+// not a fresh mapping: a TCP result and an address record for its address
+// stay unattributed, and the answer makes nobody present.
+func TestStaleHolderIsNotAttributed(t *testing.T) {
+	h := newHarness(t)
+	h.obs(0, observation.PassiveARP, "eth1", plc, "10.1.0.50")
+	h.probeObs(25*time.Hour, tcpResult("10.1.0.50", 502, observation.ServiceOpen))
+	h.named(25*time.Hour, observation.PassiveDNS, "", "10.1.0.50", observation.NameDNSPTR, "old.plant.example")
+	expect(t, "endpoints", h.query(`SELECT ip || ' ' || last_result || ' ' || coalesce(host_id, '-') FROM endpoints`, scanText),
+		[]string{"10.1.0.50 OPEN -"})
+	expect(t, "names", h.names(), []string{"- dns_ptr:old.plant.example passive_dns [25h0m0s,open)"})
+	if got := h.query(`SELECT last_seen FROM hosts`, scanText); got[0] != fmt.Sprint(t0.UnixMilli()) {
+		t.Errorf("the stale holder was refreshed: last_seen %v", got)
 	}
-	ids := h.query(`SELECT field || '=' || value || ' ' || source || ' ' || confidence FROM identifications WHERE source = 'modbus'`,
-		func(r *sql.Rows) string {
-			var s string
-			_ = r.Scan(&s)
-			return s
-		})
-	expect(t, "modbus claim", ids, []string{"vendor=ACME modbus 0.95"})
+	// Confirmed again, it is fresh.
+	h.obs(26*time.Hour, observation.PassiveARP, "eth1", plc, "10.1.0.50")
+	h.probeObs(26*time.Hour+time.Minute, tcpResult("10.1.0.50", 502, observation.ServiceRefused))
+	expect(t, "fresh again", h.query(`SELECT result || ' ' || coalesce(host_id, '-') FROM endpoint_results ORDER BY id`, scanText),
+		[]string{"OPEN -", "REFUSED host-01"})
 }

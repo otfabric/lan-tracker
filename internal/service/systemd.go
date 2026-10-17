@@ -79,7 +79,7 @@ func (h *journalHandler) Enabled(_ context.Context, l slog.Level) bool {
 }
 
 func (h *journalHandler) Handle(_ context.Context, r slog.Record) error {
-	vars := map[string]string{"SYSLOG_IDENTIFIER": "lan-sentinel"}
+	vars := map[string]string{"SYSLOG_IDENTIFIER": "lan-tracker"}
 	for _, a := range h.attrs {
 		addJournalAttr(vars, "", a)
 	}

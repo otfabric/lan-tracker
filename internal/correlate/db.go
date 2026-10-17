@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"time"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 // The correlator assigns row ids itself, so it can refer to rows it has
@@ -46,24 +46,22 @@ func (c *Correlator) dbClosePrefix(ctx context.Context, id int64, t time.Time) {
 		ms(t), ms(t), id)
 }
 
+// dbInsertHost inserts a host. vendor is the OUI registrant, a hint about
+// the NIC's MAC prefix, never the equipment's manufacturer (ADR 0012), so
+// hosts.manufacturer stays empty.
 func (c *Correlator) dbInsertHost(ctx context.Context, h *host, la bool) {
 	c.exec(ctx, "insert host", `INSERT INTO hosts
-		(host_id, context_id, mac, vendor, locally_administered, presence, manufacturer, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		h.id, h.ctx.id, h.mac.String(), nullString(h.vendor), boolInt(la), string(h.presence), nullString(h.vendor),
-		ms(h.firstSeen), ms(h.lastSeen))
-	if h.vendor != "" {
-		evidence, _ := json.Marshal(map[string]string{"mac": h.mac.String(), "registry": "IEEE"})
-		c.exec(ctx, "insert identification", `INSERT INTO identifications
-			(host_id, field, value, confidence, source, evidence_json, first_seen, last_seen, current)
-			VALUES (?, 'manufacturer', ?, ?, 'oui', ?, ?, ?, 1)`,
-			h.id, h.vendor, ouiConfidence, string(evidence), ms(h.firstSeen), ms(h.firstSeen))
-	}
+		(host_id, context_id, mac, vendor, locally_administered, presence, first_seen, last_seen,
+		last_frame_seen, last_address_confirmed, last_endpoint_answer)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.id, h.ctx.id, h.mac.String(), nullString(h.vendor), boolInt(la), string(h.presence),
+		ms(h.firstSeen), ms(h.lastSeen), msOrNil(h.lastFrame), msOrNil(h.lastAddress), msOrNil(h.lastAnswer))
 }
 
 func (c *Correlator) dbHostSeen(ctx context.Context, h *host) {
-	c.exec(ctx, "update host", `UPDATE hosts SET last_seen = ?, presence = ? WHERE host_id = ?`,
-		ms(h.lastSeen), string(h.presence), h.id)
+	c.exec(ctx, "update host", `UPDATE hosts SET last_seen = ?, presence = ?, last_frame_seen = ?, last_address_confirmed = ?,
+		last_endpoint_answer = ? WHERE host_id = ?`,
+		ms(h.lastSeen), string(h.presence), msOrNil(h.lastFrame), msOrNil(h.lastAddress), msOrNil(h.lastAnswer), h.id)
 }
 
 func (c *Correlator) dbOpenBinding(ctx context.Context, b *binding, src observation.Source) {
@@ -96,38 +94,6 @@ func (c *Correlator) dbCloseBinding(ctx context.Context, b *binding, endedAt tim
 
 func (c *Correlator) dbConflict(ctx context.Context, b *binding) {
 	c.exec(ctx, "address conflict", `UPDATE addresses SET conflict = ? WHERE id = ?`, boolInt(b.conflict), b.id)
-}
-
-func (c *Correlator) dbService(ctx context.Context, h *host, svc observation.ServiceResult, row *serviceRow, insert bool, t time.Time) {
-	if insert {
-		c.nextService()
-		c.exec(ctx, "insert service", `INSERT INTO services (id, host_id, proto, port, state, first_seen, last_seen, last_result_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			c.st.nextServiceID, h.id, svc.Proto, svc.Port, string(row.state), ms(row.firstSeen), ms(row.lastSeen), ms(t))
-		return
-	}
-	c.exec(ctx, "update service", `UPDATE services SET state = ?, last_seen = max(last_seen, ?), last_result_at = ?
-		WHERE host_id = ? AND proto = ? AND port = ?`,
-		string(row.state), ms(row.lastSeen), ms(t), h.id, svc.Proto, svc.Port)
-}
-
-func (c *Correlator) nextService() { c.st.nextServiceID++ }
-
-func (c *Correlator) dbOpenName(ctx context.Context, h *host, n *nameRow) {
-	c.exec(ctx, "open name", `INSERT INTO names (id, host_id, name, name_type, source, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		n.id, h.id, n.name, string(n.typ), string(n.source), ms(n.firstSeen), ms(n.lastSeen))
-}
-
-func (c *Correlator) dbNameSeen(ctx context.Context, n *nameRow) {
-	c.exec(ctx, "update name", `UPDATE names SET last_seen = max(last_seen, ?) WHERE id = ?`, ms(n.lastSeen), n.id)
-}
-
-func (c *Correlator) dbCloseName(ctx context.Context, n *nameRow, endedAt time.Time) {
-	c.exec(ctx, "close name", `UPDATE names SET last_seen = ?, ended_at = ? WHERE id = ?`, ms(n.lastSeen), ms(endedAt), n.id)
-}
-
-func (c *Correlator) dbPreferred(ctx context.Context, h *host) {
-	c.exec(ctx, "preferred name", `UPDATE hosts SET preferred_name = ? WHERE host_id = ?`, nullString(h.preferred), h.id)
 }
 
 func (c *Correlator) dbObservation(ctx context.Context, id int64, ctxID int64, o observation.Observation, hostID string) {

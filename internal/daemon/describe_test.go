@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // A host's description goes through the correlator: set, unchanged, removed,

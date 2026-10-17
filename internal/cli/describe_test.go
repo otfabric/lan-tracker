@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/store"
-	"lan-sentinel/internal/store/storetest"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/internal/store/storetest"
 )
 
 // describeFixture serves the seeded database with a fake operator Control,
@@ -44,12 +44,7 @@ func serveDescribe(t *testing.T) *describeFixture {
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	f := &describeFixture{socket: filepath.Join(t.TempDir(), "api.sock"), ctl: &control{}, a: a, ids: map[string]string{}}
-	// The configuration /v1/config serves: identification probes enabled on
-	// eth1 only (identify run --probe all).
-	cfg := &config.Config{Interfaces: []config.InterfaceConfig{
-		{Name: "eth1", Active: config.InterfaceActive{Identify: []config.InterfaceIdentify{{Name: "http"}, {Name: "tls"}, {Name: "ftp"}}}},
-		{Name: "eth0"},
-	}}
+	cfg := &config.Config{Interfaces: []config.InterfaceConfig{{Name: "eth1"}, {Name: "eth0"}}}
 	srv := api.New(api.Options{Reader: r, Control: f.ctl, Config: func() any { return cfg }})
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := srv.Start(ctx, f.socket, ""); err != nil {
@@ -70,7 +65,7 @@ func (f *describeFixture) run(t *testing.T, args ...string) (int, string, string
 	t.Helper()
 	var out, errb bytes.Buffer
 	code := Execute(context.Background(), Env{Args: append([]string{"--socket", f.socket}, args...), Stdout: &out, Stderr: &errb,
-		Location: time.UTC, Environ: []string{"LAN_SENTINEL_CONFIG=" + filepath.Join(t.TempDir(), "none.yaml")}})
+		Location: time.UTC, Environ: []string{"LAN_TRACKER_CONFIG=" + filepath.Join(t.TempDir(), "none.yaml")}})
 	return code, out.String(), errb.String()
 }
 

@@ -1,5 +1,5 @@
 # A fresh Debian with systemd as PID 1 and sudo, for `make test-systemd`,
-# once per target release (BASE). Nothing of LAN Sentinel is installed
+# once per target release (BASE). Nothing of LAN Tracker is installed
 # here: run.sh installs it with the commands of deploy/README.md.
 ARG BASE=debian:bookworm-slim
 FROM ${BASE}

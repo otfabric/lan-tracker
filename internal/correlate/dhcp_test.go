@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
 const (
@@ -159,10 +159,11 @@ func TestDHCPServerMACChanged(t *testing.T) {
 	}
 }
 
-// Offers and lease ACKs advertise a configuration; a change of a setting
-// they carry is an event, a setting left out is not, and neither the ACK of
-// an INFORM, a NAK nor older evidence changes it.
-func TestDHCPConfigChanged(t *testing.T) {
+// A server row shows the configuration last offered or assigned; a
+// setting left out is kept, and neither the ACK of an INFORM, a NAK nor
+// older evidence changes it. Changes are compared per client, in its lease
+// history, never across clients: the row raises no event.
+func TestDHCPServerConfig(t *testing.T) {
 	h := newHarness(t)
 	id := []string{"server_id", "10.1.0.2"}
 	with := func(kv ...string) []string { return append(append([]string{}, id...), kv...) }
@@ -174,7 +175,6 @@ func TestDHCPConfigChanged(t *testing.T) {
 	h.reply(90*time.Minute, dhcpA, "10.1.0.2", with("dhcp", "offer", "router", "10.1.0.77")...) // older than the row
 	expect(t, "events", h.dhcpEvents(), []string{
 		"0s DHCP_SERVER_DISCOVERED host-01 >10.1.0.2",
-		"2h0m0s DHCP_CONFIG_CHANGED host-01 dns=10.1.0.2 router=10.1.0.1>dns=10.1.0.2,9.9.9.9 router=10.1.0.254",
 	})
 	expect(t, "servers", h.servers(), []string{
 		`"10.1.0.2" "" 00:15:5d:00:00:02 10.1.0.2 unchecked {"dns":"10.1.0.2,9.9.9.9","router":"10.1.0.254","subnet_mask":"255.255.255.0"} host-01`,
@@ -200,7 +200,6 @@ func TestDHCPServersSurviveRestart(t *testing.T) {
 	h.reply(3*time.Hour, relayR, "", "dhcp", "offer", "server_id", "10.1.0.9")
 	expect(t, "events", h.dhcpEvents(), []string{
 		"0s DHCP_SERVER_DISCOVERED host-01 >10.1.0.2",
-		"1h0m0s DHCP_CONFIG_CHANGED host-01 router=10.1.0.1>router=10.1.0.254",
 		"2h0m0s DHCP_SERVER_MAC_CHANGED host-02 00:15:5d:00:00:02>00:15:5d:00:00:03",
 		"3h0m0s DHCP_SERVER_DISCOVERED host-03 >10.1.0.9",
 	})
@@ -213,19 +212,28 @@ func TestDHCPServersSurviveRestart(t *testing.T) {
 // A lease ACK is layer-2 evidence like the client's own messages, so a
 // lease outside the interface's subnets is recorded; the reply's sender is
 // bound only on the link, like any IP source.
+// A server's lease ACK is its statement about a client: it creates no
+// host, binds no address and refreshes no presence (docs/DATA_MODEL.md §2,
+// §5.6). A server's replies bind its own address when it is on-link.
 func TestDHCPLeaseAndServerAddresses(t *testing.T) {
 	h := newHarness(t)
 	h.obs(0, observation.PassiveDHCPLease, "eth1", plc, "192.168.9.20")
 	h.reply(time.Minute, dhcpA, "192.168.9.2", "dhcp", "ack", "server_id", "192.168.9.2")
 	h.reply(2*time.Minute, dhcpB, "10.1.0.2", "dhcp", "ack", "server_id", "10.1.0.2")
-	expect(t, "bindings", h.bindings(), []string{
-		"host-01 192.168.9.20 [0s,open) c=0",
-		"host-03 10.1.0.2 [2m0s,open) c=0",
-	})
+	expect(t, "bindings", h.bindings(), []string{"host-02 10.1.0.2 [2m0s,open) c=0"})
 	expect(t, "servers", h.servers(), []string{
-		`"192.168.9.2" "" 00:15:5d:00:00:02 192.168.9.2 unchecked {} host-02`,
-		`"10.1.0.2" "" 00:15:5d:00:00:03 10.1.0.2 unchecked {} host-03`,
+		`"192.168.9.2" "" 00:15:5d:00:00:02 192.168.9.2 unchecked {} host-01`,
+		`"10.1.0.2" "" 00:15:5d:00:00:03 10.1.0.2 unchecked {} host-02`,
 	})
+	// A known client: the lease ACK still does not refresh it.
+	h.obs(3*time.Minute, observation.PassiveARP, "eth1", plc, "10.1.0.50")
+	h.obs(time.Hour, observation.PassiveDHCPLease, "eth1", plc, "10.1.0.51")
+	if got := h.query(`SELECT last_seen FROM hosts WHERE mac = '`+plc+`'`, scanText); got[0] != fmt.Sprint(ms(h.at(3*time.Minute))) {
+		t.Errorf("the lease refreshed the client: last_seen %v", got)
+	}
+	if n := len(h.bindings()); n != 2 {
+		t.Errorf("the lease bound an address: %v", h.bindings())
+	}
 }
 
 func TestDHCPStatus(t *testing.T) {

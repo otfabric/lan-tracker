@@ -26,7 +26,8 @@ If an ADR and a specification disagree, stop and ask (`AGENTS.md` §2).
 | [0005](0005-host-is-mac-per-interface.md) | A host is one MAC on one interface, keyed by a UUID; never merged or split | Accepted |
 | [0006](0006-systemd-type-notify.md) | systemd `Type=notify` in the foreground with a watchdog | Accepted |
 | [0007](0007-root-with-cap-net-raw-bounding-set.md) | Run as root with `CAP_NET_RAW` as the only capability | Accepted |
-| [0008](0008-active-discovery-safety-envelope.md) | Active discovery inside a fixed OT safety envelope | Accepted |
+| [0008](0008-active-discovery-safety-envelope.md) | Active discovery inside a fixed OT safety envelope | Accepted; UDP probes and packet budget superseded by 0012 |
 | [0009](0009-operator-changes-through-the-daemon.md) | Operator changes travel through the bus to the correlator | Accepted |
 | [0010](0010-precomputed-oui-table.md) | The OUI table is precomputed and searched in place | Accepted |
-| [0011](0011-active-identification-probes.md) | Opt-in identification probes inside the safety envelope | Accepted |
+| [0011](0011-active-identification-probes.md) | Opt-in identification probes inside the safety envelope | Superseded by 0012 |
+| [0012](0012-connectivity-tracker-scope.md) | A connectivity tracker with history, without identification; probe starts as the rate contract | Accepted |

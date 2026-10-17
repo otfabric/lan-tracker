@@ -1,4 +1,4 @@
-version: 1
+version: 2
 interfaces:
   - name: eth1
     prefixes: [192.168.110.0/24]            # replaces the interface manager

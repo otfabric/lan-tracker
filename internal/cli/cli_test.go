@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const validConfig = `version: 1
+const validConfig = `version: 2
 interfaces:
   - name: eth1
     active: { enabled: true, networks: [192.168.110.0/24], exclude: [192.168.110.1] }
@@ -38,7 +38,7 @@ func writeFile(t *testing.T, content string) string {
 
 func TestCommands(t *testing.T) {
 	valid := writeFile(t, validConfig)
-	invalid := writeFile(t, "version: 1\ninterfaces: []\nactive: { jitter: 2 }\n")
+	invalid := writeFile(t, "version: 2\ninterfaces: []\nactive: { jitter: 2 }\n")
 	missing := filepath.Join(t.TempDir(), "nope.yaml")
 
 	tests := []struct {
@@ -49,24 +49,25 @@ func TestCommands(t *testing.T) {
 		wantStdout string
 		wantStderr string
 	}{
-		{"version", []string{"version"}, nil, ExitOK, "lan-sentinel dev", ""},
+		{"version", []string{"version"}, nil, ExitOK, "lan-tracker dev", ""},
 		{"version json", []string{"version", "-o", "json"}, nil, ExitOK, `"platform": "` + runtime.GOOS + "/" + runtime.GOARCH, ""},
 		{"unknown flag", []string{"--bogus"}, nil, ExitUsage, "", "unknown flag: --bogus"},
 		{"unknown command", []string{"frobnicate"}, nil, ExitUsage, "", "unknown command"},
 		{"bad output format", []string{"version", "-o", "xml"}, nil, ExitUsage, "", "invalid --output"},
 		{"unsupported output format", []string{"version", "-o", "csv"}, nil, ExitUsage, "", "not supported by this command"},
 		{"extra args", []string{"version", "extra"}, nil, ExitUsage, "", "unknown command"},
-		{"validate ok", []string{"config", "validate", "--config", valid}, nil, ExitOK, "Estimated maximum probe rate: 20 pps", ""},
+		{"validate ok", []string{"config", "validate", "--config", valid}, nil, ExitOK, "Estimated maximum probe start rate: 5/s (kernel TCP packets come on top)", ""},
+		{"validate legacy env", []string{"config", "validate", "--config", valid}, []string{"LAN_SENTINEL_ACTIVE_DISABLED=1"}, ExitError, "", "rename it to LAN_TRACKER_ACTIVE_DISABLED"},
 		{"validate quiet", []string{"config", "validate", "--config", valid, "--quiet"}, nil, ExitOK, "", ""},
 		{"validate invalid", []string{"config", "validate", "--config", invalid}, nil, ExitError, "", "active.jitter: must be between 0 and 0.5"},
 		{"validate lists every error", []string{"config", "validate", "--config", invalid}, nil, ExitError, "", "interfaces: at least one interface"},
 		{"validate missing file", []string{"config", "validate", "--config", missing}, nil, ExitError, "", "no such file"},
-		{"validate via env path", []string{"config", "validate"}, []string{"LAN_SENTINEL_CONFIG=" + valid}, ExitOK, "is valid", ""},
-		{"validate bad env", []string{"config", "validate", "--config", valid}, []string{"LAN_SENTINEL_NOPE=1"}, ExitError, "", "LAN_SENTINEL_NOPE: unknown environment variable"},
-		{"show yaml", []string{"config", "show", "--config", valid}, nil, ExitOK, "max_packets_per_second: 20", ""},
+		{"validate via env path", []string{"config", "validate"}, []string{"LAN_TRACKER_CONFIG=" + valid}, ExitOK, "is valid", ""},
+		{"validate bad env", []string{"config", "validate", "--config", valid}, []string{"LAN_TRACKER_NOPE=1"}, ExitError, "", "LAN_TRACKER_NOPE: unknown environment variable"},
+		{"show yaml", []string{"config", "show", "--config", valid}, nil, ExitOK, "max_starts_per_second: 5", ""},
 		{"show sources csv", []string{"config", "show", "--sources", "-o", "csv", "--config", valid, "--db", "/tmp/x.db"}, nil, ExitOK, "storage.path,/tmp/x.db,flag --db", ""},
-		{"show sources env", []string{"config", "show", "--sources", "--config", valid}, []string{"LAN_SENTINEL_ACTIVE_JITTER=0.2"}, ExitOK, "env LAN_SENTINEL_ACTIVE_JITTER", ""},
-		{"show invalid still prints", []string{"config", "show", "--config", invalid}, nil, ExitError, "version: 1", "invalid configuration"},
+		{"show sources env", []string{"config", "show", "--sources", "--config", valid}, []string{"LAN_TRACKER_ACTIVE_JITTER=0.2"}, ExitOK, "env LAN_TRACKER_ACTIVE_JITTER", ""},
+		{"show invalid still prints", []string{"config", "show", "--config", invalid}, nil, ExitError, "version: 2", "invalid configuration"},
 		{"daemon run invalid", []string{"daemon", "run", "--config", invalid}, nil, ExitError, "", "invalid configuration"},
 	}
 	for _, tt := range tests {
@@ -94,9 +95,9 @@ func TestValidateJSON(t *testing.T) {
 		t.Fatalf("exit = %d", code)
 	}
 	var got struct {
-		Valid               bool    `json:"valid"`
-		MaxPacketsPerSecond float64 `json:"max_packets_per_second"`
-		Interfaces          []struct {
+		Valid              bool    `json:"valid"`
+		MaxStartsPerSecond float64 `json:"max_starts_per_second"`
+		Interfaces         []struct {
 			Name     string   `json:"name"`
 			Networks []string `json:"networks"`
 		} `json:"interfaces"`
@@ -104,7 +105,36 @@ func TestValidateJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("json: %v\n%s", err, stdout)
 	}
-	if !got.Valid || got.MaxPacketsPerSecond != 20 || got.Interfaces[0].Networks[0] != "192.168.110.0/24" {
+	if !got.Valid || got.MaxStartsPerSecond != 5 || got.Interfaces[0].Networks[0] != "192.168.110.0/24" {
 		t.Errorf("summary = %+v", got)
+	}
+}
+
+// config convert prints the LAN Tracker file and the report, writes
+// nothing, and exits 2 while the result does not validate.
+func TestConfigConvert(t *testing.T) {
+	legacy := "../config/testdata/lan-sentinel-v1.yaml"
+	code, out, stderr := run(t, nil, "config", "convert", legacy)
+	if code != ExitOK || !strings.Contains(out, "\nversion: 2\n") || strings.Contains(out, "identify") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, stderr)
+	}
+	for _, want := range []string{"Removed:", "active.udp", "Changed:", "active.max_packets_per_second: 20 → default",
+		"Review:", "active discovery is off on eth1"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("report lacks %q:\n%s", want, stderr)
+		}
+	}
+	if code, out, _ := run(t, nil, "-o", "json", "config", "convert", legacy); code != ExitOK || !strings.Contains(out, `"removed"`) {
+		t.Errorf("json: exit %d %s", code, out)
+	}
+	bad := writeFile(t, "version: 1\ninterfaces: [{name: eth0}]\nactive: {tcp: {enabled: true, targets: []}}\n")
+	if code, _, stderr := run(t, nil, "config", "convert", bad); code != ExitError || !strings.Contains(stderr, "does not validate yet") {
+		t.Errorf("invalid result: exit %d %s", code, stderr)
+	}
+	for _, args := range [][]string{{"config", "convert", writeFile(t, validConfig)}, {"config", "convert", "/nonexistent.yaml"},
+		{"-o", "csv", "config", "convert", legacy}} {
+		if code, _, _ := run(t, nil, args...); code == ExitOK {
+			t.Errorf("%v: exit 0", args)
+		}
 	}
 }

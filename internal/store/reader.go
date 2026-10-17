@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"lan-sentinel/migrations"
+	"github.com/otfabric/lan-tracker/migrations"
 )
 
 // Reader runs the read-only queries behind the API and `--offline`

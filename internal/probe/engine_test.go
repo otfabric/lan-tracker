@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
 )
 
 func prefixes(ss ...string) []netip.Prefix {
@@ -160,7 +160,7 @@ func TestBackoff(t *testing.T) {
 		p     Protocol
 		ip    netip.Addr
 		sub   string
-	}{{"eth1", TCP, h, "80"}, {"eth1", ICMP, h, ""}, {"eth1", UDP, h, "ntp"}, {"eth2", TCP, h, "502"}, {"eth1", TCP, ip("10.0.0.6"), "502"}} {
+	}{{"eth1", TCP, h, "80"}, {"eth1", ICMP, h, ""}, {"eth2", TCP, h, "502"}, {"eth1", TCP, ip("10.0.0.6"), "502"}} {
 		if !b.Due(other.iface, other.p, other.ip, other.sub, iv, last, none) {
 			t.Errorf("back-off leaked to %+v", other)
 		}

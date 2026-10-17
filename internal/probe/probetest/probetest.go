@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/probe"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/probe"
 )
 
 // OwnMAC is the MAC of the probing interface.

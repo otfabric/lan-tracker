@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/store"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // DefaultTCPTimeout is the connect timeout of a port that is not among
 // active.tcp.targets (an operator scan of another port).
-const DefaultTCPTimeout = time.Second
+const DefaultTCPTimeout = config.DefaultTCPTimeout
 
 // Request is an operator scan (`scan plan`, `scan run`, docs/CLI.md).
 // Probes named here are added to the profile's; with none at all the scan
@@ -25,19 +26,17 @@ type Request struct {
 	ARP        bool           `json:"arp,omitempty"`
 	ICMP       bool           `json:"icmp,omitempty"`
 	TCP        []int          `json:"tcp,omitempty"`
-	UDP        []string       `json:"udp,omitempty"`
 	// AllowWide acknowledges a sweep of more than
 	// config.DefaultMaxSweepTargets addresses, after seeing its plan.
 	AllowWide bool `json:"allow_wide,omitempty"`
 }
 
-// Probes are the probes of a scan. ARP sweeps the networks; ICMP, TCP and
-// UDP probe the known hosts in them (and, in a run, the ARP responders).
+// Probes are the probes of a scan. ARP sweeps the networks; ICMP and TCP
+// probe the known hosts in them (and, in a run, the ARP responders).
 type Probes struct {
-	ARP  bool     `json:"arp"`
-	ICMP bool     `json:"icmp"`
-	TCP  []int    `json:"tcp,omitempty"`
-	UDP  []string `json:"udp,omitempty"`
+	ARP  bool  `json:"arp"`
+	ICMP bool  `json:"icmp"`
+	TCP  []int `json:"tcp,omitempty"`
 }
 
 // Plan is the dry run of a scan: what it would probe, at what rates, for
@@ -60,10 +59,15 @@ type InterfacePlan struct {
 	Interface    string         `json:"interface"`
 	Networks     []netip.Prefix `json:"networks"`
 	SweepTargets int            `json:"sweep_targets"` // ARP: addresses in the networks after excludes
-	KnownTargets int            `json:"known_targets"` // ICMP/TCP/UDP: known hosts in the networks
+	KnownTargets int            `json:"known_targets"` // ICMP/TCP: known hosts in the networks
 	Excluded     []string       `json:"excluded,omitempty"`
-	Reasons      []string       `json:"reasons,omitempty"`
-	Estimate     Estimate       `json:"estimate"`
+	// NoDirectRoute lists the known hosts a TCP check cannot reach on
+	// this interface, with why (routed via a gateway, no source address):
+	// they are not dialled, and the run records them as LOCAL_ERROR.
+	NoDirectRoute []string `json:"no_direct_route,omitempty"`
+	Reasons       []string `json:"reasons,omitempty"`
+	Estimate      Estimate `json:"estimate"`
+	tcpKnown      []netip.Addr
 
 	Sweep Sweep                 `json:"-"`
 	Known []netip.Addr          `json:"-"`
@@ -71,15 +75,11 @@ type InterfacePlan struct {
 	Link  Link                  `json:"-"`
 	Own   []netip.Addr          `json:"-"`
 	Excl  []config.AddrOrPrefix `json:"-"`
-	// IdentifyJobs is how many never-attempted identification exchanges
-	// this interface would send (ADR 0011).
-	IdentifyJobs    int `json:"identify_jobs,omitempty"`
-	IdentifyPackets int `json:"-"`
 }
 
 // Rates are the limits a scan runs under.
 type Rates struct {
-	GlobalPPS       float64              `json:"global_pps"`
+	GlobalStarts    float64              `json:"global_starts_per_second"`
 	Protocols       map[Protocol]float64 `json:"protocols"`
 	MaxConcurrent   int                  `json:"max_concurrent"`
 	TCPPerInterface int                  `json:"tcp_per_interface"`
@@ -87,8 +87,9 @@ type Rates struct {
 	TargetSpacingMS int64                `json:"target_spacing_ms"`
 }
 
-// Estimate is the expected work of a scan: probes per protocol, packets
-// sent (a TCP connect counts 3) and two durations: the estimated typical
+// Estimate is the expected work of a scan: probes per protocol, probe
+// starts (every probe is one; the kernel's TCP packets are not counted)
+// and two durations: the estimated typical
 // duration, where known hosts answer at once and only the ARP sweep waits
 // out its reply timeout (most swept addresses are empty), and the
 // estimated no-response duration, where nothing answers and every phase
@@ -97,9 +98,7 @@ type Estimate struct {
 	ARPRequests       int     `json:"arp_requests"`
 	ICMPEchoes        int     `json:"icmp_echoes"`
 	TCPConnects       int     `json:"tcp_connects"`
-	UDPProbes         int     `json:"udp_probes"`
-	IdentifyProbes    int     `json:"identify_probes,omitempty"`
-	Packets           int     `json:"packets"`
+	Starts            int     `json:"starts"`
 	TypicalSeconds    float64 `json:"typical_seconds"`
 	NoResponseSeconds float64 `json:"no_response_seconds"`
 }
@@ -108,9 +107,7 @@ func (e *Estimate) add(o Estimate) {
 	e.ARPRequests += o.ARPRequests
 	e.ICMPEchoes += o.ICMPEchoes
 	e.TCPConnects += o.TCPConnects
-	e.UDPProbes += o.UDPProbes
-	e.IdentifyProbes += o.IdentifyProbes
-	e.Packets += o.Packets
+	e.Starts += o.Starts
 	e.TypicalSeconds += o.TypicalSeconds
 	e.NoResponseSeconds += o.NoResponseSeconds
 }
@@ -123,10 +120,8 @@ type PlanInput struct {
 	Active store.ActiveState
 	Links  map[string]Link         // live interface addresses (own IPs are never probed)
 	Known  map[string][]netip.Addr // known IPv4 addresses per interface
-	// IdentifyJobs and IdentifyPackets are never-attempted identification
-	// exchanges per interface (ADR 0011): counted once, at BudgetCost each.
-	IdentifyJobs    map[string]int
-	IdentifyPackets map[string]int
+	// Route, when set, is the kernel's route lookup (online plans).
+	Route func(iface string, ip netip.Addr) (platform.Route, error)
 }
 
 // Compute plans req. Every refusal reason is listed, not only the first.
@@ -135,7 +130,7 @@ func Compute(in PlanInput, req Request) Plan {
 	a := cfg.Active
 	limits := LimitsFrom(a)
 	p := Plan{Profile: req.Profile, Rates: Rates{
-		GlobalPPS: limits.GlobalPPS, Protocols: limits.Rates, MaxConcurrent: limits.MaxConcurrent,
+		GlobalStarts: limits.GlobalStarts, Protocols: limits.Rates, MaxConcurrent: limits.MaxConcurrent,
 		TCPPerInterface: limits.TCPPerInterface, TCPPerHost: limits.TCPPerHost,
 		TargetSpacingMS: limits.TargetSpacing.Milliseconds(),
 	}}
@@ -188,10 +183,11 @@ func Compute(in PlanInput, req Request) Plan {
 // assumptions explain the estimate of p.
 func assumptions(p Plan) []string {
 	pr := p.Probes
-	known := pr.ICMP || len(pr.TCP) > 0 || len(pr.UDP) > 0
+	known := pr.ICMP || len(pr.TCP) > 0
 	spacing := time.Duration(p.Rates.TargetSpacingMS) * time.Millisecond
-	out := []string{fmt.Sprintf("probes leave paced at the rates above, at most %g packets/s in all (a TCP connect counts 3), "+
-		"and at least %v apart per target; sending, connecting and answering take no time", p.Rates.GlobalPPS, spacing)}
+	out := []string{fmt.Sprintf("probes start paced at the rates above, at most %g starts/s in all, at least %v apart per target "+
+		"and at most %d in flight, each holding its slot while it waits for a reply; sending, connecting and answering take no time; "+
+		"the kernel's TCP handshake, retransmission and close packets are not counted", p.Rates.GlobalStarts, spacing, p.Rates.MaxConcurrent)}
 	switch {
 	case pr.ARP && known:
 		out = append(out, "typical: known hosts answer at once; most swept addresses are empty, so the ARP sweep waits its 1s reply timeout once, after its last request")
@@ -212,12 +208,9 @@ func assumptions(p Plan) []string {
 			waits = append(waits, fmt.Sprintf("tcp/%d %v", t.Port, t.Timeout.D()))
 		}
 	}
-	for _, u := range pr.UDP {
-		waits = append(waits, "udp/"+u+" "+DefaultReplyTimeout.String())
-	}
 	out = append(out, "no-response: nothing answers, so every phase waits out its reply timeout once ("+strings.Join(waits, ", ")+")")
 	if pr.ARP && known {
-		out = append(out, "ICMP, TCP and UDP counts use the hosts known now; hosts that first answer the sweep are probed too, which adds to a run")
+		out = append(out, "ICMP and TCP counts use the hosts known now; hosts that first answer the sweep are probed too, which adds to a run")
 	}
 	return out
 }
@@ -238,16 +231,16 @@ func joinNames(names []string) string {
 
 // probesOf merges the profile with the request's own probes.
 func probesOf(cfg *config.Config, req Request, refuse func(string, ...any)) Probes {
-	pr := Probes{ARP: req.ARP, ICMP: req.ICMP, TCP: slices.Clone(req.TCP), UDP: slices.Clone(req.UDP)}
+	pr := Probes{ARP: req.ARP, ICMP: req.ICMP, TCP: slices.Clone(req.TCP)}
 	if req.Profile != "" {
 		prof, ok := cfg.Profiles[req.Profile]
 		if !ok {
 			refuse("unknown profile %q", req.Profile)
 		}
 		pr.ARP, pr.ICMP = pr.ARP || prof.ARP, pr.ICMP || prof.ICMP
-		pr.TCP, pr.UDP = append(pr.TCP, prof.TCP...), append(pr.UDP, prof.UDP...)
+		pr.TCP = append(pr.TCP, prof.TCP...)
 	}
-	if !pr.ARP && !pr.ICMP && len(pr.TCP) == 0 && len(pr.UDP) == 0 {
+	if !pr.ARP && !pr.ICMP && len(pr.TCP) == 0 {
 		pr.ARP = true
 	}
 	slices.Sort(pr.TCP)
@@ -255,13 +248,6 @@ func probesOf(cfg *config.Config, req Request, refuse func(string, ...any)) Prob
 	for _, port := range pr.TCP {
 		if port < 1 || port > 65535 {
 			refuse("TCP port %d is out of range", port)
-		}
-	}
-	slices.Sort(pr.UDP)
-	pr.UDP = slices.Compact(pr.UDP)
-	for _, u := range pr.UDP {
-		if !slices.Contains(config.UDPProbeNames, u) {
-			refuse("unknown UDP probe %q (known: %v)", u, config.UDPProbeNames)
 		}
 	}
 	return pr
@@ -305,13 +291,27 @@ func planInterface(cfg *config.Config, in PlanInput, name string, req Request, p
 				ip.SweepTargets, config.DefaultMaxSweepTargets))
 		}
 	}
-	if pr.ICMP || len(pr.TCP) > 0 || len(pr.UDP) > 0 {
+	if pr.ICMP || len(pr.TCP) > 0 {
 		ip.Known = KnownTargets(in.Known[name], ip.Networks, ip.Excl, ip.Own)
 		ip.KnownTargets = len(ip.Known)
 	}
 	ip.TCP = tcpTargets(cfg, pr.TCP)
-	ip.IdentifyJobs, ip.IdentifyPackets = in.IdentifyJobs[name], in.IdentifyPackets[name]
-	if ip.SweepTargets == 0 && ip.KnownTargets == 0 && ip.IdentifyJobs == 0 {
+	ip.tcpKnown = ip.Known
+	if len(ip.TCP) > 0 && in.Route != nil {
+		ip.tcpKnown = nil
+		for _, k := range ip.Known {
+			rt, err := in.Route(name, k)
+			switch {
+			case err != nil:
+				ip.NoDirectRoute = append(ip.NoDirectRoute, k.String()+": no route via "+name)
+			case !rt.Direct(name):
+				ip.NoDirectRoute = append(ip.NoDirectRoute, k.String()+": "+rt.Problem(name))
+			default:
+				ip.tcpKnown = append(ip.tcpKnown, k)
+			}
+		}
+	}
+	if ip.SweepTargets == 0 && ip.KnownTargets == 0 {
 		ip.Reasons = append(ip.Reasons, "no targets left")
 	}
 	ip.Estimate = estimate(LimitsFrom(cfg.Active), ip, pr)
@@ -347,60 +347,88 @@ func tcpTargets(cfg *config.Config, ports []int) []config.TCPTarget {
 // goes at the steady pace the simulation reached.
 const simSweep = 20000
 
-// estimate counts the probes of one interface and simulates their pacing
-// in the order a run sends them: the ARP sweep, then ICMP, TCP port by
-// port and UDP probe by probe, the known hosts in the same order in every
-// phase.
+// estimate counts the probes of one interface and simulates them in the
+// order and phases a run sends them: the ARP sweep (known hosts first),
+// then ICMP, then TCP port by port, the known hosts in every phase. Every
+// probe holds a concurrency slot for its reply wait, so with few slots an
+// unanswered sweep runs below its start rate. Typical: the known hosts
+// answer at once, the other swept addresses wait out the 1 s reply
+// timeout; no-response: every probe waits out its timeout.
 func estimate(limits Limits, ip InterfacePlan, pr Probes) Estimate {
 	var e Estimate
-	var sweep, rest []SimProbe
-	var typical, worst time.Duration
-	phase := func(p Protocol, targets []netip.Addr, wait time.Duration) {
-		for _, t := range targets {
-			rest = append(rest, SimProbe{Protocol: p, Interface: ip.Interface, Target: t})
-		}
-		if len(targets) > 0 {
-			worst += wait
-		}
+	type phaseOf struct {
+		p             Protocol
+		targets       []netip.Addr
+		typical, wait time.Duration
+	}
+	var sweep []netip.Addr
+	known := map[netip.Addr]bool{}
+	for _, t := range ip.Known {
+		known[t] = true
 	}
 	if pr.ARP && ip.SweepTargets > 0 {
 		e.ARPRequests = ip.SweepTargets
-		for _, t := range ip.Sweep.First(simSweep) {
-			sweep = append(sweep, SimProbe{Protocol: ARP, Interface: ip.Interface, Target: t})
+		for _, t := range ip.Known {
+			if ip.Sweep.Contains(t) {
+				sweep = append(sweep, t)
+			}
 		}
-		typical, worst = DefaultReplyTimeout, DefaultReplyTimeout
+		for _, t := range ip.Sweep.First(simSweep) {
+			if !known[t] && len(sweep) < simSweep {
+				sweep = append(sweep, t)
+			}
+		}
 	}
+	var phases []phaseOf
 	if pr.ICMP {
 		e.ICMPEchoes = len(ip.Known)
-		phase(ICMP, ip.Known, DefaultReplyTimeout)
+		phases = append(phases, phaseOf{ICMP, ip.Known, 0, DefaultReplyTimeout})
 	}
 	for _, t := range ip.TCP {
-		e.TCPConnects += len(ip.Known)
-		phase(TCP, ip.Known, t.Timeout.D())
+		e.TCPConnects += len(ip.tcpKnown)
+		phases = append(phases, phaseOf{TCP, ip.tcpKnown, 0, t.Timeout.D()})
 	}
-	for range pr.UDP {
-		e.UDPProbes += len(ip.Known)
-		phase(UDP, ip.Known, DefaultReplyTimeout)
+	e.Starts = e.ARPRequests + e.ICMPEchoes + e.TCPConnects
+	if e.Starts == 0 {
+		return e
 	}
-	e.IdentifyProbes = ip.IdentifyJobs
-	e.Packets = e.ARPRequests + e.ICMPEchoes + e.UDPProbes + TCPTokens*e.TCPConnects + ip.IdentifyPackets
-	var pace time.Duration
-	switch {
-	case e.ARPRequests > len(sweep):
+	simulate := func(worst bool) time.Duration {
+		hold := func(t netip.Addr, typical, wait time.Duration) time.Duration {
+			if worst {
+				return wait
+			}
+			return typical
+		}
+		var arp []SimProbe
+		for _, t := range sweep {
+			h := DefaultReplyTimeout
+			if known[t] && !worst {
+				h = 0
+			}
+			arp = append(arp, SimProbe{Protocol: ARP, Interface: ip.Interface, Target: t, Hold: h})
+		}
+		var rest [][]SimProbe
+		for _, ph := range phases {
+			var probes []SimProbe
+			for _, t := range ph.targets {
+				probes = append(probes, SimProbe{Protocol: ph.p, Interface: ip.Interface, Target: t, Hold: hold(t, ph.typical, ph.wait)})
+			}
+			rest = append(rest, probes)
+		}
+		if e.ARPRequests <= len(arp) {
+			return Simulate(limits, time.Unix(0, 0), append([][]SimProbe{arp}, rest...)...)
+		}
 		// A long sweep: simulate its start, extrapolate its steady pace,
 		// then the known-host phases on their own.
-		half := len(sweep) / 2
-		t := Simulate(limits, time.Unix(0, 0), sweep)
-		step := float64(t-Simulate(limits, time.Unix(0, 0), sweep[:half])) / float64(len(sweep)-half)
-		pace = t + time.Duration(step*float64(e.ARPRequests-len(sweep)))
+		half := len(arp) / 2
+		t := Simulate(limits, time.Unix(0, 0), arp)
+		step := float64(t-Simulate(limits, time.Unix(0, 0), arp[:half])) / float64(len(arp)-half)
+		d := t + time.Duration(step*float64(e.ARPRequests-len(arp)))
 		if len(rest) > 0 {
-			pace += interval(1, limits.Rates[ARP]) + Simulate(limits, time.Unix(0, 0), rest)
+			d += Simulate(limits, time.Unix(0, 0), rest...)
 		}
-	case len(sweep)+len(rest) > 0:
-		pace = Simulate(limits, time.Unix(0, 0), append(sweep, rest...))
+		return d
 	}
-	if e.Packets > 0 {
-		e.TypicalSeconds, e.NoResponseSeconds = (pace + typical).Seconds(), (pace + worst).Seconds()
-	}
+	e.TypicalSeconds, e.NoResponseSeconds = simulate(false).Seconds(), simulate(true).Seconds()
 	return e
 }

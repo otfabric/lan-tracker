@@ -6,17 +6,17 @@ import (
 	"sync"
 	"time"
 
-	"lan-sentinel/internal/collect/capture"
-	"lan-sentinel/internal/collect/capture/decoders"
-	"lan-sentinel/internal/collect/neighbor"
-	"lan-sentinel/internal/collect/replay"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/correlate"
-	"lan-sentinel/internal/events"
-	"lan-sentinel/internal/identify"
-	"lan-sentinel/internal/iface"
-	"lan-sentinel/internal/observation"
-	"lan-sentinel/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/collect/capture"
+	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
+	"github.com/otfabric/lan-tracker/internal/collect/neighbor"
+	"github.com/otfabric/lan-tracker/internal/collect/replay"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/correlate"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/iface"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
 )
 
 // drainTimeout bounds how long shutdown waits for the correlator to process
@@ -71,6 +71,17 @@ func (d *Daemon) startPipeline(ctx context.Context) error {
 	}()
 
 	collCtx, collCancel := context.WithCancel(ctx)
+	if !cfg.ReplayMode() {
+		// Passive collectors leaving and regaining running are collection
+		// gaps the correlator records (OBSERVATION_GAP).
+		d.registry.Watch(func(s platform.CollectorStatus) {
+			if s.Collector != platform.CollectorCapture && s.Collector != platform.CollectorNeighbor || collCtx.Err() != nil {
+				return
+			}
+			_ = d.bus.PublishCollector(collCtx, observation.CollectorState{Time: s.Since, Interface: s.Interface,
+				Collector: s.Collector, State: string(s.State), Error: s.Error})
+		})
+	}
 	var wg sync.WaitGroup
 	start := func(name string, run func(context.Context) error) {
 		wg.Add(1)

@@ -30,4 +30,4 @@ formatters:
     - goimports
   settings:
     goimports:
-      local-prefixes: [lan-sentinel]
+      local-prefixes: [github.com/otfabric/lan-tracker]

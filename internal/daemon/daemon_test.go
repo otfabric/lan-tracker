@@ -21,13 +21,13 @@ import (
 
 	"github.com/gopacket/gopacket/layers"
 
-	"lan-sentinel/internal/api"
-	"lan-sentinel/internal/clock"
-	"lan-sentinel/internal/config"
-	"lan-sentinel/internal/platform"
-	"lan-sentinel/internal/platform/fake"
-	"lan-sentinel/internal/store"
-	"lan-sentinel/test/frames"
+	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/platform/fake"
+	"github.com/otfabric/lan-tracker/internal/store"
+	"github.com/otfabric/lan-tracker/test/frames"
 )
 
 type syncBuffer struct {
@@ -106,7 +106,7 @@ type harness struct {
 }
 
 func testConfig(dir, level, extra string) string {
-	return `version: 1
+	return `version: 2
 interfaces:
   - name: eth1
     active: { enabled: true, networks: [192.168.110.0/24] }
@@ -258,8 +258,7 @@ func TestStartupAndShutdown(t *testing.T) {
 	want := map[string]platform.State{
 		"capture": platform.StateRunning, "interface": platform.StateRunning, "neighbor": platform.StateRunning,
 		// Enabled probe engines run; the others are reported disabled.
-		"arp": platform.StateRunning, "tcp": platform.StateRunning, "icmp": platform.StateDisabled, "udp": platform.StateDisabled,
-		"identify": platform.StateDisabled,
+		"arp": platform.StateRunning, "tcp": platform.StateRunning, "icmp": platform.StateDisabled, "names": platform.StateDisabled,
 	}
 	got := h.waitCollectors(len(want))
 	for _, c := range got {
@@ -293,7 +292,7 @@ func TestStartupAndShutdown(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.dir, "api.sock")); !os.IsNotExist(err) {
 		t.Errorf("API socket left behind: %v", err)
 	}
-	for _, msg := range []string{"lan-sentinel starting", "database ready", "lan-sentinel stopped"} {
+	for _, msg := range []string{"lan-tracker starting", "database ready", "lan-tracker stopped"} {
 		if !strings.Contains(h.log.String(), msg) {
 			t.Errorf("log missing %q", msg)
 		}
@@ -354,7 +353,7 @@ func TestWatchdogPingsWhileStoreResponds(t *testing.T) {
 func TestInvalidConfigFailsStartup(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(p, []byte("version: 1\ninterfaces: []\nbogus: 1\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("version: 2\ninterfaces: []\nbogus: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := New(Options{Load: config.LoadOptions{Path: p}, Stderr: &syncBuffer{}})
@@ -412,6 +411,11 @@ func TestLivePipeline(t *testing.T) {
 	h.capt.Source("eth1").Inject(h.sim.Now(), frames.MDNS4(mac, "192.168.110.50",
 		[]layers.DNSResourceRecord{frames.A("plc-7.local", "192.168.110.50")}, nil))
 	h.waitLog("HOSTNAME_ADDED eth1 00:1b:1b:12:34:56 mdns:plc-7.local")
+	// The capture failing and recovering is a collection gap in history.
+	h.d.registry.Set("eth1", platform.CollectorCapture, "fake", platform.StateFailed, errors.New("ring lost"))
+	h.sim.Advance(time.Minute)
+	h.d.registry.Set("eth1", platform.CollectorCapture, "fake", platform.StateRunning, nil)
+	h.waitLog("OBSERVATION_GAP eth1")
 	h.stop()
 
 	db := filepath.Join(h.dir, "data", "hosts.db")
@@ -424,7 +428,7 @@ func TestLivePipeline(t *testing.T) {
 		{`SELECT source FROM address_sources ORDER BY source`, []string{"kernel_neighbor", "passive_mdns"}},
 		{`SELECT prefix FROM context_prefixes WHERE ended_at IS NULL`, []string{"192.168.110.0/24"}},
 		// The interface manager and the neighbour collector run concurrently.
-		{`SELECT type FROM events ORDER BY type`, []string{"HOSTNAME_ADDED", "HOST_DISCOVERED", "SUBNET_CHANGED"}},
+		{`SELECT type FROM events ORDER BY type`, []string{"HOSTNAME_ADDED", "HOST_DISCOVERED", "OBSERVATION_GAP", "SUBNET_CHANGED"}},
 		{`SELECT json_extract(meta_json, '$.neighbor_state') FROM observations WHERE source = 'kernel_neighbor'`, []string{"REACHABLE"}},
 	}
 	for _, tt := range tests {
@@ -444,7 +448,7 @@ func TestReplayExitsWhenDone(t *testing.T) {
 	}
 	cfgPath := filepath.Join(dir, "config.yaml")
 	db := filepath.Join(dir, "hosts.db")
-	cfg := "version: 1\ninterfaces:\n  - name: eth1\n    prefixes: [192.168.110.0/24]\n    replay: { file: " + golden +
+	cfg := "version: 2\ninterfaces:\n  - name: eth1\n    prefixes: [192.168.110.0/24]\n    replay: { file: " + golden +
 		" }\nreplay: { exit_when_done: true }\nstorage: { path: " + db + " }\napi: { socket: " + filepath.Join(dir, "api.sock") + " }\nlogging: { format: text }\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -491,7 +495,7 @@ func TestCorruptDatabaseRecreated(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(dir, "config.yaml")
-	cfg := "version: 1\ninterfaces:\n  - name: eth1\n    prefixes: [192.168.110.0/24]\n    replay: { file: " + golden +
+	cfg := "version: 2\ninterfaces:\n  - name: eth1\n    prefixes: [192.168.110.0/24]\n    replay: { file: " + golden +
 		" }\nreplay: { exit_when_done: true }\nstorage: { path: " + db + " }\napi: { socket: " + filepath.Join(dir, "api.sock") + " }\nlogging: { format: text }\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -528,7 +532,7 @@ func TestStatusAndMetrics(t *testing.T) {
 	listen := l.Addr().String()
 	_ = l.Close()
 	mac, _ := net.ParseMAC("00:1b:1b:12:34:56")
-	cfg := `version: 1
+	cfg := `version: 2
 interfaces:
   - name: eth1
 storage: { path: $DIR/hosts.db }
@@ -570,16 +574,16 @@ logging: { format: text }
 	resp.Body.Close()
 	m := string(body)
 	for _, want := range []string{
-		`lan_sentinel_hosts{interface="eth1",presence="ACTIVE"} 1`,
-		`lan_sentinel_events_total{type="HOST_DISCOVERED"} 1`,
-		`lan_sentinel_observations_total{source="kernel_neighbor"} 1`,
-		`lan_sentinel_observations_unbound_total{source="tcp_connect"} 0`,
-		"lan_sentinel_bus_dropped_total 0",
-		`lan_sentinel_capture_drops_total{interface="eth1"} 0`,
-		"lan_sentinel_db_size_bytes ",
-		"lan_sentinel_active_disabled 0",
-		`lan_sentinel_collector_up{interface="eth1",collector="neighbor"} 1`,
-		`lan_sentinel_dhcp_servers{interface="eth1",status="unchecked"} 0`,
+		`lan_tracker_hosts{interface="eth1",presence="ACTIVE"} 1`,
+		`lan_tracker_events_total{type="HOST_DISCOVERED"} 1`,
+		`lan_tracker_observations_total{source="kernel_neighbor"} 1`,
+		`lan_tracker_observations_unbound_total{source="tcp_connect"} 0`,
+		"lan_tracker_bus_dropped_total 0",
+		`lan_tracker_capture_drops_total{interface="eth1"} 0`,
+		"lan_tracker_db_size_bytes ",
+		"lan_tracker_active_disabled 0",
+		`lan_tracker_collector_up{interface="eth1",collector="neighbor"} 1`,
+		`lan_tracker_dhcp_servers{interface="eth1",status="unchecked"} 0`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("metrics lack %q", want)
@@ -594,7 +598,7 @@ logging: { format: text }
 func TestActiveDisabledByEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	cfg := "version: 1\ninterfaces:\n  - name: eth1\nstorage: { path: " + filepath.Join(dir, "hosts.db") + " }\napi: { socket: " +
+	cfg := "version: 2\ninterfaces:\n  - name: eth1\nstorage: { path: " + filepath.Join(dir, "hosts.db") + " }\napi: { socket: " +
 		filepath.Join(dir, "api.sock") + " }\nlogging: { format: text }\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -615,7 +619,7 @@ func TestActiveDisabledByEnvironment(t *testing.T) {
 	}
 	var sb strings.Builder
 	for _, f := range d.gather(context.Background()) {
-		if f.Name == "lan_sentinel_active_disabled" {
+		if f.Name == "lan_tracker_active_disabled" {
 			fmt.Fprint(&sb, f.Samples[0].Value)
 		}
 	}
