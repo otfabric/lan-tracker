@@ -71,7 +71,7 @@ sudo test ! -s /data/lan-tracker/hosts.db-wal || echo "WAL not empty: start and 
 sudo cp -a /data/lan-tracker/hosts.db /data/lan-tracker/hosts.db.pre-$(lan-tracker version --quiet)
 ```
 
-Then run the commands of step 2: they install the new binary and unit, keep the site's config and start the daemon, which migrates the database. `sudo lan-tracker daemon status` shows the running version. New settings appear in the release's `config.yaml`; compare it with the site's (`sudo diff config.yaml /etc/lan-tracker/config.yaml`).
+Then run the commands of step 2: they install the new binary and unit, keep the site's config and start the daemon, which migrates the database. `sudo lan-tracker daemon status` shows the running version. New settings appear in the release's `config.yaml`; compare it with the site's (`sudo diff config.yaml /etc/lan-tracker/config.yaml`). [`RELEASE.md`](../RELEASE.md) lists any change to CLI output that scripts read, such as a new column.
 
 To roll back, stop the service, put the previous binary and the copied database back, and start it. `lan-tracker --offline` refuses a database whose schema differs from the binary's until the daemon has migrated it.
 

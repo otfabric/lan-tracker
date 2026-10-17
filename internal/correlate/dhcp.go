@@ -119,6 +119,12 @@ func (c *Correlator) dhcpServerReply(ctx context.Context, h *host, m *observatio
 		if m.SubnetMask.IsValid() {
 			advertised["subnet_mask"] = m.SubnetMask.String()
 		}
+		if m.Domain != "" {
+			advertised["domain"] = m.Domain
+		}
+		if len(m.Search) > 0 {
+			advertised["search"] = strings.Join(m.Search, ",")
+		}
 	}
 	ip := ""
 	if o.IP.IsValid() {

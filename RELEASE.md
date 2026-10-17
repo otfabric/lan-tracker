@@ -1,5 +1,27 @@
 # lan-tracker Releases
 
+## v0.2.1
+
+**Date:** 2026-10-17
+**Previous release:** v0.2.0
+
+### Summary
+
+Patch release: the DHCP server record now keeps the **domain name** and **domain search list** a server hands out, next to its router, DNS servers and subnet mask. No change to the configuration or the schema.
+
+### Added
+
+- `dhcp_servers.config_json` and the API's `config` hold `domain` (option 15) and `search` (option 119, comma-separated) as last offered or assigned. An option a reply leaves out keeps its last value, so rows recorded by an earlier version pick the domain up at the server's next offer or ACK.
+- `lan-tracker dhcp servers` has a `DOMAIN` column between `MASK` and `LAST SEEN`; `-o json` shows the search list too.
+
+### Changed
+
+- **CSV and table output of `dhcp servers` gain a column** (`DOMAIN`, before `LAST SEEN`). Scripts that read its columns by position need updating; JSON output only gains keys.
+
+### Tests
+
+- `make check`, with the server configuration test, the CLI output tests and the user guide's DHCP output covering the new keys.
+
 ## v0.2.0
 
 **Date:** 2026-10-17

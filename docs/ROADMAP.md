@@ -1,6 +1,6 @@
 # LAN Tracker — Roadmap
 
-What is not done in the released code (v0.2.0, 17 Oct 2026): checks that need hardware or real sites, features that were decided against for now, known gaps in the tests and the product, and open questions. Everything the code does is specified in `REQUIREMENTS.md`, `DATA_MODEL.md`, `CLI.md`, `API.md` and `ARCHITECTURE.md`; this file is the one place for what it does not do yet.
+What is not done in the released code (v0.2.1, 17 Oct 2026): checks that need hardware or real sites, features that were decided against for now, known gaps in the tests and the product, and open questions. Everything the code does is specified in `REQUIREMENTS.md`, `DATA_MODEL.md`, `CLI.md`, `API.md` and `ARCHITECTURE.md`; this file is the one place for what it does not do yet.
 
 Everything below is built and tested only in the dev container, replay and the Docker suites (`make check`, `make test-net`, `make test-systemd`, `make soak`). Nothing has run on a board, on a real network or in a pilot. When an item is closed, remove it here and record the result where it says.
 
