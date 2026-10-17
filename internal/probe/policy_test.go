@@ -1,0 +1,96 @@
+package probe
+
+import (
+	"errors"
+	"net/netip"
+	"testing"
+
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/store"
+)
+
+func testConfig() *config.Config {
+	cfg := config.Defaults()
+	var excl config.AddrOrPrefix
+	_ = excl.UnmarshalText([]byte("192.168.110.1"))
+	var exclNet config.AddrOrPrefix
+	_ = exclNet.UnmarshalText([]byte("192.168.110.240/28"))
+	cfg.Interfaces = []config.InterfaceConfig{
+		{Name: "eth1", Active: config.InterfaceActive{
+			Enabled: true, Networks: []netip.Prefix{netip.MustParsePrefix("192.168.110.0/24")},
+			Exclude: []config.AddrOrPrefix{excl, exclNet},
+		}},
+		{Name: "eth0"},
+	}
+	cfg.Profiles = map[string]config.ProfileConfig{
+		"modbus": {ARP: true, TCP: []int{502}},
+		"icmp":   {ICMP: true},
+	}
+	cfg.Active.TCP.Targets = []config.TCPTarget{{Port: 502, Name: "modbus", Timeout: config.Duration(750e6)}}
+	return cfg
+}
+
+func TestConfigPolicy(t *testing.T) {
+	cfg := testConfig()
+	sw := NewSwitch(store.ActiveState{})
+	p := ConfigPolicy{Switch: sw, Config: func() *config.Config { return cfg }}
+	tests := []struct {
+		name   string
+		iface  string
+		target string
+		want   error
+	}{
+		{"allowed", "eth1", "192.168.110.20", nil},
+		{"unknown interface", "eth9", "192.168.110.20", ErrRefused},
+		{"active disabled on interface", "eth0", "192.168.110.20", ErrRefused},
+		{"ipv6", "eth1", "fe80::1", ErrRefused},
+		{"outside networks", "eth1", "192.168.111.20", ErrRefused},
+		{"excluded address", "eth1", "192.168.110.1", ErrRefused},
+		{"excluded range", "eth1", "192.168.110.245", ErrRefused},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := p.Check(tt.iface, ARP, netip.MustParseAddr(tt.target))
+			if !errors.Is(err, tt.want) || (tt.want == nil) != (err == nil) {
+				t.Errorf("Check = %v, want %v", err, tt.want)
+			}
+		})
+	}
+	ch := sw.Changed()
+	sw.Set(store.ActiveState{Disabled: true})
+	select {
+	case <-ch:
+	default:
+		t.Error("Changed not closed by Set")
+	}
+	if err := p.Check("eth1", ARP, netip.MustParseAddr("192.168.110.20")); !errors.Is(err, ErrDisabled) {
+		t.Errorf("Check with the kill switch = %v", err)
+	}
+	if !sw.Disabled() || !sw.State().Disabled {
+		t.Error("switch state")
+	}
+}
+
+// A name query may go only to the mDNS group (when mDNS queries are on)
+// or a configured resolver, and only with name queries enabled.
+func TestNamePolicy(t *testing.T) {
+	cfg := testConfig()
+	p := ConfigPolicy{Switch: NewSwitch(store.ActiveState{}), Config: func() *config.Config { return cfg }}
+	group, resolver := ip("224.0.0.251"), ip("8.8.8.8")
+	if err := p.Check("eth1", Name, group); !errors.Is(err, ErrRefused) {
+		t.Errorf("names disabled: %v", err)
+	}
+	cfg.Active.Names = config.NamesConfig{Enabled: true, MDNS: true, Resolvers: []netip.Addr{resolver}}
+	for target, ok := range map[netip.Addr]bool{group: true, resolver: true, ip("1.1.1.1"): false, ip("192.168.110.20"): false} {
+		if err := p.Check("eth1", Name, target); (err == nil) != ok {
+			t.Errorf("%s: %v", target, err)
+		}
+	}
+	cfg.Active.Names.MDNS = false
+	if err := p.Check("eth1", Name, group); err == nil {
+		t.Error("mDNS query allowed with mdns off")
+	}
+	if err := p.Check("eth0", Name, resolver); err == nil {
+		t.Error("name query on an interface without active discovery")
+	}
+}

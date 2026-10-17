@@ -1,0 +1,184 @@
+// Package storetest seeds databases for the read-side tests (store, api,
+// cli) from the golden reconstruction scenario.
+package storetest
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"log/slog"
+	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/otfabric/lan-tracker/internal/clock"
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/correlate"
+	"github.com/otfabric/lan-tracker/internal/events"
+	"github.com/otfabric/lan-tracker/internal/identify"
+	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/platform"
+	"github.com/otfabric/lan-tracker/internal/store"
+)
+
+// T0 is the golden scenario's start.
+var T0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+
+// Expected is the part of the golden scenario (test/golden) the read-side
+// tests use.
+type Expected struct {
+	Hosts   map[string]string `json:"hosts"`
+	Queries []struct {
+		Find     string    `json:"find"`
+		At       time.Time `json:"at"`
+		Conflict bool      `json:"conflict"`
+		Holders  []struct {
+			Host        string     `json:"host"`
+			FirstSeen   time.Time  `json:"first_seen"`
+			EndedAt     *time.Time `json:"ended_at"`
+			Unconfirmed bool       `json:"unconfirmed"`
+		} `json:"holders"`
+		Previous *struct {
+			Host string    `json:"host"`
+			At   time.Time `json:"at"`
+		} `json:"previous"`
+		Next *struct {
+			Host string    `json:"host"`
+			At   time.Time `json:"at"`
+		} `json:"next"`
+	} `json:"queries"`
+	Events  []struct{ Type, Host string } `json:"events"`
+	History []struct {
+		IP     string `json:"ip"`
+		Events []int  `json:"events"`
+	} `json:"history"`
+}
+
+// Seed replays the golden scenario in dir (with its tcp/502 result), plus
+// an mDNS name for B and an LLDP neighbour on eth0, through the correlator
+// into a new database. It returns the open store (closed at the end of the
+// test), its path and the expectations.
+func Seed(t testing.TB, dir string) (*store.Store, string, Expected) {
+	t.Helper()
+	var exp Expected
+	b, err := os.ReadFile(dir + "expected.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &exp); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(dir + "observations.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var obs []observation.Observation
+	if err := observation.ReadJSONL(f, func(o observation.Observation) error {
+		if o.Interface == "" {
+			o.Interface = "eth1"
+		}
+		obs = append(obs, o)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mac := func(s string) net.HardwareAddr { m, _ := net.ParseMAC(s); return m }
+	obs = append(obs,
+		observation.Observation{Time: T0.Add(4*time.Hour + time.Minute), Source: observation.PassiveMDNS, Interface: "eth1",
+			MAC: mac(exp.Hosts["B"]), IP: netip.MustParseAddr("192.168.110.50"), Hostname: "plc-b.local", NameType: observation.NameMDNS},
+		observation.Observation{Time: T0.Add(4*time.Hour + 2*time.Minute), Source: observation.PassiveLLDP, Interface: "eth0",
+			MAC: mac("00:1e:c9:00:00:01"), Hostname: "plant-sw-01", NameType: observation.NameLLDP},
+	)
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "hosts.db")
+	sim := clock.NewSim(obs[0].Time)
+	st, err := store.Open(ctx, store.Options{Path: path, Clock: sim})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Defaults()
+	cfg.Interfaces = []config.InterfaceConfig{{Name: "eth0"}, {Name: "eth1"}}
+	vendors, err := identify.Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.DiscardHandler)
+	c, err := correlate.New(ctx, correlate.Options{Store: st, Events: events.NewEngine(st, log, func() platform.ClockState { return platform.ClockSynced }), Vendors: vendors,
+		Clock: sim, Logger: log, Config: cfg, DataDriven: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Handle(ctx, observation.Message{Link: &observation.LinkState{Time: obs[0].Time, Interface: "eth1", Present: true, Up: true,
+		Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.110.0/24")}}})
+	for _, o := range obs {
+		sim.Set(o.Time)
+		c.Handle(ctx, observation.Message{Observation: o})
+	}
+	if err := st.Flush(ctx); err != nil || st.OpErrors() != 0 {
+		t.Fatalf("seed: %v, %d op errors", err, st.OpErrors())
+	}
+	return st, path, exp
+}
+
+// AddDHCPServers records two DHCP servers on eth1 in a seeded database: the
+// site's, allowed, and a rogue one without a server identifier, unexpected.
+func AddDHCPServers(t testing.TB, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO dhcp_servers (context_id, server_id, relay, mac, ip, status, config_json, first_seen, last_seen)
+			SELECT id, '192.168.110.1', '', '00:00:5e:00:01:01', '192.168.110.1', 'allowed',
+				'{"router":"192.168.110.1","dns":"192.168.110.1","subnet_mask":"255.255.255.0"}', ?, ? FROM network_contexts WHERE interface = 'eth1'
+			UNION ALL
+			SELECT id, '', '', '02:00:00:00:00:66', '192.168.110.66', 'unexpected', '{}', ?, ? FROM network_contexts WHERE interface = 'eth1'`,
+			T0.UnixMilli(), T0.Add(4*time.Hour).UnixMilli(), T0.Add(2*time.Hour).UnixMilli(), T0.Add(2*time.Hour).UnixMilli())
+		return err
+	})
+	if err == nil {
+		err = st.Flush(ctx)
+	}
+	if err != nil || st.OpErrors() != 0 {
+		t.Fatalf("dhcp servers: %v, %d op errors", err, st.OpErrors())
+	}
+}
+
+// AddDHCPLeases gives host A (00:1b:1b:aa:bb:01) on eth1 a lease history:
+// 192.168.110.51 at first, superseded at 3h30 by 192.168.110.52, still
+// open, which a renewal ACK extended; and the exchange of that renewal.
+func AddDHCPLeases(t testing.TB, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	ms := func(d time.Duration) int64 { return T0.Add(d).UnixMilli() }
+	err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO dhcp_leases (id, context_id, chaddr, host_id, ip, server_id, sender_mac, sender_ip, relay,
+				first_ack, last_ack, acks, lease_seconds, expires_at, t1_seconds, t2_seconds, t_derived, config_json, partial, ended_at, end_reason)
+			SELECT 1, context_id, mac, host_id, '192.168.110.51', '192.168.110.1', '00:00:5e:00:01:01', '192.168.110.1', '', ?, ?, 1, 3600, ?,
+				1800, 3150, 1, '{"dns":"192.168.110.1","gateway":"192.168.110.1","gateway_source":"option_3"}', 1, ?, 'superseded'
+				FROM hosts WHERE mac = '00:1b:1b:aa:bb:01'
+			UNION ALL
+			SELECT 2, context_id, mac, host_id, '192.168.110.52', '192.168.110.1', '00:00:5e:00:01:01', '192.168.110.1', '', ?, ?, 2, -1, NULL,
+				NULL, NULL, 0, '{"dns":"192.168.110.1,192.168.110.4"}', 0, NULL, NULL
+				FROM hosts WHERE mac = '00:1b:1b:aa:bb:01'`,
+			ms(time.Hour), ms(time.Hour), ms(2*time.Hour), ms(3*time.Hour+30*time.Minute),
+			ms(3*time.Hour+30*time.Minute), ms(4*time.Hour)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO dhcp_exchanges (context_id, xid, chaddr, host_id, first_seen, last_seen, messages, requested_ip,
+				offers_json, selected_server, outcome, visibility, lease_id)
+			SELECT context_id, 24158, mac, host_id, ?, ?, 'request(192.168.110.1) ack(192.168.110.1 192.168.110.52)', '192.168.110.52',
+				'[]', '192.168.110.1', 'ack', 'complete', 2 FROM hosts WHERE mac = '00:1b:1b:aa:bb:01'`, ms(4*time.Hour-time.Second), ms(4*time.Hour))
+		return err
+	})
+	if err == nil {
+		err = st.Flush(ctx)
+	}
+	if err != nil || st.OpErrors() != 0 {
+		t.Fatalf("dhcp leases: %v, %d op errors", err, st.OpErrors())
+	}
+}

@@ -1,0 +1,25 @@
+# OT Fabric LAN Tracker default configuration (Linux). Install: /etc/lan-tracker/config.yaml
+# Validate before rollout: lan-tracker config validate --config /etc/lan-tracker/config.yaml
+# Every key and its default: lan-tracker config show --sources
+# Active discovery stays off until an interface enables it; config.active-example.yaml
+# is the reviewed ARP + TCP profile.
+version: 1
+
+interfaces:
+  - name: eth0
+    passive: { enabled: true, promiscuous: false }   # promiscuous only on a mirror/SPAN port
+    active:  { enabled: false }                      # off until the networks are reviewed
+    # dhcp: { servers: [192.168.0.1] }               # expected DHCP server identifiers (option 54); others raise
+    #                                                # DHCP_SERVER_UNEXPECTED; [] expects none; unset: no verdict
+
+passive:
+  protocols: { arp: true, ipv4: true, ipv6: false, dhcp: true, mdns: true, dns: true, lldp: true }
+
+storage:
+  path: /data/lan-tracker/hosts.db
+
+api:
+  socket: /run/lan-tracker/api.sock
+  listen: ""            # e.g. 127.0.0.1:9734 to serve /metrics
+
+logging: { level: info, format: journald }

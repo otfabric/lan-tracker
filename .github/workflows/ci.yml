@@ -1,0 +1,65 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Every job runs the same make targets as a developer machine. Go, golangci-lint
+# and govulncheck come from the dev container (build/dev.Dockerfile).
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Codecov OIDC token exchange
+    steps:
+      - uses: actions/checkout@v7
+      - name: mod-verify, fmt-check, tidy-check, vet, lint, vuln, tests with race and coverage
+        run: make mod-verify check
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          files: coverage.out
+          flags: unittests
+          name: lan-tracker
+          fail_ci_if_error: false
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make fuzz FUZZTIME=30s
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Network integration tests (Docker, CAP_NET_RAW only)
+        run: make test-net
+      - name: systemd unit test (privileged container)
+        run: make test-systemd
+
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Static linux/amd64 and linux/arm64 binaries, capcheck and the release tarballs
+        run: make package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/

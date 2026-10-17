@@ -1,0 +1,121 @@
+name: release
+# Releases a new version from main: Actions → release → Run workflow, pick
+# the bump. The next version follows the highest vMAJOR.MINOR.PATCH tag
+# (build/next-version.sh); the first release is v0.1.0. RELEASE.md must
+# have a "## vX.Y.Z" section for the version: it is the release notes. The workflow runs
+# the same gates as CI on the commit, builds one tarball per target twice
+# (the checksums must match), then creates the annotated tag on that commit
+# and publishes the GitHub Release with the tarballs and SHA256SUMS
+# (NFR-PORT-1; no packages). See deploy/README.md.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump from the latest release (the first release is v0.1.0)
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: read
+
+# One release at a time: two runs must not pick the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - name: Only from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases are made from main only; this run is on $GITHUB_REF."
+          exit 1
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Next version
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          v=$(build/next-version.sh "$BUMP")
+          if git rev-parse -q --verify "refs/tags/$v" >/dev/null; then
+            echo "::error::Tag $v exists already."
+            exit 1
+          fi
+          if ! grep -q "^## $v\$" RELEASE.md; then
+            echo "::error::RELEASE.md has no '## $v' section; write the release notes first."
+            exit 1
+          fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+          echo "Releasing $v ($BUMP) from $GITHUB_SHA" >>"$GITHUB_STEP_SUMMARY"
+
+  check:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: mod-verify, fmt-check, tidy-check, vet, lint, vuln, tests with race and coverage
+        run: make mod-verify check
+
+  fuzz:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make fuzz FUZZTIME=30s
+
+  docker:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Network integration tests (Docker, CAP_NET_RAW only)
+        run: make test-net
+      - name: systemd unit test (Debian 11, 12 and 13)
+        run: make test-systemd
+
+  publish:
+    needs: [version, check, fuzz, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Tarballs for linux/amd64 and linux/arm64, built twice (reproducible)
+        run: |
+          make package VERSION="$VERSION"
+          cp dist/release/SHA256SUMS first.sums
+          make package VERSION="$VERSION"
+          diff first.sums dist/release/SHA256SUMS
+          cat dist/release/SHA256SUMS
+      - name: The binaries report the version
+        run: |
+          tar -xzf "dist/release/lan-tracker-$VERSION-linux-amd64.tar.gz" -C "$RUNNER_TEMP"
+          got=$("$RUNNER_TEMP/lan-tracker-$VERSION-linux-amd64/lan-tracker" version --quiet)
+          [ "$got" = "$VERSION" ] || { echo "::error::the binary reports $got, not $VERSION"; exit 1; }
+      - name: Tag the tested commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "LAN Tracker $VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The notes are the version's section of RELEASE.md.
+          awk -v h="## $VERSION" '$0 == h { f = 1; next } f && /^## / { exit } f' RELEASE.md >"$RUNNER_TEMP/notes.md"
+          gh release create "$VERSION" --verify-tag --title "LAN Tracker $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "dist/release/lan-tracker-$VERSION-linux-amd64.tar.gz" \
+            "dist/release/lan-tracker-$VERSION-linux-arm64.tar.gz" \
+            dist/release/SHA256SUMS

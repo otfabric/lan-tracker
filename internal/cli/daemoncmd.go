@@ -1,0 +1,44 @@
+package cli
+
+import (
+	"errors"
+
+	"github.com/spf13/cobra"
+
+	"github.com/otfabric/lan-tracker/internal/config"
+	"github.com/otfabric/lan-tracker/internal/daemon"
+)
+
+func (a *app) daemonCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "daemon",
+		Short: "Run the service",
+	}
+	c.AddCommand(a.daemonRunCmd(), a.daemonStatusCmd())
+	return c
+}
+
+func (a *app) daemonRunCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "run",
+		Short:   "Run the service in the foreground (systemd owns the process)",
+		Example: "  sudo lan-tracker daemon run --config /etc/lan-tracker/config.yaml",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			err := daemon.Run(cmd.Context(), daemon.Options{
+				Load:             a.loadOptions(),
+				Stderr:           a.env.Stderr,
+				StderrIsTerminal: a.env.StderrIsTerminal,
+			})
+			var ve *config.ValidationError
+			switch {
+			case errors.As(err, &ve):
+				a.env.Stderr.Write([]byte(ve.Error() + "\n")) //nolint:errcheck // best effort
+				return silent(ExitError)
+			case err != nil:
+				return fail(ExitError, err)
+			}
+			return nil
+		},
+	}
+}
