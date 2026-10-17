@@ -2,7 +2,7 @@
 
 Two parts: the [acceptance matrix](#acceptance-matrix-and-automated-coverage), the product's acceptance scenarios mapped to the automated tests that cover them, with the scenarios no automated test covers; then the manual procedure for the boards.
 
-A plan to follow on the two target boards, the **RevPi Connect** (`linux/arm64`) and the **amd64 edge box**, that closes the open boxes in `IMPLEMENTATION_PLAN.md` (Open hardware and field checks, and the phase tasks that wait for them). Run it in order: the audit first, the 7-day runs last. Record each result in the table of its section (one column per board) and send the filled plan back as feedback; failures and surprises matter more than passes.
+A plan to follow on the two target boards, the **RevPi Connect** (`linux/arm64`) and the **amd64 edge box**, that closes the field validation items in `ROADMAP.md`. Run it in order: the audit first, the 7-day runs last. Record each result in the table of its section (one column per board) and send the filled plan back as feedback; failures and surprises matter more than passes.
 
 Every command runs on the board as a user with `sudo` unless it says otherwise. `<iface>` is the board's monitored interface (`eth0`, `eth1`, `enp1s0`, ...).
 
@@ -16,7 +16,7 @@ Every command runs on the board as a user with `sudo` unless it says otherwise. 
 
 | Item | Notes |
 | --- | --- |
-| Release | The latest `vX.Y.Z` from the Releases page, `linux-arm64` for the RevPi, `linux-amd64` for the edge box. No release exists yet (17 Oct 2026); until then use the tarballs `make package` builds |
+| Release | The latest `vX.Y.Z` from the Releases page, `linux-arm64` for the RevPi, `linux-amd64` for the edge box. The first release is v0.1.0 (17 Oct 2026); to test a build from `main`, use the tarballs `make package` builds |
 | Lab LAN | A switch with a few devices: a laptop, a phone, a printer or NAS, ideally a PLC or HMI |
 | Two test laptops | For the IP-change and duplicate-IP tests (B4) |
 | A spare device that can run `dnsmasq` | For the rogue DHCP server test (B5) |
@@ -27,83 +27,78 @@ Every command runs on the board as a user with `sudo` unless it says otherwise. 
 
 Fill in **PASS**, **FAIL** or **SKIP** (with the reason) and copy the per-test notes into the sections.
 
-| Test | Closes | RevPi Connect | amd64 edge box |
+| Test | Covers (`ROADMAP.md` item; requirements) | RevPi Connect | amd64 edge box |
 | --- | --- | --- | --- |
-| A1 Board facts | §8 board table | | |
-| A2 Install from the release | Phase 5 (install) | | |
-| A3 Sandbox and capabilities | Open check: `systemd-analyze` and capcheck per board; Phase 5 audit | | |
-| A4 capcheck under the unit | Open check: capcheck per board; Phase 0 capability check | | |
-| B1 Neighbour table only | Open check: Phase 1 exit (real test LAN) | | |
-| B2 Per-interface scoping | Open check: Phase 1 exit (scoping) | | |
-| B3 Passive capture and names | Phase 2 on hardware | | |
-| B4 IP change and duplicate IP (LAB ONLY) | Open check: Phase 2 exit (injected change and duplicate) | | |
-| B5 DHCP server monitoring (LAB ONLY) | FR-PA-7 on hardware | | |
-| B6 Point-in-time queries | Phase 3 exit on hardware | | |
+| A1 Board facts | Board audit | | |
+| A2 Install from the release | Board audit (install) | | |
+| A3 Sandbox and capabilities | Board audit; NFR-SEC-1 | | |
+| A4 capcheck under the unit | Board audit; NFR-SEC-1 | | |
+| B1 Neighbour table only | Neighbour-only discovery; FR-NL-1, FR-NL-2 | | |
+| B2 Per-interface scoping | Neighbour-only discovery; FR-ID-2 | | |
+| B3 Passive capture and names | Passive capture on hardware; FR-PA-1 to FR-PA-4 | | |
+| B4 IP change and duplicate IP (LAB ONLY) | Reconstruction on hardware; FR-ID-5 | | |
+| B5 DHCP server monitoring (LAB ONLY) | DHCP on a real network; FR-PA-7 | | |
+| B6 Point-in-time queries | Reconstruction on hardware; FR-CLI-2 | | |
 | B7 Host descriptions | FR-MD-1 on hardware | | |
-| B8 DHCP exchanges and leases (LAB ONLY) | FR-PA-8 to FR-PA-10 on hardware | | |
-| C1 Reload | FR-CFG-3 on hardware | | |
-| C2 Restart and clean stop | NFR-REL-1 | | |
-| C3 Watchdog | NFR-REL-1 | | |
-| C4 Link down and up (LAB ONLY) | NFR-REL-1, FR-NL-3 | | |
-| C5 Power cut and clock | NFR-REL-2, FR-ST-4 | | |
-| C6 Corrupt database (LAB ONLY) | FR-ST-4 | | |
-| C7 Upgrade and rollback (needs a second release) | Open check: Phase 5 (upgrade and rollback) | | |
-| D1 Active discovery on the lab LAN | Phase 4 exit on hardware | | |
-| D2 Budgets on the wire | Phase 4 exit (rates on a counting rig) | | |
-| D3 Kill switch | Phase 4 exit (kill switch) | | |
-| D4 Name queries, route checks and absent identification traffic | Open check: Phase 4 exit (captured-wire evidence) | | |
-| E1 Resource budget, 7 days | Open check: Phase 2 exit (CPU and RSS on a RevPi); Phase 5 (resource use on the boards) | | |
-| F1 Pilot sites, passive, 7 days | Open check: Phase 2 exit (3 pilot sites); Phase 5 staged rollout | | |
-| G1 Site captures | Open check: Phase 2 pcap fixtures | | |
-| H1 OT soak with active discovery, 7 days | Open check: Phase 4 exit (soak, 7-day active pilot) | | |
+| B8 DHCP exchanges and leases (LAB ONLY) | DHCP on a real network; FR-PA-8 to FR-PA-10 | | |
+| C1 Reload | Robustness; FR-CFG-3 | | |
+| C2 Restart and clean stop | Robustness; NFR-REL-1 | | |
+| C3 Watchdog | Robustness; NFR-REL-1 | | |
+| C4 Link down and up (LAB ONLY) | Robustness; NFR-REL-1, FR-NL-3 | | |
+| C5 Power cut and clock | Robustness; NFR-REL-2, FR-ST-4 | | |
+| C6 Corrupt database (LAB ONLY) | Robustness; FR-ST-4 | | |
+| C7 Upgrade and rollback (needs a second release) | Upgrade and rollback | | |
+| D1 Active discovery on the lab LAN | Active discovery on a lab LAN; FR-AC-1 to FR-AC-3 | | |
+| D2 Budgets on the wire | Active discovery on a lab LAN; NFR-SAFE-1, NFR-SAFE-5, FR-AC-10 | | |
+| D3 Kill switch | Active discovery on a lab LAN; FR-CFG-4 | | |
+| D4 Name queries, route checks and absent identification traffic | Captured-wire evidence; FR-AC-5, FR-AC-12 | | |
+| E1 Resource budget, 7 days | Resource use on the boards; NFR-PERF-1 | | |
+| F1 Pilot sites, passive, 7 days | Passive pilot; staged fleet rollout | | |
+| G1 Site captures | Real site captures | | |
+| H1 OT soak with active discovery, 7 days | Representative active pilot | | |
 
 None of these has been run yet (17 Oct 2026).
 
 ## Acceptance matrix and automated coverage
 
-The acceptance scenarios, one by one, with the tests that cover them (17 Oct 2026). Tests run in the dev container with `make check` unless marked `test-net` (`make test-net`, network namespaces in Docker). **Covered** means the scenario's observable result is asserted; **partly** means some of it is and the rest is listed under Open; **open** means no automated test. Docker results do not close the board and site checks in the sections after this one.
+The acceptance scenarios, one by one, with the tests that cover them (17 Oct 2026). Tests run in the dev container with `make check` unless marked `test-net` (`make test-net`, network namespaces in Docker). **Covered** means the scenario's observable result is asserted; **partly** means some of it is; **open** means no automated test. What a partly covered or open scenario lacks is listed in `ROADMAP.md` (Known gaps and limitations). Docker results do not close the board and site checks in the sections after this one.
 
-| Scenario | Tests | Coverage | Open |
-| --- | --- | --- | --- |
-| Quiet device with ICMP off, ARP on, TCP/502 open | `TestTCPRunsPerPort`, `TestOperatorScan` (TCP passes with ICMP not run), `TestActiveDiscovery` (test-net: ARP sweep, then TCP to known hosts) | Partly | No simulated host that drops ICMP; that TCP runs without a ping answer is shown with fakes only |
-| Known MAC, unknown IP, device sends nothing | `TestExpiryAndPresence` (last-known record kept, presence decays), `TestSweepTargets`, `TestKnownTargets` (only configured networks; IPv6 never swept), `TestStatusShowsLastPass`, `TestLastPasses` (swept and replied counts) | Partly | No test of the scenario as a whole: a silent known MAC reported with its last-known record and the sweep coverage |
-| One MAC with production and maintenance IP | `TestIPv4MultipleAddressesAreIndependent`, `TestEndpointsPerAddress` | Covered | |
-| MAC moves to a new IP while the old one is quiet | `TestExpiryAndPresence`, `TestIPv4MultipleAddressesAreIndependent`, `TestLateObservationDoesNotReopen` | Covered | |
-| Same IP on eth0 and eth1 | `TestSameIPOnTwoInterfaces`, `TestMACOnTwoInterfacesIsAnotherHost`, `TestDaemonFindsHosts` (test-net) | Covered | |
-| Same IP claimed by two MACs on one context | `TestScenarios` and `TestCLIReconstruction` (golden duplicate IP), `TestCaptureScenario`, `TestUnboundWhenHolderIsAmbiguous`, `TestEndpointAttributionNeedsOneHolder` | Covered | |
-| Gateway forwards public-IP traffic | `TestOnLinkCheck` | Covered | |
-| Proxy ARP answering many candidates | `TestProxyARPByOverlaps`, `TestProxyARPByThreshold`, `TestGratuitousARPIsNotProxy`, `TestProxyARPClaimsAge`, `TestProxyARPLateReplyDoesNotFlag` | Covered | No classification exists to test (ADR 0011) |
-| mDNS proxy advertises another device | `TestMDNSProxyAdvertisesAnotherDevice` | Covered | |
-| mDNS aliases, cache flush, goodbye and TTL expiry | `TestMDNSAliasesGoodbyeAndCacheFlush`, `TestNamesOutliveNameExpiry`, `TestStaleNames`, `TestMDNSRecordLimit` | Covered | |
-| DNS PTR/A/AAAA/CNAME, negative answer, failed resolver | `TestDNSQueries` (PTR, CNAME followed at most twice, NXDOMAIN cached, timeout records nothing), `TestDNSNamesAttachWithoutPresence`, `TestReverseAddr` | Covered with fakes; the queries on the wire in Docker (`TestNameQueriesOnTheWire`) | No real resolver or responder answering on the wire (D4) |
-| LLDP chassis MAC differs from the Ethernet sender | `TestLLDPIdentifiers`, `TestDecode` (LLDP cases) | Covered | |
-| TCP OPEN, then TIMEOUT, then REFUSED | `TestServices` (distinct results, last definite answer kept), `TestClassify`, `TestTimeoutDoesNotBringBackAMissingHost`, `TestActiveDiscovery` (test-net: OPEN, REFUSED, UNREACHABLE) | Covered | |
-| TCP result after IP reassignment | `TestEndpointAttributionNeedsOneHolder` | Covered | |
-| Observer with only /32 field addresses | `TestNoDirectRouteSendsNothing`, `TestPlanNoDirectRoute`, `TestLinkSourceAndOwn` (ARP probe from 0.0.0.0 off subnet) | Partly | Fakes only; no `/32` interface in `test-net` |
-| DHCP OFFER without ACK | `TestDHCPExchangeOutcomes` (`offered`, no lease), `TestCaptureScenario` (the rogue's offer) | Covered | |
-| DHCP ACK visible, no client traffic | `TestDHCPLeaseHistory`, `TestDHCPLeaseAndServerAddresses`, `TestCaptureScenario` | Covered | |
-| DHCP INFORM and config-only ACK | `TestDHCPExchangeOutcomes` (`inform_ack`, no lease), `TestDecode` ("dhcp ack to an inform"), `TestDHCPServerConfig` | Covered | |
-| Server identifier differs from the relay source | `TestDecode` (relayed offer), `TestDHCPExchangeOutcomes` (relayed lease: server and sender apart), `TestDHCPServerAllowlist` | Covered | |
-| Relayed DHCP on UDP 67/67, client on another link | `TestDecode` (request and ACK on 67 to 67), `TestDHCPExchangeOutcomes` (no host for the relayed client) | Covered | |
-| Two offers, one selected server | `TestDHCPLeaseHistory` (two offers, selected server), `TestDHCPServersWithoutAllowlist` (`unchecked`, no verdict) | Covered | |
-| Same server varies options across clients | `TestDHCPServerConfig` (no server-level event), `TestDHCPExchangeOutcomes` (per-client snapshots) | Partly | No test gives two clients of one server different options and asserts that neither gets `DHCP_CLIENT_CONFIG_CHANGED` |
-| Options 15/81/119, overload and split options | `TestDecode` ("split options, overload, FQDN, search list and classless routes", "malformed options"), `TestDHCPGather`, `TestDHCPOptionValues` (compression pointers, FQDN forms), `FuzzDHCP` | Covered | |
-| Option 121 with a default route | `TestDHCPExchangeOutcomes` (gateway from option 121), `TestDHCPOptionValues` (249 sets no gateway) | Covered | |
-| Lease renewal and expiry with hidden unicast | `TestDHCPLeaseHistory` (ACK-only renewal, expiry per last ACK), `TestDHCPExchangeOutcomes` (unanswered REQUEST `incomplete`), `TestCaptureScenario` (every lease partial) | Covered | On a real switched port: B8 |
-| Collector goes down during an incident | `TestCollectorGaps`, `TestDowntimeGap`, `TestLivePipeline` (`OBSERVATION_GAP`), `TestLinkEvents` (`INTERFACE_DOWN`/`UP`), `TestCollectorRetriesWithBackoff`, `TestStatusAndMetrics`, `TestCaptureRefusesDownInterface` (test-net) | Covered | |
-| Broad manual scan overlaps scheduled probes | `TestPacingStaysWithinEveryOneSecondWindow`, `TestConcurrencyCaps`, `TestTargetSpacing`, `TestOperatorScanRefusedBusyAndAborted`, `TestSimulateMatchesPacing`, `TestActiveDiscovery` (test-net: plan within 10%) | Partly | No run of an operator scan and periodic passes at once on the wire |
-| Active disabled, interface removed, reload during a scan | `TestKillSwitchCancelsAndResumes`, `TestSweepStopsOnKillSwitch`, `TestReloadTogglesInterfaceActive`, `TestReloadChangesIntervalAndEnabled`, `TestConnectCancelledAndStopped`, `TestKillSwitchAfterShutdown`, `TestActiveDiscovery` (test-net: kill switch) | Partly | Removing an interface needs a restart (FR-CFG-3); a reload in the middle of an operator scan is not tested |
-| Packet loss and slow TCP listeners | `TestConnectClosesWithReset` (RST close, SYN retransmission cap), `TestActiveDiscovery` (test-net: kernel packets logged apart from starts) | Open | No loss or slow listener is simulated; the retransmission envelope is unmeasured |
-| Raw observations compacted | `TestScenarios` (golden answers after a 7-day compaction), `TestCompactRetention` (open leases kept, ended leases, exchanges, endpoint results, name records pruned by retention) | Partly | No DHCP or name-record incident replayed through compaction |
-| Schema upgrade and rollback | `TestMigrationsInOrderAndNewerSchemaRefused`, `TestOfflineRefusesOtherSchemaVersions`; `make test-systemd` (install block) | Partly | Only one schema version exists, so no upgrade from an earlier database is tested; rollback is a runbook (`deploy/README.md`, Upgrade and rollback); C7 on a board |
-| Storage pressure, malformed input, restart mid-write | `TestCompactSizeCap`, `TestKillDuringWrites` (`test/crash`), `TestCorruptDatabaseIsQuarantined`, `TestCorruptDatabaseRecreated`, `Fuzz*`, `TestDecodeMalformed`, `TestDecoderBoundsItsTable`, `TestDHCPExchangeLimit`, `TestBus` (bounded bus, drop counter) | Covered | Memory under pressure on a board: E1 |
+| Scenario | Tests | Coverage |
+| --- | --- | --- |
+| Quiet device with ICMP off, ARP on, TCP/502 open | `TestTCPRunsPerPort`, `TestOperatorScan` (TCP passes with ICMP not run), `TestActiveDiscovery` (test-net: ARP sweep, then TCP to known hosts) | Partly |
+| Known MAC, unknown IP, device sends nothing | `TestExpiryAndPresence` (last-known record kept, presence decays), `TestSweepTargets`, `TestKnownTargets` (only configured networks; IPv6 never swept), `TestStatusShowsLastPass`, `TestLastPasses` (swept and replied counts) | Partly |
+| One MAC with production and maintenance IP | `TestIPv4MultipleAddressesAreIndependent`, `TestEndpointsPerAddress` | Covered |
+| MAC moves to a new IP while the old one is quiet | `TestExpiryAndPresence`, `TestIPv4MultipleAddressesAreIndependent`, `TestLateObservationDoesNotReopen` | Covered |
+| Same IP on eth0 and eth1 | `TestSameIPOnTwoInterfaces`, `TestMACOnTwoInterfacesIsAnotherHost`, `TestDaemonFindsHosts` (test-net) | Covered |
+| Same IP claimed by two MACs on one context | `TestScenarios` and `TestCLIReconstruction` (golden duplicate IP), `TestCaptureScenario`, `TestUnboundWhenHolderIsAmbiguous`, `TestEndpointAttributionNeedsOneHolder` | Covered |
+| Gateway forwards public-IP traffic | `TestOnLinkCheck` | Covered |
+| Proxy ARP answering many candidates | `TestProxyARPByOverlaps`, `TestProxyARPByThreshold`, `TestGratuitousARPIsNotProxy`, `TestProxyARPClaimsAge`, `TestProxyARPLateReplyDoesNotFlag` | Covered |
+| mDNS proxy advertises another device | `TestMDNSProxyAdvertisesAnotherDevice` | Covered |
+| mDNS aliases, cache flush, goodbye and TTL expiry | `TestMDNSAliasesGoodbyeAndCacheFlush`, `TestNamesOutliveNameExpiry`, `TestStaleNames`, `TestMDNSRecordLimit` | Covered |
+| DNS PTR/A/AAAA/CNAME, negative answer, failed resolver | `TestDNSQueries` (PTR, CNAME followed at most twice, NXDOMAIN cached, timeout records nothing), `TestDNSNamesAttachWithoutPresence`, `TestReverseAddr` | Covered with fakes; the queries on the wire in Docker (`TestNameQueriesOnTheWire`) |
+| LLDP chassis MAC differs from the Ethernet sender | `TestLLDPIdentifiers`, `TestDecode` (LLDP cases) | Covered |
+| TCP OPEN, then TIMEOUT, then REFUSED | `TestServices` (distinct results, last definite answer kept), `TestClassify`, `TestTimeoutDoesNotBringBackAMissingHost`, `TestActiveDiscovery` (test-net: OPEN, REFUSED, UNREACHABLE) | Covered |
+| TCP result after IP reassignment | `TestEndpointAttributionNeedsOneHolder` | Covered |
+| Observer with only /32 field addresses | `TestNoDirectRouteSendsNothing`, `TestPlanNoDirectRoute`, `TestLinkSourceAndOwn` (ARP probe from 0.0.0.0 off subnet) | Partly |
+| DHCP OFFER without ACK | `TestDHCPExchangeOutcomes` (`offered`, no lease), `TestCaptureScenario` (the rogue's offer) | Covered |
+| DHCP ACK visible, no client traffic | `TestDHCPLeaseHistory`, `TestDHCPLeaseAndServerAddresses`, `TestCaptureScenario` | Covered |
+| DHCP INFORM and config-only ACK | `TestDHCPExchangeOutcomes` (`inform_ack`, no lease), `TestDecode` ("dhcp ack to an inform"), `TestDHCPServerConfig` | Covered |
+| Server identifier differs from the relay source | `TestDecode` (relayed offer), `TestDHCPExchangeOutcomes` (relayed lease: server and sender apart), `TestDHCPServerAllowlist` | Covered |
+| Relayed DHCP on UDP 67/67, client on another link | `TestDecode` (request and ACK on 67 to 67), `TestDHCPExchangeOutcomes` (no host for the relayed client) | Covered |
+| Two offers, one selected server | `TestDHCPLeaseHistory` (two offers, selected server), `TestDHCPServersWithoutAllowlist` (`unchecked`, no verdict) | Covered |
+| Same server varies options across clients | `TestDHCPServerConfig` (no server-level event), `TestDHCPExchangeOutcomes` (per-client snapshots) | Partly |
+| Options 15/81/119, overload and split options | `TestDecode` ("split options, overload, FQDN, search list and classless routes", "malformed options"), `TestDHCPGather`, `TestDHCPOptionValues` (compression pointers, FQDN forms), `FuzzDHCP` | Covered |
+| Option 121 with a default route | `TestDHCPExchangeOutcomes` (gateway from option 121), `TestDHCPOptionValues` (249 sets no gateway) | Covered |
+| Lease renewal and expiry with hidden unicast | `TestDHCPLeaseHistory` (ACK-only renewal, expiry per last ACK), `TestDHCPExchangeOutcomes` (unanswered REQUEST `incomplete`), `TestCaptureScenario` (every lease partial) | Covered |
+| Collector goes down during an incident | `TestCollectorGaps`, `TestDowntimeGap`, `TestLivePipeline` (`OBSERVATION_GAP`), `TestLinkEvents` (`INTERFACE_DOWN`/`UP`), `TestCollectorRetriesWithBackoff`, `TestStatusAndMetrics`, `TestCaptureRefusesDownInterface` (test-net) | Covered |
+| Broad manual scan overlaps scheduled probes | `TestPacingStaysWithinEveryOneSecondWindow`, `TestConcurrencyCaps`, `TestTargetSpacing`, `TestOperatorScanRefusedBusyAndAborted`, `TestSimulateMatchesPacing`, `TestActiveDiscovery` (test-net: plan within 10%) | Partly |
+| Active disabled, interface removed, reload during a scan | `TestKillSwitchCancelsAndResumes`, `TestSweepStopsOnKillSwitch`, `TestReloadTogglesInterfaceActive`, `TestReloadChangesIntervalAndEnabled`, `TestConnectCancelledAndStopped`, `TestKillSwitchAfterShutdown`, `TestActiveDiscovery` (test-net: kill switch) | Partly |
+| Packet loss and slow TCP listeners | `TestConnectClosesWithReset` (RST close, SYN retransmission cap), `TestActiveDiscovery` (test-net: kernel packets logged apart from starts) | Open |
+| Raw observations compacted | `TestScenarios` (golden answers after a 7-day compaction), `TestCompactRetention` (open leases kept, ended leases, exchanges, endpoint results, name records pruned by retention) | Partly |
+| Schema upgrade and rollback | `TestMigrationsInOrderAndNewerSchemaRefused`, `TestOfflineRefusesOtherSchemaVersions`; `make test-systemd` (install block) | Partly |
+| Storage pressure, malformed input, restart mid-write | `TestCompactSizeCap`, `TestKillDuringWrites` (`test/crash`), `TestCorruptDatabaseIsQuarantined`, `TestCorruptDatabaseRecreated`, `Fuzz*`, `TestDecodeMalformed`, `TestDecoderBoundsItsTable`, `TestDHCPExchangeLimit`, `TestBus` (bounded bus, drop counter) | Covered |
 
-Verification gates that no test closes:
-
-- Captured-wire evidence of ARP, TCP and name queries on a real network, and of no identification traffic: D2, D4.
-- The unit's `MemoryMax=128M` and `CPUQuota=20%` measured on CM4 / RevPi and the amd64 edge box: E1.
-- A 7-day representative active pilot after passive observation, with device and network load reported: F1, H1.
-- The full gate set (`make mod-verify check`, `make fuzz`, `make check-all`, `make soak`, `make package`) on the release commit (`IMPLEMENTATION_PLAN.md`, phase 5).
+The checks no automated test closes (captured-wire evidence, resource use on the boards, the pilots) are the field validation items in `ROADMAP.md`, run with the sections below.
 
 ---
 
@@ -173,7 +168,7 @@ Run the board audit in `tools/capcheck/README.md` from the unpacked release, wit
 
 ### B1 Neighbour table only
 
-Discovery from the kernel neighbour table alone (Phase 1 exit). Turn capture off on the interface; passive settings need a restart:
+Discovery from the kernel neighbour table alone. Turn capture off on the interface; passive settings need a restart:
 
 ```yaml
 interfaces:
@@ -480,7 +475,7 @@ sudo lan-tracker active enable
 
 ### D4 Name queries, route checks and absent identification traffic
 
-The captured-wire evidence for the open check of phase 4. Enable TCP checks (as in H1, step 3) and name queries (`active: { names: { enabled: true, resolvers: [<lab DNS server>] } }`), reload, then capture everything the box sends for one full pass:
+The captured-wire evidence on a real network. Enable TCP checks (as in H1, step 3) and name queries (top-level `active: { names: { enabled: true, resolvers: [<lab DNS server>] } }`), reload, then capture everything the box sends for one full pass:
 
 ```bash
 sudo tcpdump -i <iface> -n -tttt -w /tmp/wire.pcap ether src $(cat /sys/class/net/<iface>/address)
@@ -597,8 +592,8 @@ Send the captures (they contain the site's addresses and names: handle them as s
 On the OT rig with a real PLC, inverter and HMI, with the site team watching the devices' diagnostics. Enable in steps, a day each, only after the previous step showed nothing:
 
 1. ARP sweep of the rig's network (`interfaces[].active` as in D1; the sweep runs every 15 min by default).
-2. ICMP echo to known hosts: `active: { icmp: { enabled: true } }`.
-3. TCP connect to the devices' Modbus port: `active: { tcp: { enabled: true, targets: [{ port: 502, name: modbus, timeout: 750ms }] } }`, a plain connect, closed at once, no data.
+2. ICMP echo to known hosts: top-level `active: { icmp: { enabled: true } }`.
+3. TCP connect to the devices' Modbus port: top-level `active: { tcp: { enabled: true, targets: [{ port: 502, name: modbus, timeout: 750ms }] } }`, a plain connect, closed at once, no data.
 
 This is the 7-day representative active pilot: run it after the passive observation of E1 or F1, and report the device and network load (D2's counts per step).
 
@@ -624,4 +619,4 @@ Send back this file with the tables filled, plus:
 - the captures from G1 and D4;
 - anything in this plan that was unclear or impossible on the hardware.
 
-Each passed test lets the matching box in `IMPLEMENTATION_PLAN.md` be ticked; each failure becomes a fix or a decision.
+Each passed test closes its part of the matching item in `ROADMAP.md` (Field validation); each failure becomes a fix or a decision.

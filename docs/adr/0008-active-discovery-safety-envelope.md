@@ -35,6 +35,6 @@ Active discovery is off by default, enabled per interface, and scoped:
 
 ## Ruled out
 
-- SYN scanning, generic UDP port scanning, register scanning and IPv6 sweeping. NDP solicitation is deferred: v1 is IPv4-first.
+- SYN scanning, generic UDP port scanning, register scanning and IPv6 sweeping. NDP solicitation is not built: v1 is IPv4-first (`ROADMAP.md`).
 - Scanning discovered subnets automatically.
 - UDP probes other than the DNS and mDNS name queries, and any probe that sends a payload to identify a device (Modbus, HTTP, TLS, SNMP, banners): device identification is out of scope (ADR 0011).

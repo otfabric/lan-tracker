@@ -57,7 +57,7 @@ What an observation establishes about its MAC is classified by `Observation.Evid
 
 | Kind | What it is | Sources |
 | --- | --- | --- |
-| Frame | A frame came from this Ethernet source MAC | `passive_ipv4`, `passive_ipv6`, `passive_dhcp`, `passive_dhcp_server`, `passive_mdns`, `passive_lldp`, and the ARP and NDP sources below (an ARP or NDP message is also a frame from its sender) |
+| Frame | A frame came from this Ethernet source MAC | `passive_ipv4`, `passive_ipv6`, `passive_dhcp`, `passive_dhcp_server`, `passive_mdns`, `passive_lldp`, and the ARP and NDP sources below (an ARP or NDP message is also a frame from its sender); any other observation that carries a MAC |
 | Address confirmed | An address was claimed or confirmed at this MAC | `passive_arp`, `arp_scan`, `passive_ndp`, `ndp_probe` (with a MAC); `kernel_neighbor` in state REACHABLE (or without a state) |
 | Endpoint answer | The endpoint at an IP answered just now | `tcp_connect` OPEN or REFUSED, `icmp_scan` echo reply (no MAC; the holder's only when exactly one MAC holds the IP and its binding was confirmed within `identity.address_expiry`) |
 | Cached | A cache's statement about the MAC | `kernel_neighbor` STALE, DELAY or PROBE |
@@ -76,7 +76,7 @@ Replay files and the golden scenarios store one observation per line, with empty
 
 Fields: `time` (RFC 3339), `source`, `interface`, `mac`, `ip`, `hostname`, `name_type`, `service` (`proto`, `port`, `state`), `neighbor_state`, `records` (each `name`, `type`, and optionally `addr`, `value`, `ttl`, `flush`), `dhcp` (the decoded message, §5.6), `meta`. Unknown fields and unknown sources are rejected, as is a line with neither MAC, IP, hostname nor records. In a replay file `interface` may be omitted (it defaults to the replay interface); naming a different interface is an error.
 
-A `hostname` with a `name_type` (the short form used in hand-written replay files and the golden scenarios) stands for the record it describes: an A or AAAA record for an `mdns` or `dns` name with an address, a PTR for a `dns_ptr` name with an address, else a NAME the sender gave itself. A DHCP observation carries its message only in `dhcp`.
+A `hostname` with a `name_type` (the short form used in hand-written replay files and the golden scenarios) stands for the record it describes: an A or AAAA record for an `mdns` or `dns` name with an address, a PTR for a `dns_ptr` name with an address, else a NAME the sender gave itself. A DHCP observation carries its message only in `dhcp`; one straight from the client also carries the client's hostname (option 12) as `hostname` with name type `dhcp`.
 
 An observation's `time` is the time of the evidence, not of its delivery. For `kernel_neighbor` it is when the kernel last confirmed reachability (`nda_cacheinfo.ndm_confirmed`), so an entry that lingers in the table as STALE carries its old time and adds no fresh evidence.
 
@@ -95,13 +95,13 @@ DHCP observations carry the whole decoded message in `DHCP` instead of `meta` (�
 
 Which address an observation carries:
 
-- ARP: the sender address (none for an ARP probe). NDP: the source address of the message, or the target of an advertisement.
+- ARP: the sender address (none for an ARP probe). NDP: the source address of the message, or the target of an advertisement (none for duplicate address detection).
 - DHCP: a client message (`passive_dhcp`) sent straight from the client (Ethernet source is `chaddr`, no `giaddr`) carries the client's own claim, the `ciaddr` of a REQUEST or an INFORM (which after an INFORM may be static), and its hostname; a relayed or otherwise indirect request carries the frame's sender (the relay) and its source address, and the client is only in the message. A server reply (`passive_dhcp_server`) carries the frame's sender and IPv4 source: the server, or the relay that forwarded it. No DHCP observation binds an ACK's `yiaddr` to the client: that is lease history (§5.6).
 - mDNS (`passive_mdns`): the sender's MAC and IP source address; the advertised addresses are records, never the sender's (§5.4). Unicast DNS answers (`passive_dns`) carry no MAC and no address, only records. Answers to LAN Tracker's own queries: `dns_query` carries records only; `mdns_query` carries the responder's address (the socket sees no frames) and no MAC.
 - `passive_ipv4`/`passive_ipv6`: the IP header source. LLDP observations carry no address.
 - `arp_scan`: MAC and IP of an ARP reply to a sweep request. `icmp_scan`: the IP of an echo reply. `tcp_connect`: the IP and the connect result.
 
-Sources: `passive_arp`, `passive_ipv4`, `passive_ipv6`, `passive_ndp`, `passive_dhcp`, `passive_dhcp_server`, `passive_mdns`, `passive_dns`, `passive_lldp`, `kernel_neighbor`, `arp_scan`, `icmp_scan`, `ndp_probe`, `tcp_connect`, `dns_query`, `mdns_query`.
+Sources: `passive_arp`, `passive_ipv4`, `passive_ipv6`, `passive_ndp`, `passive_dhcp`, `passive_dhcp_server`, `passive_mdns`, `passive_dns`, `passive_lldp`, `kernel_neighbor`, `arp_scan`, `icmp_scan`, `ndp_probe`, `tcp_connect`, `dns_query`, `mdns_query`. `ndp_probe` is accepted (in a replay file, for example) and handled like `passive_ndp`, but no engine emits it: there is no NDP solicitation probe (AGENTS.md rule 12).
 
 Events that are not caused by an observation use one of these internal causes instead of a source: `presence` (presence ticker), `expiry` (binding expiry), `iface_monitor` (interface manager), `operator` (kill switch, operator scans, host descriptions), `integrity_check` (start-up database check).
 
@@ -141,7 +141,7 @@ A binding in effect at T with `T > last_seen` was **unconfirmed** at T: it was t
 | `observations` | id, ts, context_id, source, mac, ip, hostname, name_type, service_json, meta_json, host_id | Raw evidence, compacted; `host_id` NULL if unbound. Records and DHCP messages are not stored here: their lasting content is in `name_records`, `dhcp_exchanges` and `dhcp_leases` |
 | `observation_rollups` | id, hour, context_id, host_id, source, mac, ip, count, first_ts, last_ts | Hourly roll-ups of observations |
 | `events` | id, ts, type, severity, context_id, host_id, related_host_id, old_value, new_value, cause, observation_id, evidence_json, clock_sync | Permanent history |
-| `scans` | id, context_id, kind, trigger, started_at, finished_at, targets, results_json | Operator scans, one row per interface: `kind` the probes (`arp,tcp/502`), `trigger` `operator` (periodic passes are not recorded), `targets` the larger of the sweep and known-host counts, `results_json` `{counts: {probe: {result: n}}, responders, seconds, aborted?}`. A scan left unfinished by a crash is closed at the next start (`finished_at` = `started_at`, aborted, with `SCAN_COMPLETED`) |
+| `scans` | id, context_id, kind, trigger, started_at, finished_at, targets, results_json | Operator scans, one row per interface: `kind` the probes (`arp,tcp/502`), `trigger` `operator` (periodic passes are not recorded; the schema also accepts `scheduled`, which nothing writes), `targets` the larger of the sweep and known-host counts, `results_json` `{counts: {probe: {result: n}}, responders, seconds, aborted?}`. A scan left unfinished by a crash is closed at the next start (`finished_at` = `started_at`, aborted, with `SCAN_COMPLETED`) |
 | `runtime_state` | key, value, updated_at | State that survives restarts: the kill switch (§8) and the correlator's heartbeat (`observed_until`, §7) |
 | `schema_migrations` | version, applied_at | Migration tracking (created by the store, not by a migration) |
 
@@ -212,7 +212,7 @@ For a binding that ended, the answer also names `replaced_by` (the first binding
 
 Applied by the correlator to each observation, in order, within the observation's context. Every rule is evaluated at the observation's `time`; timer-driven transitions (presence §6, expiry §5.3, idle DHCP exchanges §5.6) are stamped with the moment their threshold was crossed. Results therefore do not depend on when evaluation runs, and a replay produces the same database every time.
 
-Before the rules: an observation for an interface that is not configured is dropped. A MAC that is not a usable host MAC (multicast, broadcast, all-zero) and an IP that is not a unicast host address (unspecified, multicast, broadcast, loopback) are treated as absent.
+Before the rules: an observation without a time, or for an interface that has no network context (one never configured), is dropped. A MAC that is not a usable host MAC (multicast, broadcast, all-zero) and an IP that is neither a global nor a link-local unicast address (unspecified, multicast, broadcast, loopback) are treated as absent; an observation left with neither MAC, IP nor records is dropped.
 
 ### 5.1 Binding the observation to a host
 
@@ -235,7 +235,7 @@ An IP from an observation is bound to the host only if the observation is presen
 - the host's bindings that only its ARP answers supported are closed at the observation's time (`IP_REMOVED`, followed by `DUPLICATE_IP_RESOLVED` where a conflict ends);
 - from then on its ARP answers open, refresh or take over nothing, except to refresh addresses it holds on other evidence (its own ARP requests, IP traffic, DHCP); they are recorded as observations only.
 
-The flag is kept across restarts (`hosts.proxy_arp`); the claim counts start again after a restart.
+The flag is kept across restarts (`hosts.proxy_arp`); the claim counts start again after a restart, and so does the knowledge of which bindings only ARP answers supported: bindings open at start-up count as confirmed, so a flag set later does not close them.
 
 ### 5.3 Address binding lifecycle
 
@@ -251,7 +251,7 @@ Let *H* be the bound host and *X* the attributed IP. A MAC's addresses are indep
 | **Conflict ends by takeover:** a new MAC takes *X* over and closes every earlier holder, one of which was in conflict | The new binding has no conflict | `DUPLICATE_IP_RESOLVED` on the new holder, the closed conflicting holder as related host |
 | **Expiry:** an open binding not confirmed for `identity.address_expiry` (default 24 h) while its host has been observed since | Close with `ended_at = last_seen + address_expiry`, the moment expiry applied | `IP_REMOVED` (cause `expiry`, `reason` `address not confirmed for …`) |
 
-Expiry is an inference: the host kept being seen without confirming the address, so it is taken to have left it; `ended_at` is when the inference applied, not when the device changed its configuration. Bindings are **not** closed when a host becomes MISSING: the last known state remains in effect (and shows as unconfirmed). IPv4 and IPv6 follow the same rules; hosts commonly hold several IPv6 addresses at once. The network and broadcast addresses of the context's IPv4 prefixes are never attributed.
+Expiry is an inference: the host kept being seen without confirming the address, so it is taken to have left it; `ended_at` is when the inference applied, not when the device changed its configuration. Bindings are **not** closed when a host becomes MISSING: the last known state remains in effect (and shows as unconfirmed). IPv4 and IPv6 follow the same rules; hosts commonly hold several IPv6 addresses at once. The network and broadcast addresses of the context's IPv4 prefixes (of /30 and shorter) are never attributed.
 
 **Late observations.** An observation older than the last binding change of its host or of its IP (open or close) only refreshes an existing open binding; it never opens, closes or takes over a binding. This keeps evidence that arrives out of order (e.g. an old neighbour-table entry read after an IP change) from reopening history.
 
@@ -290,7 +290,7 @@ When a host's last open record of a name ends (other than by eviction), `HOSTNAM
 
 ### 5.5 TCP endpoints
 
-A `tcp_connect` result is kept per endpoint, the key `(context, ip, proto, port)` in `endpoints`, so the same port on two addresses of one MAC never overwrite each other. The MAC is an attribute of each result, never part of the key: `host_id` is the host that alone held the address when the result came in, NULL when none or several did. An endpoint is recorded either way; a conflict never picks a holder.
+A `tcp_connect` result is kept per endpoint, the key `(context, ip, proto, port)` in `endpoints`, so the same port on two addresses of one MAC never overwrite each other. The MAC is an attribute of each result, never part of the key: `host_id` is the host that alone held the address when the result came in, with its binding confirmed within `identity.address_expiry` (§5.1 rule 2), NULL when none, several or only a stale one did. An endpoint is recorded either way; a conflict never picks a holder.
 
 - `last_result` and `last_result_at` are the latest result: OPEN (a completed connect), REFUSED (an active refusal), TIMEOUT, UNREACHABLE, or LOCAL_ERROR (the probe could not be made here: no permission, no usable source address, no direct route, a missing interface; `last_detail` says why). LOCAL_ERROR is no evidence about the target.
 - `last_definite_result` and `last_definite_at` are the latest OPEN or REFUSED, and `last_open_at` the latest OPEN. They are kept apart from the last result, so a timeout never erases that the endpoint last answered OPEN.
@@ -303,7 +303,7 @@ Only an OPEN or REFUSED result refreshes the holder (§5.1). OPEN is a completed
 
 The DHCPv4 decoder reads a whole message into one observation (`DHCPMessage`): the BOOTP header (op, xid, secs, flags, hops, ciaddr, yiaddr, siaddr, giaddr, chaddr when Ethernet) and options 1, 3, 6, 12, 15, 50, 51, 53, 54, 55, 58, 59, 60, 61, 81, 82 (circuit and remote ID), 119, 121 and 249, with options split over several instances joined (RFC 3396) and the `file` and `sname` fields read when option 52 overloads them. `Present` lists the options the message carried: one it did not carry is unknown, never empty. Malformed options are listed and the rest kept; a truncated options field is flagged. Direction comes from the BOOTP op agreeing with the message type, so relay-to-server traffic decodes too. Client identifier, hostname and FQDN are what the client said, never merge keys.
 
-A client message is `passive_dhcp`; a server reply is `passive_dhcp_server`. Both carry the frame's sender (§2), which is the client only when the frame came straight from it. A message without an Ethernet `chaddr` stays an observation only.
+A client message is `passive_dhcp`; a server reply is `passive_dhcp_server`. Both carry the frame's sender (§2), which is the client only when the frame came straight from it. A message without an Ethernet `chaddr` joins no exchange or lease (a server reply still updates `dhcp_servers`).
 
 **Servers.** Every server reply (OFFER, ACK, NAK) is evidence of its sender: the frame's source MAC and IP, which belong to the relay when the reply was relayed. It binds that host like any IP source, and updates `dhcp_servers`, keyed by (context, server identifier, relay, sender MAC):
 
@@ -351,7 +351,7 @@ Visibility limits what this can prove. On a switched port the box sees broadcast
 
 ### 5.7 OUI registrant
 
-LAN Tracker does not identify equipment (ADR 0011). The OUI lookup (`internal/identify`, the embedded IEEE table) fills `hosts.oui_registrant` at discovery: the registrant of the MAC prefix. It is a hint about the network interface, never the equipment's maker, and no event is written for it. There is no device type, model, operating system or confidence anywhere in the model, and no probe or classifier that would produce one.
+LAN Tracker does not identify equipment (ADR 0011). The OUI lookup (`internal/identify`, the embedded IEEE table) fills `hosts.oui_registrant` at discovery: the registrant of the MAC prefix. It is a hint about the network interface, never the equipment's maker, and no event is written for it. `hosts.locally_administered` records the MAC's U/L bit (set on randomised and locally assigned MACs). There is no device type, model, operating system or confidence anywhere in the model, and no probe or classifier that would produce one.
 
 ### 5.8 Host descriptions
 
@@ -420,10 +420,10 @@ Event types are public: the catalogue in `internal/events` lists exactly the typ
 | `DUPLICATE_IP_DETECTED` | — | IP | `host_id` = new claimer, `related_host_id` = existing holder |
 | `DUPLICATE_IP_RESOLVED` | — | IP | `host_id` = remaining holder, `related_host_id` = the host that left |
 | `SCAN_STARTED`, `SCAN_COMPLETED` | — | summary text (probes, targets; counts, duration, or why it was aborted) | context of the scanned interface, no host; evidence `{actor, interface}` |
-| `ACTIVE_DISABLED`, `ACTIVE_ENABLED` | — | `active discovery disabled by <actor>: <reason>` | no host or context; evidence `{actor, reason}`; actor `env` when `LAN_TRACKER_ACTIVE_DISABLED=1` stopped it at start-up |
+| `ACTIVE_DISABLED`, `ACTIVE_ENABLED` | — | `active discovery disabled by <actor>: <reason>` (`enabled` for `ACTIVE_ENABLED`) | no host or context; evidence `{actor, reason}`; actor `env` when `LAN_TRACKER_ACTIVE_DISABLED=1` stopped it at start-up |
 | `INTERFACE_*` | — | `up` / `down` | no host |
-| `SUBNET_CHANGED` | prefix closed | prefix opened | no host |
-| `OBSERVATION_GAP` | when the gap began (RFC 3339) | when it ended | context of the interface, no host; cause `capture` or `neighbor` (the collector left `running` and came back, or was still down at shutdown; evidence `reason` = its last error) or `daemon` (the time from the previous run's last heartbeat to this start, on every configured interface, when at least 1 minute; evidence `reason`). The heartbeat is `runtime_state` `observed_until`, written every 15 s and at shutdown. A collector disabled by configuration or unsupported is no gap; replay records none |
+| `SUBNET_CHANGED` | prefix closed (— when one opened) | prefix opened (— when one closed) | one event per prefix; cause `iface_monitor`; no host |
+| `OBSERVATION_GAP` | when the gap began (RFC 3339) | when it ended | context of the interface, no host; cause `capture` or `neighbor` (the collector failed and came back to `running`, or was still failed at shutdown; evidence `reason` = its last error) or `daemon` (the time from the previous run's last heartbeat to this start, on every configured interface, when at least 1 minute; evidence `reason`). The heartbeat is `runtime_state` `observed_until`, written every 15 s and at shutdown. A collector disabled by configuration or unsupported is no gap; replay records none |
 | `DATABASE_RECREATED` | — | quarantined file (`<path>.corrupt-<UTC time>`) | no host or context; evidence `reason` = the integrity-check failure; always the new database's first event |
 | `DHCP_SERVER_DISCOVERED` | — | server identity: identifier or `unknown`, plus ` via <relay>` when relayed | `host_id` = the sender (server or relay) |
 | `DHCP_SERVER_UNEXPECTED` | previous status (`allowed`, `unchecked`; — for a new server) | server identity | `host_id` = the sender |
@@ -433,7 +433,7 @@ Event types are public: the catalogue in `internal/events` lists exactly the typ
 | `DHCP_LEASE_NAK` | the requested address (— when unknown) | `nak from <server>` or `nak` | |
 | `DHCP_LEASE_DECLINED` | the declined address (option 50; empty without it) | — | |
 | `DHCP_LEASE_RELEASED` | the released address (`ciaddr`) | — | |
-| `HOST_DESCRIBED` | the previous description (— for a first one) | the new description (— when removed) | cause `operator`; evidence `{actor}` |
+| `HOST_DESCRIBED` | the previous description (— for a first one) | the new description (— when removed) | cause `operator`; evidence `{actor, interface, mac}` |
 
 ### Provenance
 
@@ -453,7 +453,7 @@ Every event is self-contained, so pruning observations never weakens history:
 
 ## 9. Retention and compaction
 
-Configurable per site under `storage.retention`. Defaults: raw observations 7 days; hourly roll-ups (one row per host, source, IP, MAC and hour, including unbound observations with `host_id` NULL) 90 days; events 2 years.
+Configurable per site under `storage.retention`. Defaults: raw observations 7 days; hourly roll-ups (one row per interface, host, source, IP, MAC and hour, including unbound observations with `host_id` NULL) 90 days; events 2 years.
 
 | Data | Pruned when older than | By |
 | --- | --- | --- |
@@ -471,7 +471,7 @@ Open name records and open leases are never pruned, however old; nor are the cur
 
 ## 10. Golden reconstruction scenario
 
-The central correlator fixture, committed in phase 0 under `test/golden/reconstruction/` (observation stream in, expected bindings, events and query answers out) and run on every change. Interface `eth1`, prefix `192.168.110.0/24`, `T0 = 2026-10-01T10:00:00Z`, default thresholds. Addresses X = .50, Y = .51, Z = .52.
+The central correlator fixture, under `test/golden/reconstruction/` (observation stream in, expected bindings, events and query answers out), run by `make check` through the correlator (`correlate_test.go`) and the CLI (`cli_test.go`). Interface `eth1`, prefix `192.168.110.0/24`, `T0 = 2026-10-01T10:00:00Z`, default thresholds. Addresses X = .50, Y = .51, Z = .52.
 
 | # | Time | Observation | Expected |
 | --- | --- | --- | --- |
@@ -489,8 +489,8 @@ The central correlator fixture, committed in phase 0 under `test/golden/reconstr
 | `find X --at T0+30m` | A, binding [T0, T0+2h), unconfirmed (last_seen T0) |
 | `find Y --at T0+30m` | No holder; next A from T0+1h; exit 1 |
 | `find X --at T0+150m` | B, from T0+2h, open |
-| `find Y --at T0+3h10m` | A and C, CONFLICT |
+| `find Y --at T0+3h10m` | A and C, CONFLICT, both unconfirmed |
 | `find Y --at T0+3h40m` | A and C, still CONFLICT: A's new address Z did not end Y |
 | `history X` | `HOST_DISCOVERED` A (X), `HOST_DISCOVERED` B (X), `IP_REMOVED` A X (related B), `SERVICE_STATE_CHANGED` B tcp/502 OPEN |
 | `history Y` | `IP_ADDED` A Y, `HOST_DISCOVERED` C (Y), `DUPLICATE_IP_DETECTED` Y |
-| After 7-day compaction | All answers and event evidence above unchanged |
+| After 7-day compaction | All answers and event evidence above unchanged (`correlate_test.go`) |

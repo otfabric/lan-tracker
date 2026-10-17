@@ -9,18 +9,25 @@ Reference files for running LAN Tracker under systemd (docs/ARCHITECTURE.md §8)
 
 Releases are reproducible: `make package VERSION=vX.Y.Z` on the tagged commit gives the same checksums. `config.dev.yaml` is for local development (`make run-dev`).
 
-Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each. On Debian 11 the unit runs without `PrivateIPC=` (not in systemd 247; the journal shows a warning). Debian 11's regular security support ended in August 2026.
+Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each. On Debian 11 the unit runs without `PrivateIPC=` (not in systemd 247; the journal shows a warning). Debian 11's long-term support ended in August 2026.
 
 ## Install
 
 ### 1. Verify and unpack
 
-Download the tarball for the board (`linux-arm64` for a RevPi or Raspberry Pi, `linux-amd64` for an x86 edge box) and `SHA256SUMS`, then:
+Download the tarball for the board (`linux-arm64` for a RevPi or Raspberry Pi, `linux-amd64` for an x86 edge box) and `SHA256SUMS`, verify and unpack. For the latest release, on the board itself:
 
 ```bash
+case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; *) echo "unsupported: $(uname -m)" >&2; exit 1 ;; esac
+tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/otfabric/lan-tracker/releases/latest | sed 's|.*/||')
+cd "$(mktemp -d)"
+curl -fsSLO "https://github.com/otfabric/lan-tracker/releases/download/$tag/lan-tracker-$tag-linux-$arch.tar.gz"
+curl -fsSLO "https://github.com/otfabric/lan-tracker/releases/download/$tag/SHA256SUMS"
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf lan-tracker-vX.Y.Z-linux-arm64.tar.gz && cd lan-tracker-vX.Y.Z-linux-arm64
+tar -xzf "lan-tracker-$tag-linux-$arch.tar.gz" && cd "lan-tracker-$tag-linux-$arch"
 ```
+
+For a given release, set `tag=vX.Y.Z` instead of looking up the latest; on a machine without internet access, copy the two files over and run the last two commands.
 
 ### 2. Install
 
@@ -40,18 +47,18 @@ sudo systemctl restart lan-tracker
 
 On Debian 11 `daemon-reload` logs `Unknown key name 'PrivateIPC'`: systemd 247 predates the setting, and the unit runs without it.
 
-Edit `/etc/lan-tracker/config.yaml` for the site (interfaces, and active discovery only after review, see below), check it with `sudo lan-tracker config validate`, then apply it with `sudo lan-tracker config reload`, which prints what took effect and what needs `sudo systemctl restart lan-tracker` (new interfaces, passive capture, storage, API, metrics, log format). The API socket and the database are root's (mode 0660 and 0640): run `lan-tracker` commands with `sudo`.
+Edit `/etc/lan-tracker/config.yaml` for the site (interfaces, and active discovery only after review, see below), check it with `sudo lan-tracker config validate`, then apply it with `sudo lan-tracker config reload`, which prints what took effect and what needs `sudo systemctl restart lan-tracker` (adding, removing or renaming interfaces, passive capture, storage, API, metrics, log format, `identity.oui_override` and the concurrency caps). The API socket and the database are root's (mode 0660 and 0640): run `lan-tracker` commands with `sudo`.
 
 Then check:
 
 | Check | Command | Expect |
 | --- | --- | --- |
-| Healthy | `sudo lan-tracker daemon status` | `State: ok` (exit 0); every collector of a configured interface `running` |
+| Healthy | `sudo lan-tracker daemon status` | `State: OK` (exit 0); every collector of a configured interface `running` |
 | Clock | same | `Clock: synced` once chrony has synchronised; events written before that are marked `unsynced` (`clock_sync` in `events list -o json`) |
 | Hosts appear | `sudo lan-tracker hosts list` | the devices of the site within a few minutes |
 | DHCP servers | `sudo lan-tracker dhcp servers` | the site's DHCP server(s), once a client has asked; then list their identifiers in `interfaces[].dhcp.servers` (or `[]` where none should exist) and `sudo lan-tracker config reload`, so any other raises `DHCP_SERVER_UNEXPECTED`. On a switched port replies unicast to other clients are not seen: an empty list proves nothing |
 | Privileges | `grep Cap /proc/$(systemctl show -p MainPID --value lan-tracker)/status` | `CapEff` and `CapBnd` `0000000000002000`: root, but with `CAP_NET_RAW` only |
-| Sandbox | `systemd-analyze security lan-tracker` | exposure ≤ 2.5 (2.3 in the container tests) |
+| Sandbox | `systemd-analyze security lan-tracker` | exposure ≤ 2.5 (`make test-systemd` checks it) |
 | Board audit (once per board type) | `capcheck` under the unit's sandbox, as in `tools/capcheck/README.md` | every row `PASS` or `SKIP`, including the `adjtimex` read; record it in `docs/ARCHITECTURE.md` §8 |
 
 ## Upgrade and rollback
@@ -78,7 +85,7 @@ Releases are made from `main` only, by the **release** workflow (`.github/workfl
 
 Runs are serialised, so two releases never pick the same version. If a run fails after the tag was pushed (the release step), delete the tag before running it again, or the next run picks the following version.
 
-## Staged rollout (each release, docs/IMPLEMENTATION_PLAN.md)
+## Staged rollout (each release)
 
 1. Lab rig, passive only, full soak (7 days with a real PLC, inverter and HMI).
 2. Three pilot sites passive only for two weeks; compare `hosts list` with what field support knows is there.
@@ -96,7 +103,7 @@ Runs are serialised, so two releases never pick the same version. If a run fails
 4. Active discovery on the pilot sites, then site by site after reviewing the site's device mix:
    - set `active.enabled: true` with the site's `networks` and `exclude` (fragile devices, gateways) on the interface, and the periodic probes under `active:`; `lan-tracker config validate` shows the sweep size and duration;
    - preview with `lan-tracker scan plan --profile <profile>`, then `lan-tracker scan run --profile <profile>` while someone watches the devices;
-   - `sudo lan-tracker config reload` to start the periodic probes (it lists `interfaces[N].active.enabled` as applied, and the journal says `configuration reloaded; active discovery: arp every 5m on eth0 (…)`); periodic passes are not logged, so check them with `sudo lan-tracker observations list --source arp_scan`;
+   - `sudo lan-tracker config reload` to start the periodic probes (it lists `interfaces[N].active.enabled` as applied, and the journal says `configuration reloaded; active discovery: arp every 15m on eth0 (…)`); periodic passes are not logged, so check them with `sudo lan-tracker observations list --source arp_scan`;
    - watch `lan_tracker_probe_total` and `lan_tracker_probe_throttled_total`.
 
    If anything misbehaves: `lan-tracker active disable --reason "..."` stops every probe at once and stays set across restarts (`active enable` clears it). `LAN_TRACKER_ACTIVE_DISABLED=1` in the unit's environment forces it off fleet-wide.

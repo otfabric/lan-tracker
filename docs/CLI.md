@@ -22,6 +22,7 @@ lan-tracker [global options] <command> <subcommand> [options]
 | `-wal` present but not readable, or `-shm` missing and the directory not writable | Exit 2: `cannot open database read-only beside the WAL; run with sudo or copy the database`. |
 | Copied database | Copy only after `systemctl stop lan-tracker`, or copy `hosts.db`, `-wal` and `-shm` together. A `hosts.db` copied alone while the daemon was running lacks every transaction since the last checkpoint; the CLI cannot detect this. |
 | `SQLITE_BUSY` after the busy timeout | Exit 2 with the SQLite error. |
+| Schema older or newer than the binary's | Exit 2: `database schema does not match this binary`. Only the daemon migrates; start it once to migrate an older database. |
 
 The daemon runs as root with `UMask=0027` and the data directory is `0750 root:root` (`deploy/README.md`), so `--offline` needs `sudo`. Offline commands keep their read transaction short; a long-held reader stops WAL checkpoints.
 
@@ -31,9 +32,9 @@ The daemon runs as root with `UMask=0027` and the data directory is `0750 root:r
 | --- | --- |
 | `--config PATH` | Config file (default `$LAN_TRACKER_CONFIG`, else `/etc/lan-tracker/config.yaml`) |
 | `--db PATH` | Database path for `--offline` (default from config) |
-| `--socket PATH` | API socket (default `/run/lan-tracker/api.sock`) |
+| `--socket PATH` | API socket (default `api.socket` from the config, `/run/lan-tracker/api.sock`; a config file that does not load leaves the default) |
 | `-o`, `--output table\|json\|jsonl\|csv` | Output format (default `table`) |
-| `--no-color` | Disable colour |
+| `--no-color` | Accepted; the output has no colour |
 | `--log-level trace\|debug\|info\|warn\|error` | Log level |
 | `--timeout DURATION` | Client timeout (default 10 s) |
 | `--offline` | Read the database directly, read-only |
@@ -58,7 +59,7 @@ The daemon runs as root with `UMask=0027` and the data directory is `0750 root:r
 | `dhcp servers` | DHCP servers seen: identity (option 54), relay, sender MAC and IP, allowlist verdict, advertised router, DNS servers and mask, last seen | `--interface`, `--status` |
 | `dhcp leases` | Lease history: each address and configuration a server acknowledged for a client, newest first | `--interface`, `--mac`, `--ip`, `--open`, `--limit` |
 | `dhcp exchanges` | DHCP transactions: each client's messages, the offers, the server it selected and the outcome, newest first | `--interface`, `--mac`, `--since`, `--limit` |
-| `interfaces list` | State, MAC, current prefixes, passive/active per interface | |
+| `interfaces list` | State, MAC, current prefixes, passive/active per interface (`replay` for a replayed one), host count | |
 | `watch` | Live event stream | `--interface`, `--type`, `--port` |
 | `active disable` | Kill switch: stop all active probing now; persists across restarts | `--reason TEXT` (required) |
 | `active enable` | Clear the kill switch | `--reason TEXT` |
@@ -70,10 +71,9 @@ The daemon runs as root with `UMask=0027` and the data directory is `0750 root:r
 | `db info` | Path, schema version, journal mode, size, WAL size, row counts | |
 | `db check` | SQLite integrity check | |
 | `version` | Version, commit, commit date (release builds are reproducible), Go version, architecture; `--quiet` prints the version alone | |
+| `completion` | Shell completion script (cobra's generator) | `bash`, `zsh`, `fish`, `powershell` |
 
 There are no merge or split commands: within an interface a host is its MAC (`DATA_MODEL.md` §1).
-
-Deferred past v1: `neighbors list`, `interfaces show`, `scan status`, `db vacuum`, `db export`.
 
 ## 4. Behaviour details
 
@@ -134,7 +134,7 @@ One row per TCP endpoint checked: interface, address and port (`DATA_MODEL.md` �
 
 ### `scan plan`
 
-Accepts the same options as `scan run`, sends nothing, and prints:
+Accepts the same options as `scan run`, sends nothing, and prints (`-o json` prints the `Plan`):
 
 - interface, requested networks, profile and probes/ports
 - targets after excludes: the addresses the ARP sweep covers (without the interface's own) and the known hosts (open IPv4 bindings in the networks) that ICMP and TCP probe, and the excludes that applied
@@ -144,7 +144,7 @@ Accepts the same options as `scan run`, sends nothing, and prints:
 - the assumptions behind the estimate: probes paced at the rates shown, at least the target spacing apart, and at most `active.max_concurrent_jobs` in flight, each holding its slot while it waits for a reply (so with 4 slots and a 1 s ARP timeout a sweep runs at about 4 requests/s, not 5), sending and answering taking no time; for the typical duration, that known hosts answer at once while most swept addresses are empty, so only the ARP sweep waits out its reply timeout; for the no-response duration, that nothing answers, so every phase waits out its reply timeout (named per probe); and that hosts that first answer the sweep are probed too, which adds to a run
 - verdict: `ALLOWED` or `REFUSED` with every reason (kill switch set, no interface with active discovery, interface not configured, active discovery disabled on the interface, network not IPv4, outside the interface's configured networks or wider than `max_auto_scan_prefix_v4`, a sweep beyond `active.max_sweep_targets`, a sweep of more than 1,024 addresses without `--allow-wide`, unknown profile, TCP port out of range, no targets left)
 
-With no probe given (no `--arp`, `--icmp`, `--tcp` and no profile) the scan is an ARP sweep; probes given are added to the profile's. A sweep of more than 1,024 addresses (possible only with the expert override `active.max_sweep_targets`) is refused until the plan is repeated with `--allow-wide`: the refused plan is the preview, with the target count and both durations. Without `--interface` every interface with active discovery is planned; with several, each gets its own estimate and duration. Exit 0 if allowed, 2 if refused. Online, the daemon computes the plan from its effective config, the kill switch, the live interface addresses, the kernel's routes and the known hosts. With `--offline`, the CLI computes it from the config file, the persisted kill switch and `LAN_TRACKER_ACTIVE_DISABLED`, and the known hosts in the database; the interfaces' own addresses and routes are unknown offline, so the own addresses count as sweep targets and no route check is made. The ARP responders of a run are probed as well, so a run can probe more hosts than its plan counts.
+With no probe given (no `--arp`, `--icmp`, `--tcp` and no profile) the scan is an ARP sweep; probes given are added to the profile's. A sweep of more than 1,024 addresses (possible only with the expert override `active.max_sweep_targets`) is refused until the plan is repeated with `--allow-wide`: the refused plan is the preview, with the target count and both durations. Without `--interface` every interface with active discovery is planned; with several, each gets its own estimate and duration. Exit 0 if allowed, 2 if refused. Online, the daemon computes the plan from its effective config, the kill switch, the live interface addresses, the kernel's routes and the known hosts. With `--offline`, the CLI computes it from the config file, the persisted kill switch and `LAN_TRACKER_ACTIVE_DISABLED`, and the known hosts in the database; the interfaces' own addresses and routes are unknown offline, so the own addresses count as sweep targets and no route check is made. A daemon in replay mode runs no probes and refuses `scan plan` and `scan run` (exit 2). The ARP responders of a run are probed as well, so a run can probe more hosts than its plan counts.
 
 ### `scan run`
 
@@ -152,11 +152,11 @@ Computes the same plan, prints it, and refuses (exit 2) if `scan plan` would. Ot
 
 ### Time arguments
 
-`--since`/`--seen-within` accept durations (`24h`, `7d`, `90m`) counted back from now, or timestamps. `--at`/`--until` accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]` (local time) or RFC 3339. Tables show local time.
+`--since`/`--seen-within` accept durations (`24h`, `7d`, `90m`) counted back from now, or timestamps. `--at`/`--until` accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]` (also with `T` for the space; local time) or RFC 3339. Tables show local time.
 
 ### Output formats
 
-Lists (`hosts list`, `hosts history`, `observations list`, `events list`, `services list`, `dhcp servers`, `dhcp leases`, `dhcp exchanges`, `interfaces list`) support all four formats; `json` is the API's objects (`API.md`), `csv` uses RFC 3339 UTC times and empty cells for missing values. Event tables flag the time of an event written before the system clock was synchronised with `*` and one written while that was unknown with `?`, with a legend below; event CSV has a `CLOCK_SYNC` column and JSON the `clock_sync` field. Hostnames and other text come from the network, so a CSV cell starting with `=`, `+`, `-`, `@`, tab or carriage return is prefixed with `'` to keep spreadsheets from running it as a formula. Records (`hosts show`, `hosts find`, `daemon status`, `db info`, `db check`, `scan plan`, `scan run`, `config reload`) support `table` and `json`; `hosts evidence` also `jsonl`; `watch` prints a line per event or, with `-o jsonl`/`json`, the event objects. `--quiet` prints nothing and leaves the answer to the exit code.
+Lists (`hosts list`, `hosts history`, `observations list`, `events list`, `services list`, `dhcp servers`, `dhcp leases`, `dhcp exchanges`, `interfaces list`) support all four formats; `json` is the API's objects (`API.md`), `csv` uses RFC 3339 UTC times and empty cells for missing values. Event tables flag the time of an event written before the system clock was synchronised with `*` and one written while that was unknown with `?`, with a legend below; event CSV has a `CLOCK_SYNC` column and JSON the `clock_sync` field. Hostnames and other text come from the network, so a CSV cell starting with `=`, `+`, `-`, `@`, tab or carriage return is prefixed with `'` to keep spreadsheets from running it as a formula. Records (`hosts show`, `hosts find`, `hosts set`, `hosts unset`, `daemon status`, `db info`, `db check`, `scan plan`, `scan run`, `config show`, `config validate`, `config reload`, `version`) support `table` and `json` (`config show` prints YAML as its table); `config show --sources` supports all four; `hosts evidence` also `jsonl`; `watch` prints a line per event or, with `-o jsonl`/`json`, the event objects. `--quiet` prints nothing and leaves the answer to the exit code.
 
 ### Online reads
 
@@ -200,7 +200,7 @@ One row per DHCP transaction seen (interface, xid and client hardware address), 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success / healthy |
-| 1 | Degraded (`daemon status`, e.g. a configured collector not running), no results for `find`, or no host for `hosts show` and `hosts set` |
+| 1 | Degraded (`daemon status`, e.g. a configured collector not running), no results for `hosts find` or `hosts evidence`, or no host for `hosts show`, `hosts set` and `hosts unset` |
 | 2 | Unhealthy (`daemon status`), command error or scan refused |
 | 3 | Daemon unreachable (online mode) |
 | 64 | Usage error |
@@ -211,7 +211,7 @@ Prints interfaces with passive/active mode, active scan networks and excludes wi
 
 ### `config reload`
 
-Makes the daemon re-read the configuration file it was started with, exactly as `systemctl reload lan-tracker` (SIGHUP) does, through `POST /v1/config/reload` (`API.md`); `--config` does not change which file. The reload is all or nothing: a file that does not load or validate changes nothing, and the command prints the per-key errors and exits 2. Otherwise it prints the keys whose new values took effect (key, old, new) and the changed keys that need a restart (key, running value, value in the file), which keep their running values; with neither, `No changes.` Exit 0 in both cases. What a reload applies and what needs a restart is FR-CFG-3: each interface's `active` settings (enabling or disabling active discovery, networks, excludes) and `dhcp` allowlist, the probes and their intervals, rates, presence thresholds, identity settings and the log level apply at once; adding, removing or renaming interfaces, their passive settings, `passive`, the concurrency caps (`active.max_concurrent_jobs`, `active.budgets.tcp.max_concurrent_per_interface`, `active.budgets.tcp.max_concurrent_per_host`), `storage`, `api`, `metrics`, `logging.format` and `replay` need a restart. Keys are named as in `config show --sources`. The daemon logs the reload with the calling Unix user and the applied keys; its message says what active discovery now runs (`configuration reloaded; active discovery: arp every 15m on eth0 (192.168.0.0/24)`). Check the file first with `config validate`, and preview a newly enabled interface's sweep with `scan plan`. Needs the daemon; `-o json` prints `ReloadResult`.
+Makes the daemon re-read the configuration file it was started with, exactly as `systemctl reload lan-tracker` (SIGHUP) does, through `POST /v1/config/reload` (`API.md`); `--config` does not change which file. The reload is all or nothing: a file that does not load or validate changes nothing, and the command prints the per-key errors and exits 2. Otherwise it prints the keys whose new values took effect (key, old, new) and the changed keys that need a restart (key, running value, value in the file), which keep their running values; with neither, `No changes.` Exit 0 in both cases. What a reload applies and what needs a restart is FR-CFG-3: each interface's `active` settings (enabling or disabling active discovery, networks, excludes) and `dhcp` allowlist, the probes and their intervals, rates, presence thresholds, identity settings and the log level apply at once; adding, removing or renaming interfaces, their passive settings, `passive`, the concurrency caps (`active.max_concurrent_jobs`, `active.budgets.tcp.max_concurrent_per_interface`, `active.budgets.tcp.max_concurrent_per_host`), `storage`, `api`, `metrics`, `logging.format`, `replay`, `identity.oui_override` and `neighbor.resync_interval` need a restart. Keys are named as in `config show --sources`. The daemon logs the reload with the calling Unix user and the applied keys; its message says what active discovery now runs (`configuration reloaded; active discovery: arp every 15m on eth0 (192.168.0.0/24)`, or `off (replay)` in replay mode). Check the file first with `config validate`, and preview a newly enabled interface's sweep with `scan plan`. Needs the daemon; `-o json` prints `ReloadResult`.
 
 ### `config show --sources`
 
@@ -219,14 +219,14 @@ Prints every effective key with where its value came from (default, file path, `
 
 ## 5. Examples
 
-The host, history, event, evidence and service outputs are from the golden reconstruction scenario (`DATA_MODEL.md` §10), with host IDs shortened and read an hour after its last observation; its events carry `?` because the replay's clock state is unknown. The name and DHCP outputs are from the synthetic site capture (`test/fixtures`); `daemon status` shows a live box.
+The outputs are real, from `daemon run` replaying two inputs in the dev container, read on 17 Oct 2026, so ages show `15d ago`; host IDs are shortened. The host, history, event, evidence, service, description, `watch` and `config reload` outputs are from the golden reconstruction scenario (`DATA_MODEL.md` §10); its events carry `?` because the replay's clock state is unknown. The name, DHCP, `interfaces list` and `daemon status` outputs are from the synthetic site capture (`test/fixtures`). `scan plan` ran `--offline` over the site capture's database with eth1 configured for active discovery (192.168.110.0/24, excluding .1) and a `modbus` profile (ARP and tcp/502). The `scan run` summary is the CLI tests' (a replay sends nothing).
 
 ```bash
 $ lan-tracker hosts list
 MAC                IP                   HOSTNAME  OUI REGISTRANT      IFACE  STATE   LAST SEEN  DESCRIPTION
-00:0c:26:aa:bb:03  192.168.110.51       -         Weintek Labs. Inc.  eth1   STALE   2h ago
-00:1b:1b:aa:bb:01  192.168.110.51 (+1)  -         Siemens AG          eth1   STALE   1h ago
-00:1b:1b:aa:bb:02  192.168.110.50       -         Siemens AG          eth1   ACTIVE  1h ago
+00:0c:26:aa:bb:03  192.168.110.51       -         Weintek Labs. Inc.  eth1   STALE   15d ago
+00:1b:1b:aa:bb:01  192.168.110.51 (+1)  -         Siemens AG          eth1   STALE   15d ago
+00:1b:1b:aa:bb:02  192.168.110.50       -         Siemens AG          eth1   ACTIVE  15d ago
 ```
 
 ```bash
@@ -236,13 +236,13 @@ Interface:   eth1
 MAC:         00:1b:1b:aa:bb:02  (OUI registrant: Siemens AG)
 State:       ACTIVE
 First seen:  2026-10-01 12:00:00
-Last seen:   2026-10-01 14:00:00  (frame 1h ago, address confirmed 1h ago, endpoint answer 1h ago)
+Last seen:   2026-10-01 14:00:00  (frame 15d ago, address confirmed 15d ago, endpoint answer 15d ago)
 
 Addresses:
   192.168.110.50   2026-10-01 12:00:00 → open   sources: passive_arp, tcp_connect
 
 TCP endpoints:
-  192.168.110.50   tcp/502   OPEN        1h ago
+  192.168.110.50   tcp/502   OPEN        15d ago
 ```
 
 ```bash
@@ -288,7 +288,7 @@ TIME                  TYPE                   IFACE  MAC                VALUE    
 ```
 
 ```bash
-$ lan-tracker events list --type duplicate-ip --since 24h
+$ lan-tracker events list --type duplicate-ip
 TIME                  TYPE                   IFACE  MAC                VALUE           RELATED            CAUSE
 2026-10-01 13:00:00?  DUPLICATE_IP_DETECTED  eth1   00:0c:26:aa:bb:03  192.168.110.51  00:1b:1b:aa:bb:01  passive_arp
 ? written while the clock's synchronisation was unknown
@@ -315,8 +315,8 @@ Events:
 ```bash
 $ lan-tracker services list
 IP              PORT     LAST RESULT  CHECKED  LAST DEFINITE    MAC                IFACE
-192.168.110.50  502/tcp  OPEN         1h ago   OPEN 1h ago      00:1b:1b:aa:bb:02  eth1
-192.168.110.99  502/tcp  REFUSED      1h ago   REFUSED 1h ago   -                  eth1
+192.168.110.50  502/tcp  OPEN         15d ago  OPEN 15d ago     00:1b:1b:aa:bb:02  eth1
+192.168.110.99  502/tcp  REFUSED      15d ago  REFUSED 15d ago  -                  eth1
 ```
 
 ```bash
@@ -327,14 +327,14 @@ MAC:         00:1b:1b:aa:bb:01  (OUI registrant: Siemens AG)
 State:       STALE
 Name:        plc-a.local
 First seen:  2026-10-01 10:00:00
-Last seen:   2026-10-01 12:50:00  (frame 2h ago, address confirmed 2h ago)
+Last seen:   2026-10-01 12:50:00  (frame 15d ago, address confirmed 15d ago)
 
 Addresses:
   192.168.110.50   2026-10-01 10:00:00 → 2026-10-01 12:00:00   sources: passive_arp, passive_mdns
   192.168.110.51   2026-10-01 12:50:00 → open   sources: passive_arp   CONFLICT
 
 Names:
-  plc-a.local              mdns    A     192.168.110.50   expired 3h ago
+  plc-a.local              mdns    A     192.168.110.50   expired 15d ago
 
 DHCP leases (the servers' statements, not proof the host holds the address):
   192.168.110.52   from 192.168.110.2   2026-10-01 13:30:00 → open  acks 1  lease 1h0m0s  expires 2026-10-01 14:30:00  gateway 192.168.110.1
@@ -359,13 +359,13 @@ CLIENT             XID         IFACE  FIRST SEEN           MESSAGES             
 ```
 
 ```bash
-$ lan-tracker scan plan --interface eth1 --profile modbus
+$ lan-tracker scan plan --interface eth1 --profile modbus --offline
 Interface:  eth1    Profile: modbus    Networks: 192.168.110.0/24
-Targets:    253 to sweep (excluded: 192.168.110.1), 2 known hosts
+Targets:    253 to sweep (excluded: 192.168.110.1), 5 known hosts
 Probes:     arp; tcp/502
 Rates:      arp 5 starts/s, tcp 1 connects/s (≤2 per interface, ≤1 per host); global cap 5 probe starts/s
-Estimate:   253 ARP requests, 2 TCP connects: 255 probe starts (kernel TCP packets come on top)
-Duration:   estimated typical ~65 s, estimated no-response ~66 s
+Estimate:   253 ARP requests, 5 TCP connects: 258 probe starts (kernel TCP packets come on top)
+Duration:   estimated typical ~68 s, estimated no-response ~69 s
 Assumes:    probes start paced at the rates above, at most 5 starts/s in all, at least 5s apart per target and at most 4 in flight, each holding its slot while it waits for a reply; sending, connecting and answering take no time; the kernel's TCP handshake, retransmission and close packets are not counted
             typical: known hosts answer at once; most swept addresses are empty, so the ARP sweep waits its 1s reply timeout once, after its last request
             no-response: nothing answers, so every phase waits out its reply timeout once (ARP 1s, tcp/502 750ms)
@@ -374,12 +374,25 @@ Verdict:    ALLOWED
 ```
 
 ```bash
-$ lan-tracker scan run --interface eth1 --profile modbus
+$ lan-tracker scan plan --interface eth1 --network 10.0.0.0/16 --offline; echo $?
+Interface:  eth1
+Probes:     arp
+Rates:      arp 5 starts/s; global cap 5 probe starts/s
+Estimate:   nothing to send
+Verdict:    REFUSED
+  - 10.0.0.0/16 is wider than max_auto_scan_prefix_v4 /24
+  - 10.0.0.0/16 is outside the configured networks of eth1
+  - eth1: none of the requested networks is configured on the interface
+2
+```
+
+```bash
+$ lan-tracker scan run --profile modbus
 ...                                   (the plan, as above)
 Scanning (estimated typical duration ~65 s) ...
-eth1: done in 66 s; 3 hosts answered ARP
+eth1: done in 27 s; 3 hosts answered ARP
   arp      250 no_reply, 3 reply
-  tcp/502  1 OPEN, 2 REFUSED
+  tcp/502  2 OPEN, 3 REFUSED
 ```
 
 ```bash
@@ -388,44 +401,52 @@ Active discovery disabled (persists across restarts). Clear with: lan-tracker ac
 ```
 
 ```bash
-$ lan-tracker watch --interface eth1
-19:42:12  HOST_DISCOVERED        eth1   192.168.110.200  00:0c:26:8e:1b:d6
-19:43:04  IP_ADDED               eth1   192.168.110.61  00:1b:1b:12:34:56
-19:43:18  SERVICE_STATE_CHANGED  eth1   tcp/502 OPEN  00:1b:1b:12:34:56
+$ lan-tracker hosts set 00:1b:1b:aa:bb:02 --description "Line 3 PLC"
+Description of 00:1b:1b:aa:bb:02 on eth1: Line 3 PLC
+$ lan-tracker hosts unset 00:1b:1b:aa:bb:02 --description
+Description of 00:1b:1b:aa:bb:02 on eth1 removed.
 ```
 
 ```bash
+$ lan-tracker watch --interface eth1        # while the description above was set
+14:00:00  HOST_DESCRIBED         eth1   Line 3 PLC  00:1b:1b:aa:bb:02
+```
+
+The time is the replay's simulated clock; a live daemon stamps the wall clock.
+
+```bash
 $ lan-tracker interfaces list
-NAME  STATE  MAC                PREFIXES          PASSIVE  ACTIVE  HOSTS
-eth0  up     00:c0:08:9a:41:02  -                 on       off     1
-eth1  up     00:c0:08:9a:41:03  192.168.110.0/24  on       on      3
+NAME  STATE    MAC  PREFIXES          PASSIVE  ACTIVE  HOSTS
+eth1  unknown  -    192.168.110.0/24  replay   off     7
 ```
 
 ```bash
 $ lan-tracker daemon status
-Version:    1.0.0 (linux/arm64)   PID 412   up 3d 4h
-Database:   /data/lan-tracker/hosts.db  ok  41 MB
+Version:    dev (linux/arm64)   PID 208   up 0s   replay
+Database:   /tmp/B/hosts.db  ok  507 KB
 Active:     enabled
-Clock:      synced
+Clock:      unknown
 Last scan:  never
 Interfaces:
-  eth1   up      192.168.110.0/24
-         hosts      12 active, 3 recent, 1 stale
-         capture    running     afpacket
-         neighbor   running     netlink
-         interface  running     netlink
-         arp        running     afpacket    last pass 4m ago: 253 swept, 14 replied (65 s)
-  eth2   up      10.0.0.0/24
-         capture    failed      socket(AF_PACKET): operation not permitted
-         neighbor   running     netlink
-         interface  running     netlink
-State:      DEGRADED
-  - eth2 capture: socket(AF_PACKET): operation not permitted
+  eth1   unknown 192.168.110.0/24
+         hosts      1 active, 6 stale
+         replay     running     file
+State:      OK
 ```
 
+On a live interface the collector rows are `capture`, `neighbor`, `interface` and each enabled probe, as `<collector> <state> <backend or error>`, a probe with its last pass (`arp running afpacket last pass 4m ago: 253 swept, 14 replied (65 s)`); a configured collector that is not running makes the state `DEGRADED`, with each problem listed below it, and exit 1. `--quiet` prints nothing and leaves the answer to the exit code.
+
 ```bash
-$ lan-tracker daemon status --quiet; echo $?
-1
+$ lan-tracker config reload               # after changing logging.level and storage.path
+Configuration /tmp/A/c.yaml reloaded.
+
+Applied:
+  KEY            OLD   NEW
+  logging.level  info  debug
+
+Not applied, needs a restart (sudo systemctl restart lan-tracker):
+  KEY           RUNNING          FILE
+  storage.path  /tmp/A/hosts.db  /tmp/A/other.db
 ```
 
 ```bash

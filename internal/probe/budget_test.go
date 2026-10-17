@@ -494,3 +494,65 @@ func TestSetLimitsDuringTCP(t *testing.T) {
 	}
 	<-done
 }
+
+// A probe waiting for its target's spacing holds no concurrency slot: with
+// one slot, a probe to another target (or interface) goes at once. A pass
+// re-probing hosts it reached seconds ago once filled every slot with such
+// waits and starved every other interface.
+func TestSpacingWaitHoldsNoSlot(t *testing.T) {
+	limits := defaultLimits()
+	limits.MaxConcurrent = 1
+	sim := clock.NewSim(t0)
+	b := NewBudget(sim, limits, nil)
+	ctx := context.Background()
+	release, err := b.Acquire(ctx, ARP, "eth1", ip("10.0.0.5"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	waiting := make(chan error, 1)
+	go func() {
+		release, err := b.Acquire(ctx, ICMP, "eth1", ip("10.0.0.5")) // due in 5 s
+		if err == nil {
+			release()
+		}
+		waiting <- err
+	}()
+	for sim.Waiters() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	got := make(chan error, 1)
+	go func() {
+		release, err := b.Acquire(ctx, ARP, "eth2", ip("10.0.0.6"))
+		if err == nil {
+			release()
+		}
+		got <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case err := <-got:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sim.Now().Sub(t0) >= 5*time.Second {
+				t.Errorf("the other probe went only at %v, after the spacing wait", sim.Now().Sub(t0))
+			}
+			sim.Advance(5 * time.Second)
+			if err := <-waiting; err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a probe to another target waited for one that waits out its target's spacing")
+		}
+		sim.Advance(10 * time.Millisecond) // pacing, never as far as the 5 s spacing
+		if sim.Now().Sub(t0) > 4*time.Second {
+			t.Fatal("a probe to another target waited for one that waits out its target's spacing")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

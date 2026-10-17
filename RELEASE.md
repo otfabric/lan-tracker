@@ -1,5 +1,37 @@
 # lan-tracker Releases
 
+## v0.2.0
+
+**Date:** 2026-10-17
+**Previous release:** v0.1.0
+
+### Summary
+
+Minor release: the v0.1.0 feature set is **frozen and documented**, with a **user guide** built from real sessions, an **end-user README** with a one-step Linux installation of the latest release, and new **chaos and parallel test suites** that found and fixed two bugs. Everything not implemented is in one place, [`docs/ROADMAP.md`](docs/ROADMAP.md). No change to the configuration, the schema or the CLI and API contracts.
+
+### Fixed
+
+- **A probe waiting for its target's spacing held a concurrency slot.** A pass re-probing hosts it had reached seconds earlier (an interface switched off and on by a reload, or repeated operator scans of the same hosts) could fill every slot with 5-second waits and starve probing on every other interface. The spacing is now waited out before a slot is taken; `scan plan` simulates the same order.
+- **`neighbor.resync_interval` was reported as applied by `config reload`**, but the neighbour collector only reads it at start-up. It is now listed as needing a restart.
+
+### Added
+
+- [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md): finding devices, who held an address when, reconstructing an incident, DHCP servers, exchanges and leases, TCP endpoints, names, descriptions, the journal (`journalctl` by event type, MAC, priority and field), active discovery with `scan plan`, `scan run` and the kill switch, offline mode, scripting and the database. All output comes from the daemon replaying a simulated day at a plant, from the unit running under systemd, and from a Docker test network.
+- **README for end users**, with a copy-paste installation that downloads, verifies and installs the latest release on `amd64` or `arm64`; [`deploy/README.md`](deploy/README.md) has the same download step.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): field validation still open, deferred features, known gaps and limitations, and open questions; `docs/STATUS.md` and `docs/IMPLEMENTATION_PLAN.md` are folded into it and removed.
+- **Chaos suite** (`make chaos`; short runs in `make check`): seeded random observation streams with late observations, long silences and restarts, checking the correlator's invariants against the database and its own state; and the whole daemon on the real clock under capture floods, malformed frames, collector and link failures, erratic probe answers, operator reads and writes, scans, reloads and the kill switch, checking a clean exit, no failed store write, a sound database, every one-second window within the budgets, nothing sent while the kill switch is set and no goroutine left behind.
+- **Parallel suite**: six daemons replaying the same capture at once record identical histories; one daemon serving many concurrent operators applies every write, runs one scan at a time and answers every reader online and offline.
+
+### Changed
+
+- Every document checked against the code: defaults, flags, outputs, exit codes, API fields and metrics, the reload rules and the test harnesses now match what v0.2.0 does.
+
+### Tests
+
+- `make check`: coverage of `internal/` above 90%, race detector on, chaos and parallel suites included.
+- `make chaos` (90 s of daemon chaos, 50 correlator seeds of 2,000 steps), `make fuzz`, `make test-net`, `make test-systemd`, `make soak`.
+- Planted faults are caught: a conflict flag not set on the earlier holder fails the correlator chaos test at once, and budgets three times too high fail the daemon chaos test's budget check.
+
 ## v0.1.0
 
 **Date:** 2026-10-17

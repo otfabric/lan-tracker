@@ -14,4 +14,4 @@ The import above loads `AGENTS.md`, the instructions every agent in this reposit
 - **Plan first** (plan mode, or a short plan in chat) for anything that touches rules 4–7, the schema, the unit or the safety envelope, and for any change that spans more than one package.
 - **Ask with `AskUserQuestion`** when a decision is missing (AGENTS.md §2). Record the answer in `docs/REQUIREMENTS.md` §5 in the same change.
 - **Commits.** Commit or push only when the user asks; the user cuts releases from the `release` workflow. When asked, one squashed commit with a plain summary line is the usual form.
-- **Memory is not the record.** Durable project knowledge belongs in the repository (the docs, an ADR, `docs/STATUS.md`), not only in Claude's memory or a conversation.
+- **Memory is not the record.** Durable project knowledge belongs in the repository (the specifications, an ADR, `docs/ROADMAP.md` for open work), not only in Claude's memory or a conversation.
