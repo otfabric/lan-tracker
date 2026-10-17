@@ -12,7 +12,7 @@ It is one static Go binary, `lan-tracker`, which is the daemon, the CLI client, 
 
 Data flows one way: collectors and probes emit **observations** onto a bus. A single **correlator** goroutine turns them into hosts, bindings and events. A single SQLite **writer** commits them. The REST API on a Unix socket, the CLI and Prometheus read the result.
 
-Current state of the work: [`docs/STATUS.md`](docs/STATUS.md). Where things live: [`docs/AI_REPO_MAP.md`](docs/AI_REPO_MAP.md).
+What is not built yet: [`docs/ROADMAP.md`](docs/ROADMAP.md). How operators use it: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md). Where things live: [`docs/AI_REPO_MAP.md`](docs/AI_REPO_MAP.md).
 
 Fixed names and paths:
 
@@ -38,10 +38,10 @@ Fixed names and paths:
 | `docs/DATA_MODEL.md` | The `Observation` type, SQLite schema, correlation rules (§5), presence, the event catalogue (§7), retention, the golden reconstruction scenario (§10) |
 | `docs/CLI.md` | The v1 command-line contract, the offline-access contract, exit codes |
 | `docs/API.md` | The local REST API and the metrics |
-| `docs/IMPLEMENTATION_PLAN.md` | Phases, tasks (checkboxes), exit criteria, open hardware checks, testing strategy |
+| `docs/USER_GUIDE.md` | How operators install, configure and use what is built |
 | `docs/TEST_PLAN.md` | The manual hardware test procedure for the boards |
 | `docs/adr/` | Why the foundational decisions were taken, and what they rule out |
-| `docs/STATUS.md` | A dated snapshot of what is done, partial, deferred and blocked |
+| `docs/ROADMAP.md` | The only list of open work: everything not implemented, deferred or blocked, open hardware checks, open questions and rejected proposals |
 | `deploy/README.md` | Install, upgrade, rollback and rollout; `make test-systemd` runs its install block verbatim |
 
 **Precedence when sources disagree**
@@ -50,7 +50,7 @@ Fixed names and paths:
 2. The hard rules in §4.
 3. Recorded decisions: `REQUIREMENTS.md` §5 and the ADRs.
 4. The specifications: `REQUIREMENTS`, `DATA_MODEL`, `CLI`, `API` and `ARCHITECTURE`.
-5. `IMPLEMENTATION_PLAN.md` and `STATUS.md`.
+5. `ROADMAP.md` and `USER_GUIDE.md`.
 6. The code and tests.
 7. Code comments.
 
@@ -66,12 +66,12 @@ Fixed names and paths:
 | `internal/cli` | cobra commands. A `backend` interface serves both online (API client) and `--offline` (read-only DB) reads; table, JSON, JSONL and CSV output |
 | `internal/api` | REST server on the Unix socket (plus an optional `127.0.0.1` listener with `/metrics`) and the CLI's client. Operator endpoints go through `Control` |
 | `internal/daemon` | Lifecycle: config, store, pipeline, SIGHUP and `config reload`, sd_notify and watchdog, shutdown; implements `api.Control` |
-| `internal/config` | Schema version 1 (`types.go`), defaults, YAML + env + flags loading, strict validation, the reload diff (`summary.go`) |
+| `internal/config` | Schema version 1 (`config.go`; value types in `types.go`), defaults, YAML + env + flags loading, strict validation, the reload diff (`summary.go`) |
 | `internal/observation` | The `Observation` type, sources, evidence kinds (`Evidence()`) and meta keys, the decoded DHCP message (`DHCPMessage`), JSONL encoding, the bounded bus with barriers and operator messages |
 | `internal/correlate` | **The only writer of state and events**: host matching, bindings, conflicts, presence, name records, TCP endpoints, DHCP servers, exchanges and leases, the proxy-ARP flag, operator actions |
 | `internal/events` | The event catalogue (it must match the migration CHECK) and the engine that writes events to the table and journald |
 | `internal/store` | SQLite: migrations, the single writer, batches, compaction, the integrity check, and `Reader` (queries shared by the API and `--offline`); `storetest` seeds test databases |
-| `internal/platform` | **The only code that touches AF_PACKET, netlink or raw sockets**: `Capturer`, `NeighborSource`, `InterfaceMonitor`, `Transmitter` (frames, TCP connect, UDP for name queries, ICMP, the kernel route lookup); fakes in `platform/fake` |
+| `internal/platform` | **The only code that touches AF_PACKET, netlink or raw sockets**: `Capturer`, `NeighborSource`, `InterfaceMonitor`, `Transmitter` (frames, TCP connect, UDP for name queries, ICMP, the kernel route lookup), `ClockSource` (read-only `adjtimex`); fakes in `platform/fake` |
 | `internal/service` | sd_notify and the journald handler |
 | `internal/iface` | Interface manager: contexts, prefixes, up and down |
 | `internal/collect/capture` | Passive capture loop and BPF filter; `decoders/` holds pure frame → observation functions (ARP, IP, NDP, DHCP, DNS/mDNS, LLDP) |
@@ -141,7 +141,7 @@ Fixed names and paths:
     - Device identification of any kind: payload probes, banner reading, passive OS/device/vendor classification, confidence ranking, fingerprint databases, and running `modbusctl`, `sunspecctl`, `otprobe` or any external tool from the daemon. Do not build, scaffold or stub it.
     - VLAN tagging, a web UI, any data leaving the box (fleet aggregation, remote API), alerting, automatic network repair, continuous packet recording, DHCPv6, a DHCP client or server.
     - Do not build, design, scaffold or stub these without an explicit request and a recorded decision.
-12. **IPv4-first.** v1 active discovery is IPv4, and ARP is the primary LAN discovery mechanism. IPv6 active probing (NDP solicitation) is deferred until it is requested. Passive IPv6/NDP decoding stays.
+12. **IPv4-first.** v1 active discovery is IPv4, and ARP is the primary LAN discovery mechanism. IPv6 active probing (NDP solicitation) is not built; it waits on a request (`docs/ROADMAP.md`). Passive IPv6/NDP decoding stays.
 
 ## 5. Read this before editing
 
@@ -173,8 +173,8 @@ Fixed names and paths:
   - The server identity is option 54. If it is missing or invalid, the identity is unknown and never allowlisted.
   - With no allowlist, servers are `unchecked`, never authorised. The allowlist is not authentication.
 - **Reload is all or nothing.**
-  - These keys reload: probes, each interface's `active` and `dhcp`, intervals, budgets, thresholds, identity settings (but `oui_override`) and the log level.
-  - These keep their running values and are listed as needing a restart: adding, removing or renaming interfaces, their passive settings and `passive` (compiled into the BPF filter), `storage`, `api`, `metrics`, `logging.format`, `replay`, `identity.oui_override` and the concurrency caps (`active.max_concurrent_jobs`, `active.budgets.tcp.max_concurrent_per_*`) (`ARCHITECTURE.md` §6).
+  - These keys reload: probes, each interface's `active` and `dhcp`, scan profiles, probe intervals, budgets, thresholds, identity settings (but `oui_override`) and the log level.
+  - These keep their running values and are listed as needing a restart: adding, removing or renaming interfaces, their passive settings and `passive` (compiled into the BPF filter), `storage`, `api`, `metrics`, `logging.format`, `replay`, `identity.oui_override`, `neighbor.resync_interval` and the concurrency caps (`active.max_concurrent_jobs`, `active.budgets.tcp.max_concurrent_per_*`) (`ARCHITECTURE.md` §6).
   - The merged configuration is validated again before it applies.
 - **The events catalogue and the schema match.** `internal/events` must list exactly the types in the newest migration's CHECK (`TestCatalogueMatchesSchema`).
 - **Identical observations are suppressed** for 2 minutes per interface (`capture.Decoder`, shared by live capture and pcap replay). Presence (ACTIVE is 5 minutes) depends on that window.
@@ -207,6 +207,7 @@ make package      # release tarballs per target into dist/release/ (VERSION=vX.Y
 make test         # unit and golden tests with -race (PKGS=... to narrow)
 make coverage     # tests with coverage of internal/ (coverage.out), fails below 90%; make cover opens the report
 make fuzz         # every Fuzz* target, FUZZTIME each (default 30s)
+make chaos        # chaos and parallel suites at length with race (CHAOS_DURATION, CHAOS_SEEDS, CHAOS_STEPS; LT_CHAOS_SEED replays)
 make soak         # 90 simulated days of a 50-host LAN: database size, memory, CPU (about 6 minutes)
 make test-net     # network integration tests in Docker (CAP_NET_RAW only)
 make test-systemd # daemon under systemd in containers (Debian 11, 12, 13) with the deploy/ unit
@@ -225,7 +226,8 @@ make shell        # shell in the dev container
 | A decoder | `make check`, then `make fuzz FUZZTIME=1m` (or a focused `-fuzz` run in `make shell`) |
 | `internal/platform`, `internal/service`, probes on the wire, `test/net` | `make check-all` (adds `test-net` and `test-systemd`) |
 | `deploy/`, the unit, `deploy/README.md` install block, `tools/capcheck` | `make test-systemd` (and `make check-all`) |
-| The correlator, store retention or compaction | `make check`; consider `make soak` (about 6 minutes) for growth and memory |
+| The correlator, store retention or compaction | `make check`; `make chaos` for invariants under random streams and restarts; consider `make soak` (about 6 minutes) for growth and memory |
+| The daemon, API, scheduler or anything concurrent | `make check`, then `make chaos` (the race detector, budgets and kill switch under load) |
 | `test/fixtures/fixtures.go` | `make fixtures`, then `make check` |
 | A dependency | `make tidy`, `make check` |
 
@@ -238,14 +240,14 @@ Notes:
 ## 9. Working rules for agents
 
 - **Ask rather than guess** when a requirement is unclear or a decision is missing. Record the answer in the relevant doc.
-- **Work from the plan.** Follow `docs/IMPLEMENTATION_PLAN.md`; tick a checkbox only when the task is done and its tests pass. A phase is done only when its exit criterion is demonstrably met.
+- **The docs describe what is built.** The specifications describe exactly what the code does today; anything not implemented belongs in `docs/ROADMAP.md`, never in a specification as "planned" or "not yet". When you build a roadmap item, describe it in the specifications and remove it from `ROADMAP.md` in the same change, once its tests pass.
 - **Keep docs in sync in the same change** (§12).
 - **Do not commit, push, tag or release unless the user asks.** Never force-push `main`. Releases are cut by the user from the `release` workflow.
 - **Do not edit generated artifacts by hand** (§11).
 - **Report results faithfully.** If a gate fails, say which, with its output. Do not lower `COVER_MIN`, skip tests or add `//nolint` to get a gate green without the user's agreement.
 - **Stay in scope.** Do not refactor unrelated code. Do not start new features while doing documentation or maintenance work.
-- **Do not re-propose rejected ideas** listed in `docs/STATUS.md` without new evidence.
-- **Hardware and site checks are the user's** (`docs/TEST_PLAN.md`). Do not tick their boxes from Docker results.
+- **Do not re-propose rejected ideas** listed in `docs/ROADMAP.md` without new evidence.
+- **Hardware and site checks are the user's** (`docs/TEST_PLAN.md`). Do not record their results from Docker runs.
 
 ## 10. Common tasks
 
@@ -286,7 +288,7 @@ Which files each task touches: `docs/AI_REPO_MAP.md` (Common tasks).
 
 **Add a config key**
 
-1. Add it to `internal/config` (`types.go`, `defaults.go`, `validate.go`) with strict validation.
+1. Add it to `internal/config` (`config.go`, `defaults.go`, `validate.go`) with strict validation.
 2. Decide whether it reloads. If it does not, it must show up in the reload answer as needing a restart (`config.Diff` in `summary.go`, the daemon's `reload`).
 3. Update `ARCHITECTURE.md` §6, `internal/config/testdata/architecture-example.yaml`, and `deploy/config.yaml` if operators should see it. `TestDeployConfigs` keeps the deploy configs valid.
 
@@ -319,7 +321,8 @@ Which files each task touches: `docs/AI_REPO_MAP.md` (Common tasks).
 | Config key or reload behaviour | `ARCHITECTURE.md` §6, the example config, `deploy/config.yaml` |
 | Unit, install or privileges | `ARCHITECTURE.md` §8, `deploy/README.md`, `tools/capcheck/README.md` |
 | A decision | `REQUIREMENTS.md` §5 (with the date); an ADR if foundational |
-| Task progress | `IMPLEMENTATION_PLAN.md` checkbox; `STATUS.md` |
+| A roadmap item built, or work deferred | `ROADMAP.md` (remove the item, or add it); the specifications describe only what is built |
+| Operator-visible behaviour | `USER_GUIDE.md` |
 | New package or moved responsibility | `ARCHITECTURE.md` §4, §3 of this file, `docs/AI_REPO_MAP.md` |
 
 Style used throughout the docs:

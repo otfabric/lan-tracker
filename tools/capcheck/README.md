@@ -1,8 +1,8 @@
-# capcheck: the phase 0 privilege and feasibility check
+# capcheck: the privilege and feasibility check
 
-`capcheck` runs every kernel operation LAN Tracker's collectors and probes need, under the identity it is started with, and prints PASS, FAIL or SKIP per operation, together with the privilege the design expects (`docs/ARCHITECTURE.md` §8). It exits 1 if anything fails. It is Linux only.
+`capcheck` runs every kernel operation LAN Tracker's collectors and probes need, under the identity it is started with, and prints PASS, FAIL or SKIP per operation, together with the privilege the design expects (`docs/ARCHITECTURE.md` §8). It exits 1 if anything fails, 2 if the interface does not exist and 64 on a usage error. It is Linux only.
 
-By default it captures and opens sockets but **transmits nothing**. Each transmit test needs an explicit target and then sends exactly one probe:
+`--interface` is required. By default it captures for `--capture` (5 s), switches promiscuous mode on briefly and restores it (`--promisc=false` skips that), and opens sockets, but **transmits nothing**. Each transmit test needs an explicit target and then sends exactly one probe:
 
 | Flag | Sends |
 | --- | --- |

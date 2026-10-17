@@ -2,7 +2,7 @@
 
 - Status: Accepted (replaces parsing the embedded text registry at start-up)
 - Date: 6 Oct 2026
-- Specified in: `ARCHITECTURE.md` §3 (OUI lookup); `IMPLEMENTATION_PLAN.md` phase 1 (OUI task)
+- Specified in: `ARCHITECTURE.md` §3 (OUI lookup); `REQUIREMENTS.md` FR-VD-1; `DATA_MODEL.md` §5.7
 
 ## Context
 

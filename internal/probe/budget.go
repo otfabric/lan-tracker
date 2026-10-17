@@ -260,6 +260,18 @@ func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target n
 	if err := b.check(iface, p, target); err != nil {
 		return nil, err
 	}
+	// Wait for the target's spacing before taking a concurrency slot or
+	// booking the budgets, so a probe that must wait for its target holds
+	// up neither probes to other targets nor other interfaces (a pass
+	// re-probing hosts it reached seconds ago would otherwise fill every
+	// slot with waits). reserve applies the spacing again, for a probe to
+	// the same target booked meanwhile.
+	if due := b.spacing(iface, target); p != Name && due.After(b.clock.Now()) {
+		b.count(p, "target_spacing")
+		if err := b.sleep(ctx, due.Sub(b.clock.Now())); err != nil {
+			return nil, err
+		}
+	}
 	var held []chan struct{}
 	release := func() {
 		for i := len(held) - 1; i >= 0; i-- {
@@ -283,15 +295,6 @@ func (b *Budget) acquire(ctx context.Context, p Protocol, iface string, target n
 			return nil, err
 		}
 		held = append(held, hs)
-	}
-	// Wait for the target's spacing before booking the budgets, so a probe
-	// that must wait for its target does not hold up probes to others.
-	if due := b.spacing(iface, target); p != Name && due.After(b.clock.Now()) {
-		b.count(p, "target_spacing")
-		if err := b.sleep(ctx, due.Sub(b.clock.Now())); err != nil {
-			release()
-			return nil, err
-		}
 	}
 	at, reason := b.reserve(p, iface, target)
 	if wait := at.Sub(b.clock.Now()); wait > 0 {
@@ -429,8 +432,8 @@ func refusal(format string, args ...any) error {
 
 // Simulate returns how long the probes take under the limits if the first
 // could start at start, as Acquire paces them: each waits for its target's
-// spacing, the budgets and a free concurrency slot, and holds that slot
-// for its Hold (its reply wait). Phases run one after the other, each
+// spacing, then a free concurrency slot and the budgets, and holds that
+// slot for its Hold (its reply wait). Phases run one after the other, each
 // starting once the previous one's last probe is done, as a scan's phases
 // do. It returns when the last probe is done. The planner uses it to
 // estimate scan durations.
@@ -444,14 +447,15 @@ func Simulate(limits Limits, start time.Time, phases ...[]SimProbe) time.Duratio
 		var busy []time.Time // when held slots free up, earliest first
 		for _, p := range probes {
 			t := sim.Now()
+			// As Acquire: the target's spacing first, then a free slot.
+			if due := b.spacing(p.Interface, p.Target); due.After(t) && p.Protocol != Name {
+				t = due
+			}
 			if len(busy) >= slots {
 				if busy[0].After(t) {
 					t = busy[0]
 				}
 				busy = busy[1:]
-			}
-			if due := b.spacing(p.Interface, p.Target); due.After(t) && p.Protocol != Name {
-				t = due
 			}
 			sim.Set(t)
 			at, _ := b.reserve(p.Protocol, p.Interface, p.Target)

@@ -19,7 +19,7 @@ Thank you for your interest in contributing to `lan-tracker`! This document cove
 
 ### Prerequisites
 
-- Docker. Every Go command runs in the Linux dev container through `make`; the first run builds the image from [`build/dev.Dockerfile`](build/dev.Dockerfile) (Go, golangci-lint, govulncheck). Do not run `go` directly on a macOS host
+- Docker. Every Go command runs in the Linux dev container through `make`; the first run builds the image from [`build/dev.Dockerfile`](build/dev.Dockerfile) (Go and golangci-lint; govulncheck is pinned as a tool in `go.mod`). Do not run `go` directly on a macOS host
 - No hardware: the tests bring their own networks (Docker) and systemd (privileged containers)
 
 ### Build & Test
@@ -30,6 +30,7 @@ make check        # format, tidy, vet, lint, vuln, race tests, coverage of inter
 make check-all    # check plus the Docker network tests and the systemd tests
 make test PKGS=./internal/store/...   # one package while iterating
 make fuzz         # every Fuzz* target (FUZZTIME, default 30s)
+make chaos        # chaos and parallel suites at length with the race detector (CHAOS_DURATION=60s by default)
 make soak         # 90 simulated days of a 50-host LAN (several minutes)
 make build        # bin/lan-tracker for the Docker host's architecture
 ```
@@ -70,6 +71,7 @@ Examples:
 - Decoders: table tests on frames built with [`test/frames`](test/frames), and a fuzz target in `decoders/fuzz_test.go`
 - Correlator: golden observation streams ([`test/golden`](test/golden)); the reconstruction scenario must always pass
 - Platform backends and probes on the wire: [`test/net`](test/net) (`make test-net`), run as uid 65534 with only `CAP_NET_RAW`
+- Chaos and parallel suites: extend `internal/correlate/chaos_test.go` with new observation kinds and invariants, and `internal/daemon/chaos_test.go` / `parallel_test.go` with new operator actions; a failure prints the seed (`make chaos LT_CHAOS_SEED=<seed>` replays it). Check that a planted bug makes them fail
 - Assert behaviour (rows, events, output, exit codes), not just that the code ran
 - Coverage of `internal/` stays at or above 90% (`make coverage`)
 

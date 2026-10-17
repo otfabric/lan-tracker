@@ -244,7 +244,7 @@ func TestNoScannerInReplay(t *testing.T) {
 func TestReloadAppliesBudgets(t *testing.T) {
 	h := startWith(t, testConfig("$DIR", "info", activeConfig), 0, activeLinks)
 	defer h.stop()
-	h.writeConfig(testConfig(h.dir, "info", "active: { startup_delay: 24h, max_starts_per_second: 30, max_concurrent_jobs: 3 }\nidentity: { oui_override: /nonexistent.tsv }\n"))
+	h.writeConfig(testConfig(h.dir, "info", "active: { startup_delay: 24h, max_starts_per_second: 30, max_concurrent_jobs: 3 }\nidentity: { oui_override: /nonexistent.tsv }\nneighbor: { resync_interval: 7m }\n"))
 	res, err := h.d.ReloadConfig(context.Background(), "bart")
 	if err != nil {
 		t.Fatal(err)
@@ -253,8 +253,8 @@ func TestReloadAppliesBudgets(t *testing.T) {
 		t.Errorf("max_starts_per_second = %v", got)
 	}
 	// The concurrency caps keep their size until restart, and say so.
-	if got := h.d.Config().Active.MaxConcurrentJobs; got != 4 || len(res.NotApplied) != 2 || res.NotApplied[0].Key != "active.max_concurrent_jobs" ||
-		res.NotApplied[1].Key != "identity.oui_override" {
+	if got := h.d.Config().Active.MaxConcurrentJobs; got != 4 || len(res.NotApplied) != 3 || res.NotApplied[0].Key != "active.max_concurrent_jobs" ||
+		res.NotApplied[1].Key != "identity.oui_override" || res.NotApplied[2].Key != "neighbor.resync_interval" {
 		t.Errorf("max_concurrent_jobs = %d, not applied %+v", got, res.NotApplied)
 	}
 	plan, err := h.d.PlanScan(context.Background(), probe.Request{})

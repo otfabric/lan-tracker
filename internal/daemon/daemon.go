@@ -309,6 +309,9 @@ var restartOnly = []struct {
 	{"metrics", func(c *config.Config) any { return c.Metrics }, func(o, n *config.Config) { n.Metrics = o.Metrics }},
 	{"logging.format", func(c *config.Config) any { return c.Logging.Format }, func(o, n *config.Config) { n.Logging.Format = o.Logging.Format }},
 	{"replay", func(c *config.Config) any { return c.Replay }, func(o, n *config.Config) { n.Replay = o.Replay }},
+	// The neighbour collector's resync ticker is set up at start-up.
+	{"neighbor.resync_interval", func(c *config.Config) any { return c.Neighbor.ResyncInterval },
+		func(o, n *config.Config) { n.Neighbor.ResyncInterval = o.Neighbor.ResyncInterval }},
 	// The OUI table is loaded once, at start-up.
 	{"identity.oui_override", func(c *config.Config) any { return c.Identity.OUIOverride },
 		func(o, n *config.Config) { n.Identity.OUIOverride = o.Identity.OUIOverride }},

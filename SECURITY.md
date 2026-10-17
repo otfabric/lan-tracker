@@ -36,7 +36,7 @@ Every send takes one start from a shared budget (5 starts per second in all by d
 
 ### Privileges
 
-- The reference unit runs the daemon as root with `CapabilityBoundingSet=CAP_NET_RAW`, so it holds that capability alone, with a read-only view of the system (`systemd-analyze security` exposure 2.3)
+- The reference unit runs the daemon as root with `CapabilityBoundingSet=CAP_NET_RAW`, so it holds that capability alone, with a read-only view of the system (`systemd-analyze security` exposure at most 2.5, checked by `make test-systemd`)
 - The daemon also works as an unprivileged user with only `CAP_NET_RAW`; it never needs `CAP_NET_ADMIN`
 - Check a board with the `capcheck` tool shipped in the release tarball
 

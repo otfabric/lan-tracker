@@ -20,6 +20,11 @@ TEST_BIN := .build/test
 FUZZTIME ?= 30s
 # Minimum coverage of internal/ in percent (make coverage, make check).
 COVER_MIN ?= 90
+# make chaos: how long the daemon chaos test runs, and how many seeds and
+# steps the correlator chaos test plays.
+CHAOS_DURATION ?= 60s
+CHAOS_SEEDS ?= 50
+CHAOS_STEPS ?= 2000
 
 # Dev container: the image tag follows the Dockerfile's content, caches live on
 # a named volume, and commands run as the calling user so files in the
@@ -32,7 +37,7 @@ RUN       := docker run --rm -v "$(CURDIR)":/src -w /src -v $(CACHE_VOL):/cache 
 
 .DEFAULT_GOAL := help
 .PHONY: help all dev-image shell build release tools package oui fixtures fmt fmt-check tidy tidy-check mod-verify vet lint vuln \
-	test coverage cover fuzz soak test-net test-systemd check check-all run-dev clean clean-cache
+	test coverage cover fuzz chaos soak test-net test-systemd check check-all run-dev clean clean-cache
 
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -126,6 +131,11 @@ cover: coverage ## Write coverage.html and open it in a browser
 
 fuzz: dev-image ## Run every Fuzz* target back to back for FUZZTIME each (default 30s)
 	@$(RUN) build/fuzz.sh
+
+chaos: dev-image ## Chaos and parallel suites at length with the race detector (CHAOS_DURATION, CHAOS_SEEDS, CHAOS_STEPS; LT_CHAOS_SEED replays one)
+	@$(RUN) env CGO_ENABLED=1 LT_CHAOS_DURATION=$(CHAOS_DURATION) LT_CHAOS_SEEDS=$(CHAOS_SEEDS) LT_CHAOS_STEPS=$(CHAOS_STEPS) \
+		LT_CHAOS_SEED=$(LT_CHAOS_SEED) go test -race -count=1 -v -timeout 60m -run 'TestChaos|TestParallel' \
+		./internal/correlate/ ./internal/daemon/
 
 soak: dev-image ## 90 simulated days of a 50-host LAN: database size, retention, heap and CPU (several minutes)
 	@$(RUN) go test -tags soak -run TestNinetyDays -v -timeout 60m ./test/soak/

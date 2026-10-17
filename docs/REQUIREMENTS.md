@@ -1,6 +1,6 @@
 # OT Fabric LAN Tracker — Requirements
 
-Status: agreed 5 October 2026, revised the same day after spec review; scope set on 16 October 2026 (ADR 0011). Requirement ids are stable and never reused (gaps in the numbering are intended); reference them in code reviews and tests.
+Status: agreed 5 October 2026, revised the same day after spec review; scope set on 16 October 2026 (ADR 0011); frozen to the implemented behaviour of v0.1.0 on 17 Oct 2026 (unchanged in v0.2.0). Every requirement below is implemented; what is not (deferred features, field validation, known gaps) is in `ROADMAP.md`. Requirement ids are stable and never reused (gaps in the numbering are intended, e.g. FR-AC-7, retired when IPv6 active probing was deferred); reference them in code reviews and tests.
 
 ## 1. Goal
 
@@ -63,7 +63,6 @@ lan-tracker hosts history 192.168.1.200 --since 7d
 | FR-AC-3 | ARP sweeping SHALL be implemented natively in Go and be the primary IPv4 discovery probe. |
 | FR-AC-4 | ICMP echo SHALL be supported, using unprivileged ping sockets where `net.ipv4.ping_group_range` allows, else raw sockets under `CAP_NET_RAW`. Disabled by default. |
 | FR-AC-5 | TCP checks SHALL use a full `connect()`, bound to the probed interface with `SO_BINDTODEVICE`, with a per-target timeout (default 750 ms) and an immediate bounded close, sending no payload. Each result SHALL be classified exactly: OPEN (a connection completed), REFUSED (actively rejected during connect), TIMEOUT (nothing completed in time), UNREACHABLE (the stack reported a network or host error) or LOCAL_ERROR (the probe could not be made locally: permission, no usable source address, no direct route, a missing interface). Only OPEN and REFUSED are answers; none of the others is evidence against the remote device. TCP checks SHALL never wait for an ICMP answer (`DATA_MODEL.md` §5.5) |
-| FR-AC-7 | IPv6 discovery SHALL be limited to NDP solicitation of addresses already observed; no IPv6 sweeping. *Deferred: v1 active discovery is IPv4-first; NDP solicitation is not implemented in v1 (decided 6 Oct 2026).* |
 | FR-AC-8 | Operators SHALL be able to trigger a scan on demand (`scan run`), which is subject to the same safety controls. |
 | FR-AC-9 | Named scan profiles (e.g. `modbus`) SHALL be definable in config. |
 | FR-AC-12 | Name queries SHALL ask only about names and addresses already known, or explicitly configured DNS-SD service types, through the shared budget: mDNS on the configured interfaces for known `.local` names, PTR for known addresses and A/AAAA/CNAME for known DNS names through explicitly configured resolvers. Answers are name records, never MAC ownership; a failed lookup changes nothing (`DATA_MODEL.md` §5.4) |
@@ -99,7 +98,7 @@ lan-tracker hosts history 192.168.1.200 --since 7d
 | --- | --- |
 | FR-ST-1 | Data SHALL be stored in SQLite (WAL) at the configured path, default `/data/lan-tracker/hosts.db`, with schema migrations embedded and applied at startup. |
 | FR-ST-2 | Current state and event history SHALL be stored separately; raw observations SHALL be compacted. |
-| FR-ST-3 | Retention SHALL be configurable per site: raw observations (default 7 days), hourly roll-ups (default 90 days), events (default 2 years) and a maximum database size (default 200 MB). When over the size cap, prune raw observations first, then roll-ups, then the oldest events. |
+| FR-ST-3 | Retention SHALL be configurable per site: raw observations (default 7 days), hourly roll-ups (default 90 days), events (default 2 years) and a maximum database size (default 200 MB). When over the size cap, the oldest raw observations are rolled up first, then the oldest roll-ups (with DHCP exchanges) pruned, then the history the events explain and the oldest events; current state and address bindings are never pruned. |
 | FR-ST-4 | At startup the daemon SHALL run an integrity check; a corrupt database SHALL be quarantined and recreated, with an event and a log entry. |
 
 ### 2.9 API, CLI, logging, metrics, configuration
@@ -137,9 +136,9 @@ lan-tracker hosts history 192.168.1.200 --since 7d
 | NFR-SAFE-3 | A host returning TIMEOUT three times in a row SHALL be probed at 4× its interval. |
 | NFR-SAFE-4 | Excludes (IPs and CIDRs) SHALL be checked before every transmitted probe. |
 | NFR-SAFE-5 | Each probe protocol SHALL have its own start rate beneath the global one (defaults: ARP 5, ICMP 1, name queries 1 starts/s; TCP 1 connect/s). TCP SHALL additionally be capped at 2 concurrent connects per interface and 1 per target address, and any two probes to the same target SHALL be at least 5 s apart. A TCP connect is one start of the global budget |
-| NFR-PERF-1 | On a RevPi Connect class device: < 5% average CPU, < 50 MB RSS, database < 200 MB after 90 days on a 50-host LAN. |
+| NFR-PERF-1 | Budget on a RevPi Connect class device: < 5% average CPU, < 50 MB RSS, database < 200 MB after 90 days on a 50-host LAN. `make soak` checks the database budget, retention and heap growth on a simulated 90-day 50-host LAN; measurement on the boards is open (`ROADMAP.md`). |
 | NFR-PERF-2 | SQLite commits SHALL be batched (target every 5 s) to limit SD-card wear; `synchronous=NORMAL` with WAL. |
-| NFR-SEC-1 | The service SHALL hold only `CAP_NET_RAW` (it runs as root, with that capability alone in its bounding set) under the hardened unit in `ARCHITECTURE.md` §8; target `systemd-analyze security` exposure ≤ 2.5 on each target systemd (247, 252, 257). This SHALL be verified on every change in Docker (`make test-net`, `make test-systemd`) and on each target board in phase 0; any need for another capability stops the project for a decision. |
+| NFR-SEC-1 | The service SHALL hold only `CAP_NET_RAW` (it runs as root, with that capability alone in its bounding set) under the hardened unit in `ARCHITECTURE.md` §8; target `systemd-analyze security` exposure ≤ 2.5 on each target systemd (247, 252, 257). This SHALL be verified on every change in Docker (`make test-net`, `make test-systemd`); the board audit is open (`ROADMAP.md`), and any need for another capability stops the rollout for a decision. |
 | NFR-PORT-1 | Deliverables SHALL be static `CGO_ENABLED=0` binaries for `linux/amd64` and `linux/arm64` with SHA-256 checksums, shipped as one tarball per target with the reference deploy files. No `.deb` or other packages. Minimum kernel 5.10. |
 | NFR-PORT-2 | CI SHALL, on every change, run the same make targets as developers in the dev container: `check` (format, tidy, vet, lint, vulnerabilities, tests with race and coverage of `internal/` of at least 90%), `fuzz`, the Docker network and systemd suites, and the release build of both targets. |
 | NFR-REL-1 | The daemon SHALL use `Type=notify` with READY and WATCHDOG, shut down gracefully on SIGTERM, and tolerate interfaces appearing and disappearing at runtime. |
@@ -156,7 +155,7 @@ Device identification of any kind (ADR 0011): payload probes (Modbus, HTTP, TLS,
 | Target hardware | amd64 and arm64 Linux edge devices |
 | Platforms | Linux only, `linux/amd64` and `linux/arm64`; the code base has no stubs for other OSes. Every build and test runs in a Linux dev container via `make`, so Linux and macOS machines work for development (decided 5 Oct 2026) |
 | Minimum kernel | Linux 5.10 |
-| Go toolchain | Go 1.26+, the floor set by `x/net`, `x/sys` and `modernc.org/sqlite` (decided in phase 0) |
+| Go toolchain | Go 1.26+, the floor set by `x/net`, `x/sys` and `modernc.org/sqlite` (decided at the start of development) |
 | Network tests | Docker bridge networks with simulated hosts; runner as uid 65534 with ambient `CAP_NET_RAW` (`make test-net`) |
 | Neighbour source | `kernel_neighbor`, NUD state in `neighbor_state` |
 | API authentication | Unix socket permissions only; no UI in this project |

@@ -1,7 +1,7 @@
 // Package fixtures defines the synthetic pcap captures under test/fixtures
 // (regenerated with `make fixtures`). They stand in for captures from real
-// sites until those are available (docs/IMPLEMENTATION_PLAN.md, open
-// checks), and they are built from scenario descriptions so a test can
+// sites until those are available (docs/ROADMAP.md, field validation),
+// and they are built from scenario descriptions so a test can
 // verify the committed files are current.
 package fixtures
 

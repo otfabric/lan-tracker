@@ -10,6 +10,7 @@ Where each concern lives, what to read before changing it, and which tests cover
 | Name records and `preferred_name` | `internal/correlate/names.go`, `decoders/dns.go` | `DATA_MODEL.md` §5.4 | `internal/correlate/names_test.go` |
 | Proxy ARP and duplicate IP | `internal/correlate/proxyarp.go`, `rules.go` | `DATA_MODEL.md` §5.2; `REQUIREMENTS.md` §5 (Proxy ARP vs duplicate IP) | `proxyarp_test.go`; `test/golden` |
 | TCP endpoints and their result history | `internal/correlate/endpoints.go` | `DATA_MODEL.md` §5.5; `REQUIREMENTS.md` FR-AC-5 | `internal/correlate/probes_test.go` (`TestEndpoints*`) |
+| Collection gaps (`OBSERVATION_GAP`) | `internal/correlate/gaps.go` | `DATA_MODEL.md` §7; `ARCHITECTURE.md` §3 (Correlator) | `internal/correlate/gaps_test.go` |
 | Operator actions (kill switch, scans, descriptions) | `internal/correlate/probes.go` | `DATA_MODEL.md` §5.8, §8; ADR 0009 | `internal/correlate/probes_test.go`, `internal/daemon/*_test.go` |
 | DHCP messages, servers, exchanges and leases | `decoders/dhcp.go`, `internal/observation/dhcp.go` (`DHCPMessage`), `internal/correlate/dhcp.go`, `internal/store/dhcp.go`, `internal/config` (`InterfaceDHCP`) | `DATA_MODEL.md` §5.6; `REQUIREMENTS.md` FR-PA-3, FR-PA-7 | `correlate/dhcp_test.go`, `correlate/dhcp_lease_test.go`, `store/dhcp_test.go`, `test/golden/capture_test.go` |
 | OUI registrant lookup (a hint, not identification) | `internal/identify` (`oui.go`), `internal/ouitable`, `data/oui` | ADR 0011; `DATA_MODEL.md` §5.7 | `identify/oui_test.go`, `ouitable` tests |
@@ -31,13 +32,15 @@ Where each concern lives, what to read before changing it, and which tests cover
 | REST API | `internal/api` (`api.go` reads, `active.go` operator endpoints, `client.go`) | `API.md` | `api_test.go`, `active_test.go`, `fail_test.go` |
 | CLI | `internal/cli` (`root.go`, `hosts.go`, `lists.go`, `describe.go`, `configcmd.go`, `status.go`, `output.go`, `backend.go`) | `CLI.md` | `cli_test.go`, `read_test.go`, `formats_test.go`, `describe_test.go`, `active_test.go` |
 | Daemon lifecycle, reload | `internal/daemon` (`daemon.go`, `pipeline.go`, `server.go`, `active.go`) | `ARCHITECTURE.md` §6; `REQUIREMENTS.md` FR-CFG-3 | `daemon_test.go`; `test/systemd` |
-| Configuration (schema 1) | `internal/config` (`types.go`, `defaults.go`, `validate.go`, `load.go`, `summary.go`) | `ARCHITECTURE.md` §6 | `config_test.go`, `fuzz_test.go`; `TestDeployConfigs` |
+| Configuration (schema 1) | `internal/config` (`config.go`, `types.go`, `defaults.go`, `validate.go`, `load.go`, `summary.go`) | `ARCHITECTURE.md` §6 | `config_test.go`, `fuzz_test.go`; `TestDeployConfigs` |
 | Metrics | `internal/metrics`; values gathered in `internal/daemon` | `API.md` (Metrics); AGENTS.md rule 9 | `metrics_test.go` |
 | systemd, sd_notify, journald | `internal/service`, `deploy/lan-tracker.service` | `ARCHITECTURE.md` §8 | `service` tests; `test/systemd/run.sh` |
 | Install, upgrade, rollout | `deploy/README.md` (its install block is run by `test/systemd/run.sh`) | `deploy/README.md` | `make test-systemd` |
 | Board privilege audit | `tools/capcheck` (its README audit block is run by `test/systemd/run.sh`) | `tools/capcheck/README.md`; `ARCHITECTURE.md` §8 | `make test-net`, `make test-systemd` |
 | Build, CI, release | `Makefile`, `build/*.sh`, `.github/workflows/{ci,release}.yml` | `ARCHITECTURE.md` §4 (Tooling); `README.md` (Releases) | CI itself |
-| Hardware validation | `docs/TEST_PLAN.md` | `IMPLEMENTATION_PLAN.md` (Open hardware and field checks) | manual, on boards |
+| Chaos and parallel suites | `internal/correlate/chaos_test.go`, `internal/daemon/chaos_test.go`, `internal/daemon/parallel_test.go` | `ARCHITECTURE.md` §9 (Testing strategy) | short runs in `make check`; `make chaos` at length |
+| User guide | `docs/USER_GUIDE.md` (examples from a replayed scenario, the unit under systemd and a Docker test network) | `CLI.md` | regenerate the output when commands or output change |
+| Hardware validation | `docs/TEST_PLAN.md` | `ROADMAP.md` (open hardware and field checks) | manual, on boards |
 
 ## Common tasks: files to touch
 
@@ -50,7 +53,7 @@ The steps are in `AGENTS.md` §10. These are the files each task usually touches
 | Operator (write) command | the above, plus `internal/api/active.go` (`Control`), `internal/daemon/active.go`, `internal/observation/bus.go` (`Operator` kind), `internal/correlate/probes.go`; usually a migration and an event |
 | Schema change | `migrations/NNNN_*.sql`, `internal/store` models and queries, `internal/correlate/db.go` if the correlator writes it; `DATA_MODEL.md` §4 |
 | Event type | migration (events rebuild), `internal/events/events.go`, emitting code in `internal/correlate`; `DATA_MODEL.md` §7, `CLI.md` (Event type names) |
-| Config key | `internal/config/{types,defaults,validate,summary}.go`, `testdata/architecture-example.yaml`, `deploy/config.yaml`; the consumer; `ARCHITECTURE.md` §6 |
+| Config key | `internal/config/{config,defaults,validate,summary}.go`, `testdata/architecture-example.yaml`, `deploy/config.yaml`; the consumer; `ARCHITECTURE.md` §6 |
 | Metric | `internal/metrics` (label allow-list), gathering in `internal/daemon`; `API.md`, `ARCHITECTURE.md` §3 (Metrics) |
 | Probe engine fix | `internal/probe/<engine>` (`arp`, `icmp`, `tcp`, `names`), `internal/probe` (budget, policy, plan), `internal/probe/scheduler`; `test/net/active_test.go`, `test/net/names_test.go`; `ARCHITECTURE.md` §3, §5 |
 | Unit or install change | `deploy/lan-tracker.service`, `deploy/README.md`, `tools/capcheck/README.md`, `test/systemd/run.sh`; `ARCHITECTURE.md` §8 |

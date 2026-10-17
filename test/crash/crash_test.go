@@ -1,5 +1,5 @@
 // Package crash kills the daemon with SIGKILL while it writes and checks
-// that the database survives (docs/IMPLEMENTATION_PLAN.md, testing
+// that the database survives (docs/ARCHITECTURE.md §9, testing
 // strategy: kill -9 during write; FR-ST-4, NFR-PERF-2). The test runs the
 // daemon in a child process (this test binary run again), reads the
 // database read-only from outside while it writes, kills it at varying
