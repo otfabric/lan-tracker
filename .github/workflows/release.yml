@@ -2,7 +2,8 @@ name: release
 # Releases a new version from main: Actions → release → Run workflow, pick
 # the bump. The next version follows the highest vMAJOR.MINOR.PATCH tag
 # (build/next-version.sh); the first release is v0.1.0. RELEASE.md must
-# have a "## vX.Y.Z" section for the version: it is the release notes. The workflow runs
+# have a "## vX.Y.Z" section for the version, ended by a "---" line: it is
+# the release notes. The workflow runs
 # the same gates as CI on the commit, builds one tarball per target twice
 # (the checksums must match), then creates the annotated tag on that commit
 # and publishes the GitHub Release with the tarballs and SHA256SUMS
@@ -113,8 +114,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The notes are the version's section of RELEASE.md.
-          awk -v h="## $VERSION" '$0 == h { f = 1; next } f && /^## / { exit } f' RELEASE.md >"$RUNNER_TEMP/notes.md"
+          # The notes are the version's section of RELEASE.md, which ends at
+          # its "---" separator (or the next version's heading).
+          awk -v h="## $VERSION" '$0 == h { f = 1; next } f && (/^---$/ || /^## /) { exit } f' RELEASE.md >"$RUNNER_TEMP/notes.md"
           gh release create "$VERSION" --verify-tag --title "LAN Tracker $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
             "dist/release/lan-tracker-$VERSION-linux-amd64.tar.gz" \
             "dist/release/lan-tracker-$VERSION-linux-arm64.tar.gz" \

@@ -38,7 +38,6 @@ ProtectHostname=true
 ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
-PrivateIPC=true
 DevicePolicy=closed
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
 RestrictNamespaces=true
@@ -50,6 +49,10 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# No SysV or POSIX IPC: the daemon uses none. This stands in for
+# PrivateIPC=, which systemd 247 (Debian 11) does not know.
+SystemCallFilter=~msgctl msgget msgrcv msgsnd semctl semget semop semtimedop shmat shmctl shmdt shmget
+SystemCallFilter=~mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedsend mq_unlink
 # Read-only clock sync state (see ProtectClock= above); listed after the
 # deny line because @privileged contains @clock.
 SystemCallFilter=adjtimex

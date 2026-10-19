@@ -61,7 +61,6 @@ Scenarios that `TEST_PLAN.md` (Acceptance matrix) marks partly covered or open, 
 - On a switched port capture does not see unicast DHCP replies or renewals, so leases are often partial and silence never proves there is no DHCP server or lease (FR-PA-10).
 - The simulated soak reached 186.5 MB of the 200 MB budget after 90 days on a worst-case 50-host LAN (`make soak`, 17 Oct 2026; heap 5.3 MB, RSS 31.8 MB); a busier site reaches `storage.retention.max_db_size` sooner, which then shortens retention, oldest roll-ups first.
 - The unit's `CPUQuota=20%` stretches CPU-heavy start-up work (parsing the text OUI registry took 6 s on a CM4, hence the precomputed table, ADR 0010). Start-up work must stay small.
-- On Debian 11 (systemd 247) the unit runs without `PrivateIPC=` and the journal shows a warning. This is expected.
 - Docker's kernel is not the target kernel, so the board audits stay mandatory before relying on the privilege model in the field.
 
 ## Open questions and rejected proposals

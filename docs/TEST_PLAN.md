@@ -144,7 +144,7 @@ grep Cap /proc/$(systemctl show -p MainPID --value lan-tracker)/status
 ls -l /run/lan-tracker/api.sock /data/lan-tracker/
 ```
 
-**Expect:** exposure ≤ 2.5 (2.3 in the containers); `CapEff` and `CapBnd` `0000000000002000`, `CapAmb` 0; socket `srw-rw---- root root`. On Debian 11 `daemon-reload` logs `Unknown key name 'PrivateIPC'` (expected).
+**Expect:** exposure ≤ 2.5 (2.3 in the containers); `CapEff` and `CapBnd` `0000000000002000`, `CapAmb` 0; socket `srw-rw---- root root`. The journal has no `lan-tracker.service:` line about an unknown or invalid setting.
 
 | | RevPi Connect | amd64 edge box |
 | --- | --- | --- |

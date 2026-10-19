@@ -9,7 +9,7 @@ Reference files for running LAN Tracker under systemd (docs/ARCHITECTURE.md §8)
 
 Releases are reproducible: `make package VERSION=vX.Y.Z` on the tagged commit gives the same checksums. `config.dev.yaml` is for local development (`make run-dev`).
 
-Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each. On Debian 11 the unit runs without `PrivateIPC=` (not in systemd 247; the journal shows a warning). Debian 11's long-term support ended in August 2026.
+Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each, and fails on any setting a target's systemd does not know. Debian 11's long-term support ended in August 2026.
 
 ## Install
 
@@ -45,8 +45,6 @@ sudo systemctl enable lan-tracker
 sudo systemctl restart lan-tracker
 ```
 
-On Debian 11 `daemon-reload` logs `Unknown key name 'PrivateIPC'`: systemd 247 predates the setting, and the unit runs without it.
-
 Edit `/etc/lan-tracker/config.yaml` for the site (interfaces, and active discovery only after review, see below), check it with `sudo lan-tracker config validate`, then apply it with `sudo lan-tracker config reload`, which prints what took effect and what needs `sudo systemctl restart lan-tracker` (adding, removing or renaming interfaces, passive capture, storage, API, metrics, log format, `identity.oui_override` and the concurrency caps). The API socket and the database are root's (mode 0660 and 0640): run `lan-tracker` commands with `sudo`.
 
 Then check:
@@ -81,7 +79,7 @@ Releases are made from `main` only, by the **release** workflow (`.github/workfl
 
 1. GitHub → Actions → **release** → **Run workflow**, on branch `main`.
 2. Choose the bump: `patch` (v0.1.0 → v0.1.1), `minor` (→ v0.2.0) or `major` (→ v1.0.0). The next version follows the highest `vX.Y.Z` tag (`build/next-version.sh`; pre-release tags are ignored); in a repository without tags the first release is v0.1.0 whatever the bump.
-3. The workflow refuses any branch but `main`, a version whose tag exists already and a version without a `## vX.Y.Z` section in [`RELEASE.md`](../RELEASE.md) (write the notes first, in the release's pull request), runs the same gates as CI on the commit (`make mod-verify check`, `make fuzz`, `make test-net`, `make test-systemd`), builds the tarballs twice and compares their checksums, checks that the binary reports the version, creates the annotated tag `vX.Y.Z` on the tested commit and publishes the GitHub Release with the two tarballs and `SHA256SUMS`, with that section of `RELEASE.md` as its notes.
+3. The workflow refuses any branch but `main`, a version whose tag exists already and a version without a `## vX.Y.Z` section in [`RELEASE.md`](../RELEASE.md) (write the notes first, in the release's pull request, newest on top, each section ended by a `---` line), runs the same gates as CI on the commit (`make mod-verify check`, `make fuzz`, `make test-net`, `make test-systemd`), builds the tarballs twice and compares their checksums, checks that the binary reports the version, creates the annotated tag `vX.Y.Z` on the tested commit and publishes the GitHub Release with the two tarballs and `SHA256SUMS`, with that section of `RELEASE.md` as its notes.
 
 Runs are serialised, so two releases never pick the same version. If a run fails after the tag was pushed (the release step), delete the tag before running it again, or the next run picks the following version.
 
