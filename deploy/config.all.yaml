@@ -1,0 +1,193 @@
+# OT Fabric LAN Tracker: reference of every configuration key (schema 1).
+#
+# This file is a documentation showcase, not an install default: it lists
+# every key with its compiled default and a short explanation. For a real
+# deployment start from config.yaml (passive only) and copy in the reviewed
+# active profile from config.active-example.yaml once the networks and
+# excludes are checked for the site.
+#
+# Precedence (lowest to highest): compiled defaults -> this file
+# (/etc/lan-tracker/config.yaml or $LAN_TRACKER_CONFIG) -> LAN_TRACKER_*
+# environment -> command-line flags. Validation is strict: an unknown key or
+# any version other than 1 is an error.
+#   lan-tracker config validate --config <file>   # check before rollout
+#   lan-tracker config show --sources             # every effective value and where it came from
+#
+# Rates under `active` are probe starts per second, not packets on the wire
+# (ADR 0011): one ARP request, ICMP echo, name query send or TCP connect is
+# one start. See docs/ARCHITECTURE.md §6 for which keys reload (SIGHUP /
+# `config reload`) and which need a restart.
+version: 1                             # configuration schema; must be 1
+
+# ---------------------------------------------------------------------------
+# Interfaces: one monitored Ethernet interface = one network context. At
+# least one is required. Adding, removing or renaming an interface, and any
+# change to its `passive` block, needs a restart; its `active` and `dhcp`
+# blocks reload.
+# ---------------------------------------------------------------------------
+interfaces:
+  - name: eth0
+    passive:
+      enabled: true                    # capture on this interface (default: true for live interfaces)
+      promiscuous: false               # true only on a mirror/SPAN port; requires passive.enabled
+    active:
+      enabled: false                   # off by default; review the segment before enabling (OT safety)
+    # dhcp:
+    #   servers: [192.168.0.1]         # expected DHCP server identifiers (option 54); any other, or an
+    #                                  # unknown identity, raises DHCP_SERVER_UNEXPECTED.
+    #                                  #   []    -> no DHCP server is expected at all
+    #                                  #   unset -> no allowlist; servers are reported without a verdict
+
+  - name: eth1
+    passive: { enabled: true, promiscuous: false }
+    active:
+      enabled: true                    # requires at least one entry in `networks`
+      networks: [192.168.110.0/24]     # candidate IPv4 ranges on this one segment, /24 or narrower by default
+      exclude:  [192.168.110.1]        # single IPs or CIDRs never probed (e.g. the gateway, fragile devices)
+    dhcp:
+      servers: [192.168.110.1]         # allowlisted DHCP server identifiers (option 54)
+
+  # Replay interface (development / offline analysis). Replay and live
+  # interfaces cannot be mixed in one file: a replay runs the whole daemon on
+  # recorded time. See deploy/config.dev.yaml.
+  # - name: eth1
+  #   prefixes: [192.168.110.0/24]     # replaces the interface manager (used for the on-link check)
+  #   replay:
+  #     file: test/fixtures/site-a-eth1.pcapng   # .pcap, .pcapng (optionally .gz) or .jsonl
+  #     speed: 0                        # 0 = simulated clock, as fast as possible; N = real time x N
+
+# ---------------------------------------------------------------------------
+# Passive capture (global). `protocols` and `ring_size` need a restart.
+# ---------------------------------------------------------------------------
+passive:
+  protocols:                           # which decoders run; ipv6 off keeps v1 IPv4-first
+    arp:  true
+    ipv4: true
+    ipv6: false
+    dhcp: true
+    mdns: true
+    dns:  true
+    lldp: true
+  ring_size: 2MiB                      # AF_PACKET ring per captured interface (256KiB to 256MiB)
+
+# ---------------------------------------------------------------------------
+# Kernel neighbour collector. `resync_interval` needs a restart.
+# ---------------------------------------------------------------------------
+neighbor:
+  resync_interval: 10m                 # full neighbour-table dump in addition to RTM_NEWNEIGH/DELNEIGH (>= 1s)
+
+# ---------------------------------------------------------------------------
+# Active discovery and its safety envelope. Rates, intervals, budgets and
+# per-interface `active`/`dhcp` reload; the three concurrency caps
+# (max_concurrent_jobs, tcp.max_concurrent_per_interface/_per_host) need a
+# restart. Each per-protocol budget must be <= max_starts_per_second.
+# ---------------------------------------------------------------------------
+active:
+  startup_delay: 30s                   # wait before the first pass after start-up (plus jitter); avoids fleet sync
+  jitter: 0.1                          # +/- fraction applied to intervals and the startup delay (0 to 0.5)
+  max_starts_per_second: 5             # global cap on all probe starts across engines and interfaces
+  max_concurrent_jobs: 4               # probes in flight across every engine and interface; restart to change
+  min_target_interval: 5s              # minimum spacing between any two probes to one IP on one interface
+  budgets:                             # per-protocol start rates, each <= max_starts_per_second
+    arp:   { starts_per_second: 5 }
+    icmp:  { starts_per_second: 1 }
+    names: { starts_per_second: 1 }    # DNS and mDNS query sends
+    tcp:
+      connects_per_second: 1
+      max_concurrent_per_interface: 2  # >= max_concurrent_per_host and <= max_concurrent_jobs; restart to change
+      max_concurrent_per_host: 1       # restart to change
+  max_auto_scan_prefix_v4: 24          # widest IPv4 prefix a sweep may cover automatically (8 to 32)
+  max_sweep_targets: 1024              # addresses one interface's sweep may cover after excludes; above this is
+                                       # an expert override needing allow_wide_scan and default-or-lower rates
+  allow_wide_scan: false               # allow networks wider than max_auto_scan_prefix_v4 and sweeps above the default
+  arp:  { enabled: true,  interval: 15m }   # primary discovery; sweeps the configured networks (interval >= 10s)
+  icmp: { enabled: false, interval: 15m }   # extra positive evidence only; never gates TCP
+  tcp:
+    enabled: false                     # bare connect() only, closed at once, no payload; off until reviewed
+    interval: 15m
+    targets:                           # port names are labels, not protocol proof; OPEN = a completed connect
+      - { port: 80,   name: http,     timeout: 750ms }
+      - { port: 443,  name: https,    timeout: 750ms }
+      - { port: 8080, name: http-alt, timeout: 750ms }
+      - { port: 502,  name: modbus,   timeout: 750ms }
+  names:                               # questions about already-known names and addresses only (FR-AC-12)
+    enabled: false                     # off by default
+    interval: 30m
+    mdns: true                         # one-shot mDNS queries for known .local names and service_types
+    service_types: [_http._tcp]        # DNS-SD types to enumerate (format _name._tcp or _name._udp); none by default
+    enumerate_services: false          # one _services._dns-sd._udp.local query per pass; its answers are not chased
+    resolvers: [192.168.110.1]         # unicast DNS for PTR of known addresses and A/AAAA of known names; none: no unicast DNS
+    max_queries_per_pass: 64           # cap per pass per interface (1 to 1024)
+
+# ---------------------------------------------------------------------------
+# Named on-demand scan profiles (used by `lan-tracker scan run --profile`).
+# Each profile must enable at least one probe. Names: lowercase, digits, - _.
+# ---------------------------------------------------------------------------
+profiles:
+  modbus:
+    arp:  true
+    icmp: false
+    tcp:  [502]
+  web:
+    arp:  true
+    tcp:  [80, 443, 8080]
+
+# ---------------------------------------------------------------------------
+# Presence thresholds (time since hosts.last_seen). Must be strictly
+# increasing: recent > active, stale > recent. These reload.
+# ---------------------------------------------------------------------------
+presence:
+  active: 5m                           # < this: ACTIVE
+  recent: 30m                          # < this: RECENT
+  stale:  24h                          # < this: STALE; >= this: MISSING
+
+# ---------------------------------------------------------------------------
+# Correlation and naming. All but oui_override reload; oui_override is loaded
+# at start-up and needs a restart.
+# ---------------------------------------------------------------------------
+identity:
+  hostname_preference: [mdns, dhcp, dns, dns_ptr, lldp]  # order for preferred_name; no duplicates
+  address_expiry: 24h                  # an address not confirmed this long while its host is seen is closed (inference)
+  name_expiry: 168h                    # names without a TTL not confirmed this long read as stale; time never closes them
+  proxy_arp_threshold: 16              # flag a MAC answering ARP for more than this many distinct IPs (>= 2)
+  oui_override: ""                     # optional path to a PREFIX[/bits] Name override file; restart to change
+
+# ---------------------------------------------------------------------------
+# SQLite storage and retention. All storage keys need a restart. Over
+# max_db_size, compaction prunes observations, then roll-ups and history,
+# then oldest events, regardless of age (docs/DATA_MODEL.md §9).
+# ---------------------------------------------------------------------------
+storage:
+  path: /data/lan-tracker/hosts.db
+  retention:
+    observations: 168h                 # raw observations (7 days) before roll-up
+    rollups: 2160h                     # hourly roll-ups (90 days)
+    events: 17520h                     # events (2 years)
+    max_db_size: 200MB                 # hard cap on data size; at least 10MB
+
+# ---------------------------------------------------------------------------
+# Local API. Needs a restart. The Unix socket is always served; `listen`
+# adds an optional loopback TCP listener that also serves /metrics.
+# ---------------------------------------------------------------------------
+api:
+  socket: /run/lan-tracker/api.sock    # required; <= 107 bytes (Linux sun_path limit)
+  listen: ""                           # e.g. 127.0.0.1:9734 (loopback only); empty disables the TCP listener
+
+# ---------------------------------------------------------------------------
+# Metrics. Needs a restart (served on api.listen when set).
+# ---------------------------------------------------------------------------
+metrics:
+  enabled: true                        # expose Prometheus /metrics on the api.listen address
+
+# ---------------------------------------------------------------------------
+# Logging. `level` reloads; `format` needs a restart.
+# ---------------------------------------------------------------------------
+logging:
+  level: info                          # trace | debug | info | warn | error
+  format: journald                     # journald | json | text
+
+# ---------------------------------------------------------------------------
+# Global replay settings (only meaningful with replay interfaces above).
+# ---------------------------------------------------------------------------
+replay:
+  exit_when_done: false                # true: exit once every replay source is exhausted (used by tests)

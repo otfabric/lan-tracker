@@ -444,7 +444,7 @@ func TestResolvePath(t *testing.T) {
 
 // The reference configs in deploy/ must stay valid.
 func TestDeployConfigs(t *testing.T) {
-	for _, file := range []string{"../../deploy/config.yaml", "../../deploy/config.dev.yaml", "../../deploy/config.active-example.yaml"} {
+	for _, file := range []string{"../../deploy/config.yaml", "../../deploy/config.dev.yaml", "../../deploy/config.active-example.yaml", "../../deploy/config.all.yaml"} {
 		t.Run(file, func(t *testing.T) {
 			data, err := os.ReadFile(file)
 			if err != nil {

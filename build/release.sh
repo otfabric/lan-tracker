@@ -50,10 +50,10 @@ package)
 		mkdir -p "$stage"
 		cp "dist/lan-tracker-$os-$arch" "$stage/lan-tracker"
 		cp "dist/tools/capcheck-$os-$arch" "$stage/capcheck"
-		cp deploy/lan-tracker.service deploy/config.yaml deploy/config.active-example.yaml deploy/README.md LICENSE "$stage/"
+		cp deploy/lan-tracker.service deploy/config.yaml deploy/config.active-example.yaml deploy/config.all.yaml deploy/README.md LICENSE "$stage/"
 		(cd "$stage" && sha256sum lan-tracker capcheck >SHA256SUMS)
 		chmod 0755 "$stage" "$stage/lan-tracker" "$stage/capcheck"
-		chmod 0644 "$stage"/lan-tracker.service "$stage"/config.yaml "$stage"/config.active-example.yaml "$stage"/README.md "$stage"/LICENSE "$stage"/SHA256SUMS
+		chmod 0644 "$stage"/lan-tracker.service "$stage"/config.yaml "$stage"/config.active-example.yaml "$stage"/config.all.yaml "$stage"/README.md "$stage"/LICENSE "$stage"/SHA256SUMS
 		echo "Packing dist/release/$name.tar.gz"
 		tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner --format=gnu \
 			-C dist/release -cf - "$name" | gzip -9n >"dist/release/$name.tar.gz"

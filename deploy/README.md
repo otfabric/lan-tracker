@@ -4,10 +4,10 @@ Reference files for running LAN Tracker under systemd (docs/ARCHITECTURE.md §8)
 
 | Asset | Contents |
 | --- | --- |
-| `lan-tracker-vX.Y.Z-linux-amd64.tar.gz`, `lan-tracker-vX.Y.Z-linux-arm64.tar.gz` | a directory of the same name with `lan-tracker` (the static binary), `capcheck` (the privilege check for the board audit), `lan-tracker.service`, `config.yaml` and `config.active-example.yaml` (the reference files in this directory), this `README.md`, the MIT `LICENSE`, and `SHA256SUMS` for the two binaries |
+| `lan-tracker-vX.Y.Z-linux-amd64.tar.gz`, `lan-tracker-vX.Y.Z-linux-arm64.tar.gz` | a directory of the same name with `lan-tracker` (the static binary), `capcheck` (the privilege check for the board audit), `lan-tracker.service`, `config.yaml`, `config.active-example.yaml` and `config.all.yaml` (the reference files in this directory), this `README.md`, the MIT `LICENSE`, and `SHA256SUMS` for the two binaries |
 | `SHA256SUMS` | the checksums of the two tarballs |
 
-Releases are reproducible: `make package VERSION=vX.Y.Z` on the tagged commit gives the same checksums. `config.dev.yaml` is for local development (`make run-dev`).
+Releases are reproducible: `make package VERSION=vX.Y.Z` on the tagged commit gives the same checksums. `config.all.yaml` documents every configuration key with its default; `config.dev.yaml` is for local development (`make run-dev`).
 
 Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each, and fails on any setting a target's systemd does not know. Debian 11's long-term support ended in August 2026.
 
