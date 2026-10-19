@@ -408,7 +408,6 @@ ProtectHostname=true
 ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
-PrivateIPC=true
 DevicePolicy=closed
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
 RestrictNamespaces=true
@@ -420,6 +419,10 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# No SysV or POSIX IPC: the daemon uses none. This stands in for
+# PrivateIPC=, which systemd 247 (Debian 11) does not know.
+SystemCallFilter=~msgctl msgget msgrcv msgsnd semctl semget semop semtimedop shmat shmctl shmdt shmget
+SystemCallFilter=~mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedsend mq_unlink
 # Read-only clock sync state (see ProtectClock= above); listed after the
 # deny line because @privileged contains @clock.
 SystemCallFilter=adjtimex
@@ -446,7 +449,7 @@ WantedBy=multi-user.target
 | `SO_BINDTODEVICE` on probe sockets | `CAP_NET_RAW` (kernels < 5.7), none on newer |
 | `adjtimex` read (modes 0: clock sync state, NFR-REL-2) | none; allowed by the unit's call filter, which is why `ProtectClock=` is off |
 
-The clock check is a read-only `adjtimex` of the kernel's NTP status (`STA_UNSYNC`, `STA_CLOCKERR`, `TIME_ERROR`), so it works whichever NTP client keeps the clock (chrony on the deployed devices; ntpd or systemd-timesyncd elsewhere) and depends on none of them. Every event records the state at write time: `synced`, `unsynced` or `unknown` (the state could not be read, or a replay). `systemd-analyze security` charges the exception three times, 0.2 each (it counts `adjtimex` as an allowed `@privileged` and `@clock` call, and `ProtectClock=` as off), partly offset by `PrivateMounts=true`, and running as root instead of a service user adds 0.3: the unit scores 2.3 on systemd 247, 252 and 257 (`make test-systemd`, Debian 11, 12 and 13), below the 2.5 limit of NFR-SEC-1. It costs no capability: changing the clock needs `CAP_SYS_TIME`, which the bounding set does not hold. On systemd 247 (Debian 11) `PrivateIPC=` does not exist yet; the unit runs without it there, with a warning in the journal.
+The clock check is a read-only `adjtimex` of the kernel's NTP status (`STA_UNSYNC`, `STA_CLOCKERR`, `TIME_ERROR`), so it works whichever NTP client keeps the clock (chrony on the deployed devices; ntpd or systemd-timesyncd elsewhere) and depends on none of them. Every event records the state at write time: `synced`, `unsynced` or `unknown` (the state could not be read, or a replay). `systemd-analyze security` charges the exception three times, 0.2 each (it counts `adjtimex` as an allowed `@privileged` and `@clock` call, and `ProtectClock=` as off), partly offset by `PrivateMounts=true`, and running as root instead of a service user adds 0.3: the unit scores 2.3 on systemd 247, 252 and 257 (`make test-systemd`, Debian 11, 12 and 13), below the 2.5 limit of NFR-SEC-1. It costs no capability: changing the clock needs `CAP_SYS_TIME`, which the bounding set does not hold. The unit uses no setting newer than systemd 247: instead of `PrivateIPC=` (systemd 248) its call filter denies the SysV and POSIX IPC calls, which the daemon never makes.
 
 Run `tools/capcheck` under the reference unit's sandbox on each target board (`tools/capcheck/README.md`) and record kernel version, board and results below. `make test-net` runs the same check in Docker on every change. If any row needs `CAP_NET_ADMIN` or root, stop and decide before continuing.
 
@@ -456,7 +459,7 @@ Run `tools/capcheck` under the reference unit's sandbox on each target board (`t
 | systemd in containers (`make test-systemd`) on Debian 11, 12 and 13, daemon as root, installed with the commands in `deploy/README.md` | 7.0.14-linuxkit arm64, systemd 247, 252, 257 | 6 Oct 2026 | PASS, every row above including the `adjtimex` read under the sandbox; uid 0 with `CapEff`/`CapBnd` = `CAP_NET_RAW`; socket `root:root` 0660; clock state readable (`unsynced` in the Docker VM); exposure 2.3 on each |
 | Raspberry Pi Compute Module 4 Rev 1.1, Debian 11 (systemd 247), daemon installed with the reference unit | 6.1.21-v8+ aarch64 | 6 Oct 2026 | PASS: capcheck under the installed unit's sandbox (`tools/capcheck/README.md`), every row including ARP transmit, ping and raw ICMP, bound TCP connect and the `adjtimex` read (NDP transmit skipped: there is no IPv6 probing); running daemon `CapEff`/`CapBnd` = `CAP_NET_RAW`, nothing ambient; `systemd-analyze security` exposure 2.3. Without capabilities exactly the `CAP_NET_RAW` rows fail; `net.ipv4.ping_group_range` is `0-2147483647` |
 
-The process stays in the foreground; systemd owns its lifecycle (no double-fork). `make test-systemd` installs the release files with the commands of `deploy/README.md` in a systemd container for each target release (Debian 11 bullseye, 12 bookworm, 13 trixie) on every change, and fails on any check: readiness, root with only `CAP_NET_RAW`, the socket's owner and mode, SIGHUP and `config reload` (applied, restart-only and invalid changes), `systemd-analyze security` exposure above 2.5 (it prints the score), an unreadable clock state, capcheck under the sandbox (the board-audit commands of `tools/capcheck/README.md`: a transient unit with the installed unit's `[Service]` settings less its service plumbing and `PrivateIPC=`), an upgrade by re-running the install, and a clean shutdown that removes the WAL.
+The process stays in the foreground; systemd owns its lifecycle (no double-fork). `make test-systemd` installs the release files with the commands of `deploy/README.md` in a systemd container for each target release (Debian 11 bullseye, 12 bookworm, 13 trixie) on every change, and fails on any check: readiness, root with only `CAP_NET_RAW`, the socket's owner and mode, SIGHUP and `config reload` (applied, restart-only and invalid changes), `systemd-analyze security` exposure above 2.5 (it prints the score), an unreadable clock state, capcheck under the sandbox (the board-audit commands of `tools/capcheck/README.md`: a transient unit with the installed unit's `[Service]` settings less its service plumbing), a unit setting that systemd does not know, an upgrade by re-running the install, and a clean shutdown that removes the WAL.
 
 ## 9. Development and testing
 

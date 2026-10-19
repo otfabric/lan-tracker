@@ -9,7 +9,7 @@ Reference files for running LAN Tracker under systemd (docs/ARCHITECTURE.md §8)
 
 Releases are reproducible: `make package VERSION=vX.Y.Z` on the tagged commit gives the same checksums. `config.dev.yaml` is for local development (`make run-dev`).
 
-Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each. On Debian 11 the unit runs without `PrivateIPC=` (not in systemd 247; the journal shows a warning). Debian 11's long-term support ended in August 2026.
+Targets: Debian 11 (systemd 247), 12 (252) and 13 (257), kernel 5.10 or newer; `make test-systemd` runs this unit on each, and fails on any setting a target's systemd does not know. Debian 11's long-term support ended in August 2026.
 
 ## Install
 
@@ -44,8 +44,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable lan-tracker
 sudo systemctl restart lan-tracker
 ```
-
-On Debian 11 `daemon-reload` logs `Unknown key name 'PrivateIPC'`: systemd 247 predates the setting, and the unit runs without it.
 
 Edit `/etc/lan-tracker/config.yaml` for the site (interfaces, and active discovery only after review, see below), check it with `sudo lan-tracker config validate`, then apply it with `sudo lan-tracker config reload`, which prints what took effect and what needs `sudo systemctl restart lan-tracker` (adding, removing or renaming interfaces, passive capture, storage, API, metrics, log format, `identity.oui_override` and the concurrency caps). The API socket and the database are root's (mode 0660 and 0640): run `lan-tracker` commands with `sudo`.
 

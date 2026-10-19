@@ -1,5 +1,22 @@
 # lan-tracker Releases
 
+## v0.2.2
+
+**Date:** 2026-10-19
+**Previous release:** v0.2.1
+
+### Summary
+
+Patch release: the systemd unit no longer logs `Unknown key name 'PrivateIPC'` on Debian 11 (systemd 247), and the sandbox is the same on every supported Debian. No change to the configuration, the schema, the CLI or the API.
+
+### Fixed
+
+- **`PrivateIPC=` was ignored with a warning on Debian 11.** The setting appeared in systemd 248, so on systemd 247 the daemon ran without it. The unit now denies the SysV and POSIX IPC system calls instead (`msg*`, `sem*`, `shm*`, `mq_*`), which the daemon never makes, so it has no IPC on Debian 11, 12 and 13 alike. Re-running the install commands of [`deploy/README.md`](deploy/README.md) installs the new unit.
+
+### Tests
+
+- `make test-systemd` fails when systemd reports any unknown or unparsable setting in the unit (a `lan-tracker.service:<line>:` line in the journal) on Debian 11, 12 or 13.
+
 ## v0.2.1
 
 **Date:** 2026-10-17

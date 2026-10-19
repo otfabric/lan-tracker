@@ -20,7 +20,7 @@ The daemon must report readiness, be restarted if it hangs, reload its configura
 
 - sd_notify and journald code lives in `internal/service` only.
 - `deploy/README.md`'s install block restarts the daemon (`systemctl restart`), so re-running it upgrades a running install. `enable --now` would leave the old binary running.
-- On systemd 247, `PrivateIPC=` is unknown and logged as a warning; this is expected.
+- The unit uses only settings systemd 247 knows (`make test-systemd` fails on an unknown one); `PrivateIPC=` (systemd 248) is replaced by denying the SysV and POSIX IPC calls (19 Oct 2026).
 
 ## Ruled out
 

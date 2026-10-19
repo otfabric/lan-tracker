@@ -7,9 +7,10 @@
 # bullseye, bookworm and trixie, systemd 247, 252 and 257).
 # Checks Type=notify start-up, the service identity and capabilities, the
 # clock sync state, the database, SIGHUP and `config reload`, an upgrade with
-# the same install commands, clean shutdown and the
-# systemd-analyze score, and runs tools/capcheck as a transient unit with
-# exactly the reference unit's [Service] sandboxing and capabilities.
+# the same install commands, clean shutdown, unit settings systemd does not
+# know and the systemd-analyze score, and runs tools/capcheck as a transient
+# unit with exactly the reference unit's [Service] sandboxing and
+# capabilities.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 NAME=lan-tracker-systemd
@@ -76,6 +77,11 @@ else
 	cat "$work/install.txt" >&2
 	fail=1
 fi
+# systemd reports every unit setting it does not know or cannot parse as
+# "<file>:<line>: ..." and ignores it, so the unit would run with less
+# sandboxing than it says; every setting must work on every target.
+unit_warnings() { x journalctl -b --no-pager -o cat | grep -E 'lan-tracker\.service:[0-9]+:' || true; }
+check "systemd knows every unit setting" bash -c '[ -z "$1" ] || { echo "$1" >&2; false; }' _ "$(unit_warnings)"
 check "service active (Type=notify readiness)" wait_for 60 x systemctl is-active --quiet lan-tracker
 pid=$(x systemctl show -p MainPID --value lan-tracker)
 status=$(x cat "/proc/$pid/status")
