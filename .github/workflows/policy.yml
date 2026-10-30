@@ -1,0 +1,34 @@
+# Organisation policy check (otfabric/engineering). Writes a Markdown
+# summary; blocks only according to .otfabric/policy.yaml mode.
+name: Policy
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    # otfabric/engineering is private: the token is not available to pull
+    # requests from forks, so they skip this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Private module access (otfabric/engineering is private)
+        env:
+          TOKEN: ${{ secrets.OTFABRIC_READ_TOKEN }}
+        run: git config --global url."https://x-access-token:${TOKEN}@github.com/otfabric/engineering".insteadOf "https://github.com/otfabric/engineering"
+      - name: otfabric-policy
+        env:
+          GOWORK: "off"
+          GOPRIVATE: github.com/otfabric/engineering
+        run: |
+          go run github.com/otfabric/engineering/cmd/otfabric-policy@v1.1.0 check -format markdown . | tee -a "$GITHUB_STEP_SUMMARY"
+          go run github.com/otfabric/engineering/cmd/otfabric-policy@v1.1.0 check .
