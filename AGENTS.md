@@ -39,6 +39,7 @@ Fixed names and paths:
 | `docs/CLI.md` | The v1 command-line contract, the offline-access contract, exit codes |
 | `docs/API.md` | The local REST API and the metrics |
 | `docs/USER_GUIDE.md` | How operators install, configure and use what is built |
+| `TESTING.md` | How to run each test tier, prerequisites, coverage policy, replaying failures |
 | `docs/TEST_PLAN.md` | The manual hardware test procedure for the boards |
 | `docs/adr/` | Why the foundational decisions were taken, and what they rule out |
 | `docs/ROADMAP.md` | The only list of open work: everything not implemented, deferred or blocked, open hardware checks, open questions and rejected proposals |
