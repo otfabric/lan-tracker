@@ -1,0 +1,26 @@
+# Recorded exceptions to otfabric/engineering rules (docs/exceptions/ there).
+exceptions:
+  - rule: CI-002
+    scope: repository
+    justification: >-
+      Go, golangci-lint and govulncheck run only inside the Linux dev
+      container (build/dev.Dockerfile; AGENTS.md §4 rule 2: run Go only
+      through make, never directly on a macOS host). The shared go-ci
+      workflow runs the host toolchain. ci.yml instead runs
+      `make mod-verify check` in the container, which covers the same gates
+      (fmt, tidy, vet, lint, govulncheck, race tests, coverage >= 90 %),
+      plus fuzz, test-net and test-systemd jobs.
+    owner: bartvanbos
+    reviewed: "2026-10-30"
+    reconsider: "when otfabric/.github go-ci can run its steps inside a caller-provided container image"
+    ref: https://github.com/otfabric/engineering/blob/main/docs/adoption/github-actions-proposal.md
+  - rule: GO-008
+    scope: Makefile
+    justification: >-
+      Every Go command runs in the dev container, which mounts only this
+      repository at /src ($(RUN) in the Makefile); a go.work in a parent
+      directory is never visible, so GOWORK=off has no effect.
+    owner: bartvanbos
+    reviewed: "2026-10-30"
+    reconsider: "if any Go command is run on the host"
+    ref: AGENTS.md
