@@ -10,3 +10,13 @@ coverage.out
 /.build/
 coverage.html
 .vscode/
+
+# Build artefacts live in /bin/ and /release/ (otfabric/engineering REPO-005)
+/release/
+
+# Output of a bare `go build`, anchored so it can never hide a source folder
+/cmd/lan-tracker/lan-tracker
+/data/oui/gen/gen
+/test/fixtures/gen/gen
+/test/net/inject/inject
+/tools/capcheck/capcheck
