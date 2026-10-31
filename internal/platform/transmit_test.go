@@ -30,7 +30,7 @@ func TestDialBoundToInterface(t *testing.T) {
 	tx := socketTransmitter{}
 	c, err := tx.DialTCP(context.Background(), "lo", addr, time.Second)
 	if err != nil {
-		t.Skipf("SO_BINDTODEVICE not allowed here: %v", err)
+		requireKernel(t, "SO_BINDTODEVICE not allowed here: %v", err)
 	}
 	// The SYN retransmissions are capped, so a timeout sends at most 3 SYNs.
 	rc, err := c.(*net.TCPConn).SyscallConn()
@@ -73,7 +73,7 @@ func TestDialBoundToInterface(t *testing.T) {
 func TestPingSocketOnLoopback(t *testing.T) {
 	ec, err := socketTransmitter{}.ICMPConn(context.Background(), "lo")
 	if err != nil {
-		t.Skipf("no ICMP socket here: %v", err)
+		requireKernel(t, "no ICMP socket here: %v", err)
 	}
 	defer ec.Close()
 	// Echo request: type 8, code 0, checksum (the kernel computes it for

@@ -1,6 +1,6 @@
 # Linux development image. Every make target that runs Go runs in here, as
 # the calling user, with caches on the lan-tracker-cache volume (/cache).
-FROM golang:1.27-bookworm
+FROM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9
 
 ARG GOLANGCI_LINT_VERSION=v2.14.0
 RUN apt-get update \

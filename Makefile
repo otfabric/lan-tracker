@@ -20,6 +20,10 @@ TEST_BIN := .build/test
 FUZZTIME ?= 30s
 # Minimum coverage of internal/ in percent (make coverage, make check).
 COVER_MIN ?= 90
+# Per-package floor of the same measure (make coverage-pkg-check, TEST-012).
+# internal/platform sets it: its AF_PACKET, netlink and raw socket paths need
+# CAP_NET_RAW, so they run in make test-net, which is not counted.
+COVER_PKG_MIN ?= 75
 # make chaos: how long the daemon chaos test runs, and how many seeds and
 # steps the correlator chaos test plays.
 CHAOS_DURATION ?= 60s
@@ -33,11 +37,12 @@ DEV_IMAGE := lan-tracker-dev:$(shell git hash-object build/dev.Dockerfile 2>/dev
 CACHE_VOL := lan-tracker-cache
 USER_ID   := $(shell id -u):$(shell id -g)
 RUN       := docker run --rm -v "$(CURDIR)":/src -w /src -v $(CACHE_VOL):/cache --user $(USER_ID) \
-	-e LDFLAGS="$(LDFLAGS)" -e FUZZTIME=$(FUZZTIME) -e VERSION=$(VERSION) -e SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(DEV_IMAGE)
+	-e LDFLAGS="$(LDFLAGS)" -e FUZZTIME=$(FUZZTIME) -e VERSION=$(VERSION) -e SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
+	-e LT_REQUIRE_KERNEL=$(LT_REQUIRE_KERNEL) $(DEV_IMAGE)
 
 .DEFAULT_GOAL := help
 .PHONY: help all dev-image shell build release tools package oui fixtures fmt fmt-check tidy tidy-check mod-verify vet lint vuln \
-	test coverage cover fuzz chaos soak test-net test-systemd check check-all run-dev clean clean-cache
+	test coverage coverage-pkg-check cover fuzz chaos soak test-net test-systemd check check-all run-dev clean clean-cache
 
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -124,6 +129,12 @@ coverage: dev-image ## Tests with race detector and coverage of internal/ (fails
 	@echo "Running tests with coverage of internal/ (minimum $(COVER_MIN)%)"
 	@$(RUN) env COVER_MIN=$(COVER_MIN) COVERAGE=$(COVERAGE) build/coverage.sh
 
+coverage-pkg-check: coverage ## Fail when a package of internal/ is below COVER_PKG_MIN
+	@echo "Checking per-package coverage (minimum $(COVER_PKG_MIN)%)"
+	@awk -v m="$(COVER_PKG_MIN)" 'NR > 1 { n[$$1] = $$2; if ($$3 > 0) h[$$1] = 1 } \
+	END { for (k in n) { p = k; sub(/\/[^\/]*$$/, "", p); s[p] += n[k]; if (k in h) c[p] += n[k] } \
+	for (p in s) { v = 100 * c[p] / s[p]; if (v < m) { printf "%s: %.1f%% < %s%%\n", p, v, m; bad = 1 } } exit bad }' $(COVERAGE)
+
 cover: coverage ## Write coverage.html and open it in a browser
 	@$(RUN) go tool cover -html=$(COVERAGE) -o coverage.html
 	@echo "Opening coverage.html"
@@ -150,7 +161,7 @@ test-systemd: dev-image ## The daemon under systemd in a container with the depl
 
 # --- gates -------------------------------------------------------------------
 
-check: fmt-check tidy-check vet lint vuln coverage ## Fast gate: format, tidy, vet, lint, vuln, tests with coverage
+check: fmt-check tidy-check vet lint vuln coverage-pkg-check ## Fast gate: format, tidy, vet, lint, vuln, tests with coverage
 
 check-all: check test-net test-systemd ## check plus the Docker network and systemd suites
 

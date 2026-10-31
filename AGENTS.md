@@ -2,6 +2,10 @@
 
 This file is the entry point for every AI coding agent working in this repository, whatever the tool. Read it before you change anything. The tool-specific files (`CLAUDE.md`, `.github/copilot-instructions.md`, `.cursor/rules/`) point here and add only notes about their own tool. The hard rules (§4) are numbered; code and docs cite them as "AGENTS.md rule N".
 
+## Organisation standards
+
+This repository follows **otfabric/engineering policy 1.1**, profile **application** (`.otfabric/policy.yaml`, mode `enforce`). Organisation skills come from the `otfabric` plugin (maintainer's user settings). Local exceptions: `.otfabric/exceptions.yaml`. Where this file and the organisation standards disagree, this file wins for this repository — say so in your report.
+
 ## 1. What this is
 
 OT Fabric LAN Tracker keeps an evidence-based history of which MAC addresses, IP addresses, names and TCP endpoints are visible on each local OT (industrial) network, so operators can find equipment, troubleshoot connectivity and reconstruct incidents. It answers, after the fact: *which MAC held this IP at that time, which other addresses and names it had, what DHCP told it, whether the configured TCP ports answered, and what the collector could not see*.
@@ -42,6 +46,8 @@ Fixed names and paths:
 | `TESTING.md` | How to run each test tier, prerequisites, coverage policy, replaying failures |
 | `docs/TEST_PLAN.md` | The manual hardware test procedure for the boards |
 | `docs/adr/` | Why the foundational decisions were taken, and what they rule out |
+| `docs/AI_REPO_MAP.md` | The package map; where each concern lives and which tests cover it |
+| `docs/COMMON_TASKS.md` | Recipes for recurring changes; which docs each change updates |
 | `docs/ROADMAP.md` | The only list of open work: everything not implemented, deferred or blocked, open hardware checks, open questions and rejected proposals |
 | `deploy/README.md` | Install, upgrade, rollback and rollout; `make test-systemd` runs its install block verbatim |
 
@@ -61,44 +67,7 @@ Fixed names and paths:
 
 ## 3. Package map
 
-| Path | Responsibility |
-| --- | --- |
-| `cmd/lan-tracker` | `main`: hands off to `internal/cli` |
-| `internal/cli` | cobra commands. A `backend` interface serves both online (API client) and `--offline` (read-only DB) reads; table, JSON, JSONL and CSV output |
-| `internal/api` | REST server on the Unix socket (plus an optional `127.0.0.1` listener with `/metrics`) and the CLI's client. Operator endpoints go through `Control` |
-| `internal/daemon` | Lifecycle: config, store, pipeline, SIGHUP and `config reload`, sd_notify and watchdog, shutdown; implements `api.Control` |
-| `internal/config` | Schema version 1 (`config.go`; value types in `types.go`), defaults, YAML + env + flags loading, strict validation, the reload diff (`summary.go`) |
-| `internal/observation` | The `Observation` type, sources, evidence kinds (`Evidence()`) and meta keys, the decoded DHCP message (`DHCPMessage`), JSONL encoding, the bounded bus with barriers and operator messages |
-| `internal/correlate` | **The only writer of state and events**: host matching, bindings, conflicts, presence, name records, TCP endpoints, DHCP servers, exchanges and leases, the proxy-ARP flag, operator actions |
-| `internal/events` | The event catalogue (it must match the migration CHECK) and the engine that writes events to the table and journald |
-| `internal/store` | SQLite: migrations, the single writer, batches, compaction, the integrity check, and `Reader` (queries shared by the API and `--offline`); `storetest` seeds test databases |
-| `internal/platform` | **The only code that touches AF_PACKET, netlink or raw sockets**: `Capturer`, `NeighborSource`, `InterfaceMonitor`, `Transmitter` (frames, TCP connect, UDP for name queries, ICMP, the kernel route lookup), `ClockSource` (read-only `adjtimex`); fakes in `platform/fake` |
-| `internal/service` | sd_notify and the journald handler |
-| `internal/iface` | Interface manager: contexts, prefixes, up and down |
-| `internal/collect/capture` | Passive capture loop and BPF filter; `decoders/` holds pure frame → observation functions (ARP, IP, NDP, DHCP, DNS/mDNS, LLDP) |
-| `internal/collect/neighbor` | Kernel neighbour table: dump, watch, resync |
-| `internal/collect/replay` | pcap/pcapng/JSONL replay on a simulated clock |
-| `internal/probe` | What the engines share: the start budget (and `Simulate`, its replay for estimates), policy, kill switch, targets, back-off, the planner (`Compute`) |
-| `internal/probe/{arp,icmp,tcp}` | Probe engines: ARP sweep, ICMP echo, bare TCP connect after a route check |
-| `internal/probe/names` | Name query engine: one-shot mDNS and unicast DNS to configured resolvers, about known names and addresses only |
-| `internal/probe/probetest` | Shared test helpers for the engines |
-| `internal/probe/scheduler` | Periodic loops per interface and protocol; operator scans; last-pass summaries |
-| `internal/netrange` | IPv4 range arithmetic and the keyed random walk for sweeps |
-| `internal/identify` | OUI lookup (a MAC-prefix registrant hint, never a manufacturer) and MAC helpers. No classifiers |
-| `internal/ouitable` | Format of the precomputed OUI table (`data/oui/oui.bin`) |
-| `internal/clock` | Wall clock and simulated clock: everything that reads time takes a `clock.Clock` |
-| `internal/metrics` | Prometheus text writer with a fixed list of allowed labels |
-| `internal/logging`, `internal/buildinfo` | slog handler selection; version stamped through `-ldflags` |
-| `migrations/` | Numbered `NNNN_description.sql` files, embedded, applied forward only at start-up |
-| `data/oui/` | IEEE registry (`oui.tsv.gz`), the embedded table (`oui.bin`), the generator (`gen/`) |
-| `test/golden` | Golden correlator scenarios, including reconstruction (`DATA_MODEL.md` §10) and the CLI end-to-end tests |
-| `test/frames`, `test/fixtures` | gopacket frame builders; the synthetic pcap fixture and its generator |
-| `test/net` | Docker network tests (tag `nettest`, `make test-net`), run as uid 65534 with only `CAP_NET_RAW` |
-| `test/systemd` | The daemon under systemd on Debian 11/12/13 (`make test-systemd`) |
-| `test/crash`, `test/soak` | kill -9 during writes (in `make check`); 90 simulated days (tag `soak`, `make soak`) |
-| `tools/capcheck` | Privilege and feasibility check for boards; shipped in the release tarballs |
-| `build/` | The dev container (`dev.Dockerfile`) and the scripts make runs in it |
-| `deploy/` | Reference unit, default config, the reviewed ARP + TCP example (`config.active-example.yaml`), replay dev config, install guide |
+Every package and top-level directory, with its responsibility: [`docs/AI_REPO_MAP.md`](docs/AI_REPO_MAP.md) (Package map).
 
 ## 4. Hard rules
 
@@ -198,27 +167,7 @@ Fixed names and paths:
 
 Every Go command runs in the Linux dev container through `make`. **Docker must be running.** The first run builds the image `lan-tracker-dev:<hash of build/dev.Dockerfile>`.
 
-```bash
-make              # list all targets (make help)
-make check        # fast gate: fmt-check, tidy-check, vet, lint, vuln, tests with race + coverage >= 90%
-make check-all    # check + test-net + test-systemd
-make build        # bin/lan-tracker for the Docker host's architecture
-make release      # static linux/amd64 + linux/arm64 into dist/ with checksums
-make package      # release tarballs per target into dist/release/ (VERSION=vX.Y.Z)
-make test         # unit and golden tests with -race (PKGS=... to narrow)
-make coverage     # tests with coverage of internal/ (coverage.out), fails below 90%; make cover opens the report
-make fuzz         # every Fuzz* target, FUZZTIME each (default 30s)
-make chaos        # chaos and parallel suites at length with race (CHAOS_DURATION, CHAOS_SEEDS, CHAOS_STEPS; LT_CHAOS_SEED replays)
-make soak         # 90 simulated days of a 50-host LAN: database size, memory, CPU (about 6 minutes)
-make test-net     # network integration tests in Docker (CAP_NET_RAW only)
-make test-systemd # daemon under systemd in containers (Debian 11, 12, 13) with the deploy/ unit
-make run-dev      # daemon in the dev container on deploy/config.dev.yaml (replay)
-make tools        # tools/capcheck for linux/amd64 + linux/arm64 (privilege check for boards)
-make oui          # regenerate the IEEE OUI registry and the embedded table (each release)
-make fixtures     # regenerate the synthetic pcap fixtures in test/fixtures
-make fmt / tidy   # fix formatting / go.mod
-make shell        # shell in the dev container
-```
+[`TESTING.md`](TESTING.md) (Make targets) says what each target does.
 
 | You changed | Run |
 | --- | --- |
@@ -252,54 +201,7 @@ Notes:
 
 ## 10. Common tasks
 
-Which files each task touches: `docs/AI_REPO_MAP.md` (Common tasks).
-
-**Add or change a passive decoder**
-
-1. Read `ARCHITECTURE.md` §3 (Passive capture) and `DATA_MODEL.md` §2. Decide the MAC evidence and the `meta` keys first.
-2. Write it in `internal/collect/capture/decoders` as a pure function of the frame; it never logs.
-3. If it needs frames the BPF filter drops, extend `capture/filter.go` and its tests.
-4. Add table tests on frames built in `test/frames`, plus a fuzz target in `decoders/fuzz_test.go`.
-5. A new protocol needs a `passive.protocols` key (config, validation, docs).
-6. If the synthetic site capture should show it, extend `test/fixtures/fixtures.go`, run `make fixtures`, and update the capture scenario expectations in `test/golden`.
-
-**Add a CLI command**
-
-1. Specify it in `docs/CLI.md` first: syntax, output, exit codes.
-2. Reads: add the query to `store.Reader`, an endpoint in `internal/api` with a client method, and wire the CLI `backend` so it works online and `--offline`.
-3. Writes: go through the daemon (an operator endpoint, `api.Control`, a `Bus.PublishOperator` message handled in `internal/correlate`); offline refuses.
-4. Register it in `internal/cli/root.go`. Test all output formats, exit codes and the offline path. Update `docs/API.md`.
-
-**Change the schema**
-
-1. Add the next `migrations/NNNN_description.sql`. Never edit a migration that is on `main`.
-2. Update `DATA_MODEL.md` §4 (the heading lists every migration) and the models and queries in `internal/store`.
-3. Changing the event types means rebuilding `events`, because a CHECK constraint cannot be altered:
-   - create the new table as `events_rebuilt` with the new CHECK (`events_new` is already an index name in `0001_init.sql`), copy the rows, drop `events` and rename;
-   - recreate **all nine** indexes on `events` from `0001_init.sql`.
-4. Then update `internal/events` and `DATA_MODEL.md` §7. Add the CLI type name in `CLI.md` (Event type names) if users filter on it.
-5. Tests: `TestCatalogueMatchesSchema`, the migration tests in `internal/store`, a database at the previous migration upgrading.
-
-**Add an event type**
-
-1. Read the schema steps above.
-2. Emit it from `internal/correlate` only, with its evidence snapshot.
-3. Give it a journald priority (`ARCHITECTURE.md` §7).
-4. Events are state transitions: never one per observation.
-
-**Add a config key**
-
-1. Add it to `internal/config` (`config.go`, `defaults.go`, `validate.go`) with strict validation.
-2. Decide whether it reloads. If it does not, it must show up in the reload answer as needing a restart (`config.Diff` in `summary.go`, the daemon's `reload`).
-3. Update `ARCHITECTURE.md` §6, `internal/config/testdata/architecture-example.yaml`, and `deploy/config.yaml` if operators should see it. `TestDeployConfigs` keeps the deploy configs valid.
-
-**Fix or extend an existing active probe engine** (ARP, ICMP, TCP, the DNS and mDNS name queries)
-
-1. Every send goes through `probe.Budget` (policy, kill switch, budgets, spacing) and the platform `Transmitter`.
-2. Engines only emit observations.
-3. Keep `scan plan` (`probe.Compute`) consistent with what `scan run` sends.
-4. Run `make check-all`: `TestActiveDiscovery` measures budgets on the wire.
-5. **A new probe type, or any probe that sends a payload the contract does not already name**, changes the safety contract (rules 7 and 11, ADR 0011). Identification probes are out of scope: do not add one. Anything else needs a recorded decision before any code, interface or stub.
+The step-by-step recipes (add a decoder, a CLI command, a config key or an event type, change the schema, change a probe engine): [`docs/COMMON_TASKS.md`](docs/COMMON_TASKS.md). Follow the recipe when the task matches one.
 
 ## 11. Generated artifacts: do not edit by hand
 
@@ -313,25 +215,7 @@ Which files each task touches: `docs/AI_REPO_MAP.md` (Common tasks).
 
 ## 12. Keeping docs in sync
 
-| Change | Update in the same change |
-| --- | --- |
-| CLI syntax or output | `CLI.md`; `README.md` examples if affected |
-| API endpoint or metric | `API.md`; `ARCHITECTURE.md` §3 (Metrics) for a metric |
-| Schema or migration | `DATA_MODEL.md` §4 (heading and tables) |
-| Event type | `DATA_MODEL.md` §7, `CLI.md` (Event type names) |
-| Config key or reload behaviour | `ARCHITECTURE.md` §6, the example config, `deploy/config.yaml` |
-| Unit, install or privileges | `ARCHITECTURE.md` §8, `deploy/README.md`, `tools/capcheck/README.md` |
-| A decision | `REQUIREMENTS.md` §5 (with the date); an ADR if foundational |
-| A roadmap item built, or work deferred | `ROADMAP.md` (remove the item, or add it); the specifications describe only what is built |
-| Operator-visible behaviour | `USER_GUIDE.md` |
-| New package or moved responsibility | `ARCHITECTURE.md` §4, §3 of this file, `docs/AI_REPO_MAP.md` |
-
-Style used throughout the docs:
-
-- British English (behaviour, neighbour).
-- Dates written as "7 Oct 2026".
-- Plain sentences; tables for reference material.
-- Requirement ids `FR-<AREA>-n` / `NFR-<AREA>-n`. Never reuse or renumber an id; check with `grep` before you add one.
+Which document each kind of change updates in the same change, and the style of the docs: [`docs/COMMON_TASKS.md`](docs/COMMON_TASKS.md) (Keeping docs in sync).
 
 ## 13. Avoiding conflicts
 

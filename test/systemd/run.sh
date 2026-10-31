@@ -16,6 +16,15 @@ cd "$(dirname "$0")/../.."
 NAME=lan-tracker-systemd
 BIN_DIR=${BIN_DIR:-.build/test}
 RELEASES=${RELEASES:-bullseye bookworm trixie}
+# The base image of a release, pinned by digest (the manifest list: amd64 and arm64).
+base_image() {
+	case $1 in
+	bullseye) echo "debian:bullseye-slim@sha256:e5b6442dd2e9684cf5e87d8338b5968f3b348636fc0be6d7850a381e3731a2bd" ;;
+	bookworm) echo "debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3" ;;
+	trixie) echo "debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4" ;;
+	*) echo "test-systemd: no pinned image for Debian $1" >&2; return 1 ;;
+	esac
+}
 work=$(mktemp -d)
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$work"; }
 trap cleanup EXIT
@@ -41,7 +50,8 @@ summary=()
 run_on() {
 local release=$1 image=lan-tracker-systemd-test:$1
 echo "== Debian $release"
-docker build -q --build-arg "BASE=debian:$release-slim" -t "$image" -f test/systemd/Dockerfile test/systemd >/dev/null
+base=$(base_image "$release")
+docker build -q --build-arg "BASE=$base" -t "$image" -f test/systemd/Dockerfile test/systemd >/dev/null
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 	--tmpfs /run --tmpfs /run/lock "$image" >/dev/null

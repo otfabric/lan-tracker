@@ -4,7 +4,7 @@ globs: internal/store/**, migrations/**
 alwaysApply: false
 ---
 
-Before editing, read `docs/DATA_MODEL.md` §4 (schema) and §9 (retention), `docs/CLI.md` §1 (offline access), and `AGENTS.md` §10 (Change the schema) and §13.
+Before editing, read `docs/DATA_MODEL.md` §4 (schema) and §9 (retention), `docs/CLI.md` §1 (offline access), and `docs/COMMON_TASKS.md` (Change the schema) and `AGENTS.md` §13.
 
 - One writer goroutine, WAL, batched commits (target 5 s). `--offline` opens read-only.
 - New reads go into `store.Reader`, which serves both the API and `--offline`.

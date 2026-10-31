@@ -77,7 +77,7 @@ Examples:
 
 ### Documentation
 
-Keep the docs in sync in the same change ([`AGENTS.md`](AGENTS.md) §12): `docs/CLI.md` and `docs/API.md` for commands and endpoints, `docs/DATA_MODEL.md` for the schema and events, `docs/ARCHITECTURE.md` for configuration and the unit, and [RELEASE.md](RELEASE.md) for anything operators or scripts will notice. Docs are written in British English.
+Keep the docs in sync in the same change ([`docs/COMMON_TASKS.md`](docs/COMMON_TASKS.md)): `docs/CLI.md` and `docs/API.md` for commands and endpoints, `docs/DATA_MODEL.md` for the schema and events, `docs/ARCHITECTURE.md` for configuration and the unit, and [RELEASE.md](RELEASE.md) for anything operators or scripts will notice. Docs are written in British English.
 
 ## Submitting Changes
 
@@ -101,7 +101,7 @@ For larger changes, please open an issue first to discuss the approach.
 
 ## Project Structure
 
-[`AGENTS.md`](AGENTS.md) §3 maps every package, and [`docs/AI_REPO_MAP.md`](docs/AI_REPO_MAP.md) says where things live.
+[`docs/AI_REPO_MAP.md`](docs/AI_REPO_MAP.md) maps every package and says where things live.
 
 ## License
 

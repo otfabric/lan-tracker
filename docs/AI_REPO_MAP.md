@@ -1,6 +1,47 @@
 # LAN Tracker — Repository map
 
-Where each concern lives, what to read before changing it, and which tests cover it. This lets an agent open the few files a task needs instead of searching the tree. The rules and task recipes are in [`AGENTS.md`](../AGENTS.md); this page only answers "where".
+Where each concern lives, what to read before changing it, and which tests cover it. This lets an agent open the few files a task needs instead of searching the tree. The rules are in [`AGENTS.md`](../AGENTS.md) and the task recipes in [`COMMON_TASKS.md`](COMMON_TASKS.md); this page only answers "where".
+
+## Package map
+
+| Path | Responsibility |
+| --- | --- |
+| `cmd/lan-tracker` | `main`: hands off to `internal/cli` |
+| `internal/cli` | cobra commands. A `backend` interface serves both online (API client) and `--offline` (read-only DB) reads; table, JSON, JSONL and CSV output |
+| `internal/api` | REST server on the Unix socket (plus an optional `127.0.0.1` listener with `/metrics`) and the CLI's client. Operator endpoints go through `Control` |
+| `internal/daemon` | Lifecycle: config, store, pipeline, SIGHUP and `config reload`, sd_notify and watchdog, shutdown; implements `api.Control` |
+| `internal/config` | Schema version 1 (`config.go`; value types in `types.go`), defaults, YAML + env + flags loading, strict validation, the reload diff (`summary.go`) |
+| `internal/observation` | The `Observation` type, sources, evidence kinds (`Evidence()`) and meta keys, the decoded DHCP message (`DHCPMessage`), JSONL encoding, the bounded bus with barriers and operator messages |
+| `internal/correlate` | **The only writer of state and events**: host matching, bindings, conflicts, presence, name records, TCP endpoints, DHCP servers, exchanges and leases, the proxy-ARP flag, operator actions |
+| `internal/events` | The event catalogue (it must match the migration CHECK) and the engine that writes events to the table and journald |
+| `internal/store` | SQLite: migrations, the single writer, batches, compaction, the integrity check, and `Reader` (queries shared by the API and `--offline`); `storetest` seeds test databases |
+| `internal/platform` | **The only code that touches AF_PACKET, netlink or raw sockets**: `Capturer`, `NeighborSource`, `InterfaceMonitor`, `Transmitter` (frames, TCP connect, UDP for name queries, ICMP, the kernel route lookup), `ClockSource` (read-only `adjtimex`); fakes in `platform/fake` |
+| `internal/service` | sd_notify and the journald handler |
+| `internal/iface` | Interface manager: contexts, prefixes, up and down |
+| `internal/collect/capture` | Passive capture loop and BPF filter; `decoders/` holds pure frame → observation functions (ARP, IP, NDP, DHCP, DNS/mDNS, LLDP) |
+| `internal/collect/neighbor` | Kernel neighbour table: dump, watch, resync |
+| `internal/collect/replay` | pcap/pcapng/JSONL replay on a simulated clock |
+| `internal/probe` | What the engines share: the start budget (and `Simulate`, its replay for estimates), policy, kill switch, targets, back-off, the planner (`Compute`) |
+| `internal/probe/{arp,icmp,tcp}` | Probe engines: ARP sweep, ICMP echo, bare TCP connect after a route check |
+| `internal/probe/names` | Name query engine: one-shot mDNS and unicast DNS to configured resolvers, about known names and addresses only |
+| `internal/probe/probetest` | Shared test helpers for the engines |
+| `internal/probe/scheduler` | Periodic loops per interface and protocol; operator scans; last-pass summaries |
+| `internal/netrange` | IPv4 range arithmetic and the keyed random walk for sweeps |
+| `internal/identify` | OUI lookup (a MAC-prefix registrant hint, never a manufacturer) and MAC helpers. No classifiers |
+| `internal/ouitable` | Format of the precomputed OUI table (`data/oui/oui.bin`) |
+| `internal/clock` | Wall clock and simulated clock: everything that reads time takes a `clock.Clock` |
+| `internal/metrics` | Prometheus text writer with a fixed list of allowed labels |
+| `internal/logging`, `internal/buildinfo` | slog handler selection; version stamped through `-ldflags` |
+| `migrations/` | Numbered `NNNN_description.sql` files, embedded, applied forward only at start-up |
+| `data/oui/` | IEEE registry (`oui.tsv.gz`), the embedded table (`oui.bin`), the generator (`gen/`) |
+| `test/golden` | Golden correlator scenarios, including reconstruction (`DATA_MODEL.md` §10) and the CLI end-to-end tests |
+| `test/frames`, `test/fixtures` | gopacket frame builders; the synthetic pcap fixture and its generator |
+| `test/net` | Docker network tests (tag `nettest`, `make test-net`), run as uid 65534 with only `CAP_NET_RAW` |
+| `test/systemd` | The daemon under systemd on Debian 11/12/13 (`make test-systemd`) |
+| `test/crash`, `test/soak` | kill -9 during writes (in `make check`); 90 simulated days (tag `soak`, `make soak`) |
+| `tools/capcheck` | Privilege and feasibility check for boards; shipped in the release tarballs |
+| `build/` | The dev container (`dev.Dockerfile`) and the scripts make runs in it |
+| `deploy/` | Reference unit, default config, the reviewed ARP + TCP example (`config.active-example.yaml`), replay dev config, install guide |
 
 ## Concerns
 
@@ -28,7 +69,7 @@ Where each concern lives, what to read before changing it, and which tests cover
 | Scheduling and operator scans | `internal/probe/scheduler`, `internal/netrange` | `ARCHITECTURE.md` §3 (scheduler paragraph) | `scheduler_test.go`, `netrange` tests |
 | Storage, writer, compaction, integrity | `internal/store` (`store.go`, `compact.go`, `integrity.go`, `migrate.go`) | `DATA_MODEL.md` §4, §9; `ARCHITECTURE.md` §3 (Store) | `store_test.go`, `compact_test.go`, `integrity_test.go`; `test/crash`; `make soak` |
 | Read model (API and `--offline`) | `internal/store/reader.go`, `query.go`, `model.go` | `CLI.md` §1, §4; `DATA_MODEL.md` §4 (Point-in-time query) | `reader_test.go`; `test/golden/cli_test.go` |
-| Schema | `migrations/NNNN_*.sql` (`0001_init.sql` holds the whole initial schema) | `DATA_MODEL.md` §4; `AGENTS.md` §10, §13 | `store_test.go` (migrations, constraints) |
+| Schema | `migrations/NNNN_*.sql` (`0001_init.sql` holds the whole initial schema) | `DATA_MODEL.md` §4; `COMMON_TASKS.md`; `AGENTS.md` §13 | `store_test.go` (migrations, constraints) |
 | REST API | `internal/api` (`api.go` reads, `active.go` operator endpoints, `client.go`) | `API.md` | `api_test.go`, `active_test.go`, `fail_test.go` |
 | CLI | `internal/cli` (`root.go`, `hosts.go`, `lists.go`, `describe.go`, `configcmd.go`, `status.go`, `output.go`, `backend.go`) | `CLI.md` | `cli_test.go`, `read_test.go`, `formats_test.go`, `describe_test.go`, `active_test.go` |
 | Daemon lifecycle, reload | `internal/daemon` (`daemon.go`, `pipeline.go`, `server.go`, `active.go`) | `ARCHITECTURE.md` §6; `REQUIREMENTS.md` FR-CFG-3 | `daemon_test.go`; `test/systemd` |
@@ -44,7 +85,7 @@ Where each concern lives, what to read before changing it, and which tests cover
 
 ## Common tasks: files to touch
 
-The steps are in `AGENTS.md` §10. These are the files each task usually touches.
+The steps are in [`COMMON_TASKS.md`](COMMON_TASKS.md). These are the files each task usually touches.
 
 | Task | Files |
 | --- | --- |
