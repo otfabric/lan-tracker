@@ -32,7 +32,7 @@ Decided against for now; each needs a new recorded decision in `REQUIREMENTS.md`
 - **DHCPv6.** Needs its own decoder and identity model. `REQUIREMENTS.md` §4 lists it as out of scope for v1.
 - **Synthetic DHCP requests or leasequery.** Monitoring is receive only: a request would change server state and needs its own specification. `REQUIREMENTS.md` §4 lists a DHCP client and leasequery as out of scope.
 - **More host metadata than the description.** `hosts set` / `hosts unset` take only `--description`; the form leaves room for more fields, none of which has been requested.
-- **More CLI commands.** `neighbors list` (the kernel neighbour table as the daemon sees it), `interfaces show` (one interface in detail), `scan status` (a running operator scan; today `daemon status` shows the last one), `db vacuum` (offline) and `db export`. Each needs a `CLI.md` specification, a `store.Reader` query and an API endpoint (AGENTS.md §10).
+- **More CLI commands.** `neighbors list` (the kernel neighbour table as the daemon sees it), `interfaces show` (one interface in detail), `scan status` (a running operator scan; today `daemon status` shows the last one), `db vacuum` (offline) and `db export`. Each needs a `CLI.md` specification, a `store.Reader` query and an API endpoint (`docs/COMMON_TASKS.md`).
 - **Coloured table output.** `--no-color` is accepted, but no command prints colour.
 - **Recording periodic passes as scans.** The `scans.trigger` column accepts `scheduled`, but only operator scans are written; periodic passes show in `daemon status` (last pass) and metrics only.
 - **The `ndp_probe` source.** Defined and accepted in replay files (handled like `passive_ndp`), but no engine emits it until IPv6 active probing exists.

@@ -1,6 +1,6 @@
 # Copilot instructions — OT Fabric LAN Tracker
 
-Read [`AGENTS.md`](../AGENTS.md) first. It is the single set of instructions for every coding agent here: the hard rules (§4), where the truth lives (§2), the package map, what to run and the common tasks. This file only summarises what must never be missed.
+Read [`AGENTS.md`](../AGENTS.md) first. It is the single set of instructions for every coding agent here: the hard rules (§4), where the truth lives (§2), what to run, and pointers to the package map and the common tasks. This file only summarises what must never be missed.
 
 - Linux only, static `CGO_ENABLED=0` Go. Never add a cgo dependency (no libpcap, no mattn/go-sqlite3).
 - Run Go only through `make`, which uses the Linux dev container; `make check` is the gate.

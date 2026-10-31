@@ -2,7 +2,7 @@
 
 @AGENTS.md
 
-The import above loads `AGENTS.md`, the instructions every agent in this repository follows: the hard rules (§4, cited in code and docs as "AGENTS.md rule N"), where the truth lives and what wins when sources disagree, the package map, what to run, the common tasks and the generated files. All of it applies to Claude Code. This file adds only what is specific to Claude Code.
+The import above loads `AGENTS.md`, the instructions every agent in this repository follows: the hard rules (§4, cited in code and docs as "AGENTS.md rule N"), where the truth lives and what wins when sources disagree, what to run and the generated files, with pointers to the package map (`docs/AI_REPO_MAP.md`) and the common tasks (`docs/COMMON_TASKS.md`). All of it applies to Claude Code. This file adds only what is specific to Claude Code.
 
 ## Claude Code notes
 

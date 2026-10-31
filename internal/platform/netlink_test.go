@@ -50,7 +50,7 @@ func ipv4Subnet(t *testing.T) (Link, netip.Prefix) {
 			}
 		}
 	}
-	t.Skip("no IPv4 subnet in this network namespace")
+	requireKernel(t, "no IPv4 subnet in this network namespace")
 	return Link{}, netip.Prefix{}
 }
 

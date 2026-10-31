@@ -208,12 +208,12 @@ lan-tracker/
 │   ├── frames/                  frame builders (gopacket) for tests, fixtures and the injector
 │   └── fixtures/                synthetic pcap fixture and its generator (`make fixtures`)
 ├── tools/capcheck/              privilege and feasibility check (Linux; shipped in the release tarballs)
-├── docs/                        specifications, USER_GUIDE.md, ROADMAP.md (open work), TEST_PLAN.md, AI_REPO_MAP.md, adr/
+├── docs/                        specifications, USER_GUIDE.md, ROADMAP.md (open work), TEST_PLAN.md, AI_REPO_MAP.md, COMMON_TASKS.md, adr/
 ├── .github/                     CI and release workflows; copilot-instructions.md
 ├── .cursor/rules/               Cursor rules (point to AGENTS.md)
 ├── Makefile
 ├── RELEASE.md                   release notes, one `## vX.Y.Z` section per release (the release workflow requires it)
-├── AGENTS.md                    instructions for every coding agent (hard rules, map, tasks)
+├── AGENTS.md                    instructions for every coding agent (hard rules, what to run)
 └── CLAUDE.md                    Claude Code notes; imports AGENTS.md
 ```
 

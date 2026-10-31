@@ -30,7 +30,10 @@ func env(t *testing.T, name string) string {
 	t.Helper()
 	v := os.Getenv(name)
 	if v == "" {
-		t.Skipf("%s not set: run via make test-net", name)
+		if os.Getenv("LT_REQUIRE_NET") == "1" {
+			t.Fatalf("%s not set and LT_REQUIRE_NET=1", name)
+		}
+		t.Skipf("%s not set: run via make test-net (LT_REQUIRE_NET=1 fails here instead)", name)
 	}
 	return v
 }

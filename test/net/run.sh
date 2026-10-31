@@ -25,8 +25,8 @@ PLC_IP=172.31.250.14 PLC_MAC=00:1b:1b:00:fa:0e                         # real OU
 VANISH_IP=172.31.250.130 VANISH_MAC=02:00:00:00:fa:82                  # known to active discovery, then stopped: UNREACHABLE
 TWIN_IP=172.31.251.10                                                  # on NET2, same MAC as OPEN: per-interface scoping
 ABSENT_IP=172.31.250.99                                                # nobody: TIMEOUT / FAILED
-RUNNER_IMAGE=${RUNNER_IMAGE:-debian:bookworm-slim}
-HOST_IMAGE=${HOST_IMAGE:-busybox:stable}
+RUNNER_IMAGE=${RUNNER_IMAGE:-debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3}
+HOST_IMAGE=${HOST_IMAGE:-busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}
 BIN_DIR=$(cd "${BIN_DIR:-.build/test}" && pwd)
 HOSTS=(lt-open lt-closed lt-swap-a lt-swap-b lt-gone lt-plc lt-twin lt-vanish)
 
@@ -60,6 +60,10 @@ for t in "$BIN_DIR"/*.test; do
 	cp "$t" "$work/t/"
 	tests+=("$(basename "$t")")
 done
+if [ "${LT_REQUIRE_NET:-}" = 1 ] && [ ${#tests[@]} -eq 0 ]; then
+	echo "test-net: no test binaries in $BIN_DIR and LT_REQUIRE_NET=1" >&2
+	exit 1
+fi
 chmod 0755 "$work" "$work/t" "$work"/t/*
 chmod 1777 "$work/sync"
 
@@ -67,6 +71,10 @@ echo "== networks $NET ($SUBNET4, $SUBNET6) and $NET2 ($SUBNET2)"
 cleanup_docker
 ipv6=1
 if ! docker network create --driver bridge --subnet "$SUBNET4" --gateway "$GW4" --ipv6 --subnet "$SUBNET6" "$NET" >/dev/null 2>&1; then
+	if [ "${LT_REQUIRE_NET:-}" = 1 ]; then
+		echo "test-net: IPv6 networks unavailable and LT_REQUIRE_NET=1" >&2
+		exit 1
+	fi
 	echo "   (IPv6 networks unavailable; NDP checks will be skipped)"
 	ipv6=0
 	docker network create --driver bridge --subnet "$SUBNET4" --gateway "$GW4" "$NET" >/dev/null
@@ -97,7 +105,7 @@ runner() {
 	shift
 	docker run --rm --name "$RUNNER" --network "$NET" --ip "$RUNNER_IP" -v "$work/t:/t:ro" -v "$work/sync:/sync" \
 		${RUNNER_EXTRA[@]+"${RUNNER_EXTRA[@]}"} \
-		-e LT_TEST_IFACE=eth0 -e LT_TEST_SYNC=/sync -e LT_TEST_IPV6="$ipv6" \
+		-e LT_TEST_IFACE=eth0 -e LT_TEST_SYNC=/sync -e LT_TEST_IPV6="$ipv6" -e LT_REQUIRE_NET="${LT_REQUIRE_NET:-}" \
 		-e LT_TEST_OPEN="$OPEN_IP:502" -e LT_TEST_OPEN_MAC="$OPEN_MAC" \
 		-e LT_TEST_CLOSED="$CLOSED_IP:502" -e LT_TEST_CLOSED_MAC="$CLOSED_MAC" \
 		-e LT_TEST_SWAP="$SWAP_IP" -e LT_TEST_SWAP_MAC_A="$SWAP_MAC_A" -e LT_TEST_SWAP_MAC_B="$SWAP_MAC_B" \

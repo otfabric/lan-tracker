@@ -22,6 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: mod-verify, fmt-check, tidy-check, vet, lint, vuln, tests with race and coverage
+        env:
+          LT_REQUIRE_KERNEL: "1" # the runner has what internal/platform's tests need: a skip is a failure
         run: make mod-verify check
       - uses: actions/upload-artifact@v7
         with:
@@ -47,6 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Network integration tests (Docker, CAP_NET_RAW only)
+        env:
+          LT_REQUIRE_NET: "1" # a missing LT_TEST_* or IPv6 network is a failure here, not a skip
         run: make test-net
       - name: systemd unit test (privileged container)
         run: make test-systemd

@@ -1,7 +1,7 @@
 # A fresh Debian with systemd as PID 1 and sudo, for `make test-systemd`,
 # once per target release (BASE). Nothing of LAN Tracker is installed
 # here: run.sh installs it with the commands of deploy/README.md.
-ARG BASE=debian:bookworm-slim
+ARG BASE=debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 FROM ${BASE}
 # Debian 11 left LTS in August 2026; its security pool no longer serves the
 # files its index lists, so bullseye installs from the snapshot archive of
