@@ -1,5 +1,22 @@
 # lan-tracker Releases
 
+## v0.2.4
+
+**Date:** 2026-11-14
+**Previous release:** v0.2.3
+
+No change to the application.
+
+### Security
+
+- Built with Go 1.27.4 (was 1.27.3). Go 1.27.4 fixes GO-2026-6859 in `net/http`, a crash of an HTTP/1 server through a race in the `MaxBytesReader` handling of request headers; govulncheck reported the API server as reachable from it. The dev image `build/dev.Dockerfile`, which also builds the release, is pinned to the new `golang:1.27-bookworm` digest.
+
+### Changed
+
+- CI: otfabric/engineering policy 1.6, the shared actions v3.8.0, and one pull request workflow with a single required check.
+
+---
+
 ## v0.2.3
 
 **Date:** 2026-10-31
