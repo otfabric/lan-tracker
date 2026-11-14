@@ -1,8 +1,9 @@
+# Called by pr.yml on every pull request that is not documentation only;
+# dispatch it to run it on a branch without a pull request.
 name: ci
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read

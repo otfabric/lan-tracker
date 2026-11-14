@@ -2,33 +2,56 @@
 # summary; blocks only according to .otfabric/policy.yaml mode.
 name: Policy
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   policy:
-    # otfabric/engineering is private: the token is not available to pull
-    # requests from forks, so they skip this job.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # otfabric/engineering is private: a pull request from a fork or from
+      # Dependabot has no token. The job then passes without the check, with a
+      # notice, so that "OT Fabric Required Checks" can pass; the push to main
+      # runs the check after the merge.
+      - name: Can this run reach the checker?
+        id: token
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ] && [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "::notice::otfabric-policy skipped: a pull request from a fork has no secrets"
+            run=false
+          elif [ "$EVENT" = pull_request ] && [ "$AUTHOR" = 'dependabot[bot]' ]; then
+            echo "::notice::otfabric-policy skipped: Dependabot runs have no Actions secrets"
+            run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
+        if: steps.token.outputs.run == 'true'
       - uses: actions/setup-go@v7
+        if: steps.token.outputs.run == 'true'
         with:
           go-version: stable
       - name: Private module access (otfabric/engineering is private)
+        if: steps.token.outputs.run == 'true'
         env:
           TOKEN: ${{ secrets.OTFABRIC_READ_TOKEN }}
         run: git config --global url."https://x-access-token:${TOKEN}@github.com/otfabric/engineering".insteadOf "https://github.com/otfabric/engineering"
       - name: otfabric-policy
+        if: steps.token.outputs.run == 'true'
         env:
           GOWORK: "off"
           GOPRIVATE: github.com/otfabric/engineering
         run: |
-          go run github.com/otfabric/engineering/cmd/otfabric-policy@v1.2.0 check -format markdown . | tee -a "$GITHUB_STEP_SUMMARY"
-          go run github.com/otfabric/engineering/cmd/otfabric-policy@v1.2.0 check .
+          go run github.com/otfabric/engineering/cmd/otfabric-policy@v1.6.1 check -format markdown . | tee -a "$GITHUB_STEP_SUMMARY"
+          go run github.com/otfabric/engineering/cmd/otfabric-policy@v1.6.1 check .

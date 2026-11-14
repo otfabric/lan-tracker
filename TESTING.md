@@ -73,3 +73,14 @@ Every image the suites start is pinned by digest, as a manifest list so amd64 an
 ## Fixtures
 
 `test/fixtures/*.pcapng` come from `test/fixtures/fixtures.go`: edit the Go definition, run `make fixtures`, then `make check`. `TestFixturesCurrent` keeps them in step.
+
+## When CI runs
+
+| Event | Workflow | What runs |
+|---|---|---|
+| Pull request | `pr.yml` | `policy.yml` (otfabric-policy) always; `ci.yml` unless every changed file is documentation; then `OT Fabric Required Checks` |
+| Push to a branch | none | nothing; dispatch `ci.yml` to test a branch without a pull request |
+| Push to `main` | `policy.yml` | the light checks; the merged commit was tested as the pull request's merge commit |
+| Release | `release.yml` | the release workflow tests the release commit again |
+
+Documentation means an added or modified `*.md` file outside `.github/`, `testdata/` and `vendor/`, other than `AGENTS.md` and `CLAUDE.md`. A deleted or renamed document, or any other file, runs everything. `OT Fabric Required Checks` fails unless every job that applies succeeded; its summary lists them.
