@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -487,6 +488,22 @@ func TestUIURL(t *testing.T) {
 	code = Execute(context.Background(), Env{Args: []string{"--socket", socket, "--config", f.cfgPath, "ui", "url"}, Stdout: &outb, Stderr: &errb})
 	if code != 0 || outb.String() != "http://127.0.0.1:0/#token="+strings.Repeat("k", 43)+"\n" {
 		t.Errorf("enabled: exit %d %q %q", code, outb.String(), errb.String())
+	}
+	// On every address: one URL per address of the box, loopback first.
+	socket = filepath.Join(t.TempDir(), "all.sock")
+	addrs := func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.0.106").To4(), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	all := api.New(api.Options{UI: &api.UIOptions{Listen: "0.0.0.0:0", Token: "k", Addrs: addrs}})
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	if err := all.Start(ctx2, socket, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel2(); _ = all.Wait() })
+	outb.Reset()
+	code = Execute(context.Background(), Env{Args: []string{"--socket", socket, "--config", f.cfgPath, "ui", "url"}, Stdout: &outb, Stderr: &errb})
+	if code != 0 || outb.String() != "http://127.0.0.1:0/#token=k\nhttp://192.168.0.106:0/#token=k\n" {
+		t.Errorf("every address: exit %d %q %q", code, outb.String(), errb.String())
 	}
 	// No daemon: unreachable.
 	code = Execute(context.Background(), Env{Args: []string{"--socket", filepath.Join(t.TempDir(), "none.sock"), "--config", f.cfgPath, "ui", "url"}, Stdout: &outb, Stderr: &errb})

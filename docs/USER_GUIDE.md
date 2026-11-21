@@ -672,11 +672,13 @@ sudo systemctl restart lan-tracker
 sudo lan-tracker ui url
 ```
 
-`ui url` prints `http://127.0.0.1:9735/#token=…`. The part after `#token=` is the access token: treat the URL like a password. The UI listens on loopback only, so from your workstation forward the port first, then open the URL there:
+`ui url` prints `http://127.0.0.1:9735/#token=…`. The part after `#token=` is the access token: treat the URL like a password. By default the UI listens on loopback only, so from your workstation forward the port first, then open the URL there:
 
 ```bash
 ssh -N -L 9735:127.0.0.1:9735 user@edge-box
 ```
+
+To open it from the LAN without a tunnel, set `ui.listen` to an address of the box (`192.168.0.106:9735`) or to `0.0.0.0:9735` for all of them, and restart; `ui url` then prints a URL per address. The UI is plain HTTP: on the network the token and the data travel unencrypted, so do this only on a network you trust, and the daemon logs a warning at start. `sudo lan-tracker daemon status` shows whether the UI is enabled and where it listens.
 
 - **Describing devices.** On a device's page, *Edit* sets its description, as `hosts set` does; the event records the actor `ui`. Nothing else can be changed from the browser: the kill switch, scans and `config reload` stay on the command line.
 - **Live.** New events arrive as they happen (the *LIVE* dot in the header); the charts refresh every 30 seconds.

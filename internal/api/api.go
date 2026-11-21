@@ -53,6 +53,14 @@ type Status struct {
 	Interfaces []InterfaceStatus         `json:"interfaces"`
 	Hosts      map[string]map[string]int `json:"hosts"` // interface → presence → count
 	LastScan   *store.Scan               `json:"last_scan"`
+	UI         UIStatus                  `json:"ui"`
+}
+
+// UIStatus says whether the web UI is enabled and where it listens (never
+// its token: `ui url` on the socket gives that).
+type UIStatus struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen,omitempty"`
 }
 
 // DatabaseStatus is the database part of the status.

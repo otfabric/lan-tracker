@@ -182,7 +182,7 @@ api:
 # ---------------------------------------------------------------------------
 ui:
   enabled: false                       # serve the web UI
-  listen: 127.0.0.1:9735               # loopback only; must differ from api.listen
+  listen: 127.0.0.1:9735               # localhost or an IP of the box (0.0.0.0 / :: for all; plain HTTP off loopback); not api.listen's port
 
 # ---------------------------------------------------------------------------
 # Metrics. Needs a restart (served on api.listen when set).

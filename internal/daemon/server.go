@@ -12,6 +12,7 @@ import (
 	"github.com/otfabric/lan-tracker/frontend"
 	"github.com/otfabric/lan-tracker/internal/api"
 	"github.com/otfabric/lan-tracker/internal/buildinfo"
+	"github.com/otfabric/lan-tracker/internal/config"
 	"github.com/otfabric/lan-tracker/internal/events"
 	"github.com/otfabric/lan-tracker/internal/metrics"
 	"github.com/otfabric/lan-tracker/internal/observation"
@@ -47,6 +48,10 @@ func (d *Daemon) startAPI(ctx context.Context) error {
 			return err
 		}
 		ui = &api.UIOptions{Listen: cfg.UI.Listen, Token: token, Assets: frontend.Web()}
+		if !config.LoopbackListen(cfg.UI.Listen) {
+			d.log.Warn("the web UI listens beyond loopback: its token and data cross the network unencrypted; prefer an SSH tunnel to 127.0.0.1 (SECURITY.md)",
+				"listen", cfg.UI.Listen)
+		}
 	}
 	d.api = api.New(api.Options{
 		Reader: d.reader, Status: d.status, Interfaces: d.interfaces, Config: func() any { return d.cfg.Load() },
@@ -111,6 +116,9 @@ func (d *Daemon) status(ctx context.Context) api.Status {
 		Version: bi.Version, Commit: bi.Commit, Platform: bi.Platform, PID: os.Getpid(), Started: d.started.UTC(), Now: time.Now().UTC(),
 		Replay: cfg.ReplayMode(), State: api.StateOK, Database: api.DatabaseStatus{Path: d.store.Path(), OK: true},
 		Hosts: map[string]map[string]int{},
+	}
+	if cfg.UI.Enabled { // restart-only: the running value
+		s.UI = api.UIStatus{Enabled: true, Listen: cfg.UI.Listen}
 	}
 	pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()

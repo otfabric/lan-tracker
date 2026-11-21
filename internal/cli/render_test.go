@@ -148,7 +148,10 @@ func TestStatusRendering(t *testing.T) {
 			"Active:     DISABLED (LAN_TRACKER_ACTIVE_DISABLED=yes)\n",
 		}},
 		{"no clock, no scan", api.Status{Database: api.DatabaseStatus{OK: true, Size: 1500}, State: api.StateOK}, []string{
-			"Active:     enabled\n", "Clock:      unknown\n", "Last scan:  never\n", "2 KB",
+			"Active:     enabled\n", "Clock:      unknown\n", "Last scan:  never\n", "2 KB", "Web UI:     disabled\n",
+		}},
+		{"web UI on", api.Status{Database: api.DatabaseStatus{OK: true}, State: api.StateOK, UI: api.UIStatus{Enabled: true, Listen: "0.0.0.0:9735"}}, []string{
+			"Web UI:     enabled on 0.0.0.0:9735   (URL with the token: sudo lan-tracker ui url)\n",
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

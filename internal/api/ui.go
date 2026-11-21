@@ -12,15 +12,17 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"syscall"
 )
 
 // The web user interface (ADR 0012, docs/API.md "Web UI"): the daemon
-// serves the frontend's web build and the read API on a loopback listener
-// of its own. Every /v1/ request needs the bearer token; the page takes it
+// serves the frontend's web build and the read API on a listener of its
+// own (loopback by default; ui.listen may name any local address). Every /v1/ request needs the bearer token; the page takes it
 // from the URL fragment, which a browser never sends to a server. The one
 // change the UI may make is a host's description, recorded with the actor
 // "ui".
@@ -30,19 +32,25 @@ const UIActor = "ui"
 
 // UIOptions configures the web UI listener.
 type UIOptions struct {
-	Listen string // loopback host:port
+	Listen string // host:port; the host is localhost or an IP address (config.validator.ui)
 	Token  string // the bearer token (LoadUIToken)
+	// Addrs lists the box's addresses, for the URLs of a listener on every
+	// address (0.0.0.0 or ::); nil uses net.InterfaceAddrs.
+	Addrs func() ([]net.Addr, error)
 	// Assets is the web build, with index.html at its root. Without one
 	// (a binary built without `make frontend`) the page says so.
 	Assets fs.FS
 }
 
 // UIInfo is the answer of GET /v1/ui (socket only): where the UI listens
-// and the URL to open, with the token in its fragment.
+// and the URL to open, with the token in its fragment. URLs lists every
+// URL the UI answers at (one per address for a listener on 0.0.0.0 or ::),
+// URL the first of them.
 type UIInfo struct {
-	Enabled bool   `json:"enabled"`
-	Listen  string `json:"listen,omitempty"`
-	URL     string `json:"url,omitempty"`
+	Enabled bool     `json:"enabled"`
+	Listen  string   `json:"listen,omitempty"`
+	URL     string   `json:"url,omitempty"`
+	URLs    []string `json:"urls,omitempty"`
 }
 
 // uiCSP lets the page load and call its own origin and nothing else.
@@ -130,20 +138,88 @@ func (s *Server) uiInfo(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, UIInfo{})
 		return
 	}
-	writeJSON(w, http.StatusOK, UIInfo{Enabled: true, Listen: ui.Listen, URL: "http://" + ui.Listen + "/#token=" + ui.Token})
+	info := UIInfo{Enabled: true, Listen: ui.Listen}
+	for _, a := range uiAddrs(ui) {
+		info.URLs = append(info.URLs, "http://"+a+"/#token="+ui.Token)
+	}
+	info.URL = info.URLs[0]
+	writeJSON(w, http.StatusOK, info)
+}
+
+// uiAddrs lists the host:port addresses the UI answers at: the listener's
+// own, or for one on every address (0.0.0.0, ::) loopback first and then
+// each global unicast address of the box, of the family the listener
+// takes (on Linux :: takes IPv4 too).
+func uiAddrs(ui *UIOptions) []string {
+	host, port, err := net.SplitHostPort(ui.Listen)
+	ip, perr := netip.ParseAddr(host)
+	if err != nil || perr != nil || !ip.IsUnspecified() {
+		return []string{ui.Listen}
+	}
+	out := []string{net.JoinHostPort("127.0.0.1", port)}
+	if ip.Is6() {
+		out = append(out, net.JoinHostPort("::1", port))
+	}
+	list := ui.Addrs
+	if list == nil {
+		list = net.InterfaceAddrs
+	}
+	addrs, _ := list() // without the list, loopback is still right
+	var v6 []string
+	for _, a := range addrs {
+		p, err := netip.ParsePrefix(a.String())
+		if err != nil || !p.Addr().IsGlobalUnicast() {
+			continue
+		}
+		switch a := p.Addr().Unmap(); {
+		case a.Is4():
+			out = append(out, net.JoinHostPort(a.String(), port))
+		case ip.Is6():
+			v6 = append(v6, net.JoinHostPort(a.String(), port))
+		}
+	}
+	return append(out, v6...)
 }
 
 // loopbackHost reports whether the request's Host is a loopback name or
 // address (a web page could otherwise reach a listener through DNS
 // rebinding).
 func loopbackHost(r *http.Request) bool {
-	host := r.Host
-	if h, _, err := net.SplitHostPort(r.Host); err == nil {
-		host = h
-	}
+	host := requestHost(r)
 	ip := net.ParseIP(host)
 	return host == "localhost" || ip != nil && ip.IsLoopback()
 }
+
+func requestHost(r *http.Request) string {
+	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+		return h
+	}
+	return r.Host
+}
+
+// uiHostCheck returns the Host check of the UI listener. On loopback it is
+// loopbackHost. On another address it also takes any IP address and the
+// box's own hostname (and hostname.local): a page served under another
+// name cannot reach the UI through DNS rebinding, since its Host is that
+// name, while a browser on the LAN uses the address or the box's name.
+func uiHostCheck(listen string, hostname func() (string, error)) func(*http.Request) bool {
+	host, _, _ := net.SplitHostPort(listen)
+	if ip := net.ParseIP(host); host == "localhost" || ip != nil && ip.IsLoopback() {
+		return loopbackHost
+	}
+	var names []string
+	if n, err := hostname(); err == nil && n != "" {
+		n = strings.ToLower(strings.TrimSuffix(n, "."))
+		names = append(names, n, n+".local")
+	}
+	return func(r *http.Request) bool {
+		h := strings.ToLower(strings.TrimSuffix(requestHost(r), "."))
+		return loopbackHost(r) || net.ParseIP(h) != nil || slices.Contains(names, h)
+	}
+}
+
+// uiHostname is the box's name for uiHostCheck; a test replaces it.
+var uiHostname = os.Hostname
 
 // uiHandler serves the web UI listener.
 func (s *Server) uiHandler() http.Handler {
@@ -154,14 +230,15 @@ func (s *Server) uiHandler() http.Handler {
 			assets = nil
 		}
 	}
+	hostOK := uiHostCheck(ui.Listen, uiHostname)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", uiCSP)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		if !loopbackHost(r) {
-			writeJSON(w, http.StatusForbidden, errorBody{Error: "Host must be a loopback address"})
+		if !hostOK(r) {
+			writeJSON(w, http.StatusForbidden, errorBody{Error: "Host must be an address or this box's name"})
 			return
 		}
 		if r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") {

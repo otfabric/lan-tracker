@@ -111,7 +111,7 @@ Every package and top-level directory, with its responsibility: [`docs/AI_REPO_M
     - Device identification of any kind: payload probes, banner reading, passive OS/device/vendor classification, confidence ranking, fingerprint databases, and running `modbusctl`, `sunspecctl`, `otprobe` or any external tool from the daemon. Do not build, scaffold or stub it.
     - VLAN tagging, any data leaving the box (fleet aggregation, remote API), alerting, automatic network repair, continuous packet recording, DHCPv6, a DHCP client or server.
     - Do not build, design, scaffold or stub these without an explicit request and a recorded decision.
-    - The web UI (`ui.enabled`, `frontend/`) is in scope since 21 Nov 2026 (ADR 0012): loopback only, token-protected, on the data already collected, with host descriptions its only write. Widening it (another write, a non-loopback listener, new collectors for it) needs a new decision.
+    - The web UI (`ui.enabled`, `frontend/`) is in scope since 21 Nov 2026 (ADR 0012): loopback by default (any local address since 21 Nov 2026, by explicit `ui.listen`), token-protected, on the data already collected, with host descriptions its only write. Widening it (another write, TLS or other authentication, new collectors for it) needs a new decision.
 12. **IPv4-first.** v1 active discovery is IPv4, and ARP is the primary LAN discovery mechanism. IPv6 active probing (NDP solicitation) is not built; it waits on a request (`docs/ROADMAP.md`). Passive IPv6/NDP decoding stays.
 
 ## 5. Read this before editing
