@@ -18,7 +18,7 @@ It listens passively by default and sends nothing. Optional active discovery (AR
 
 ![A highlight cut of the demo: daemon status and the inventory in the CLI, the devices view, a planned TCP scan, and a duplicate IP address detected live](docs/media/demo.gif)
 
-*The demo above is a highlight cut. The full demo, about three minutes, half CLI and half web UI: [`docs/media/demo.mp4`](docs/media/demo.mp4), with captions in the picture and as an English subtitle track (also [`docs/media/demo.vtt`](docs/media/demo.vtt)). It runs on a demo LAN of containers ([`docs/media/demo/demo-net.sh`](docs/media/demo/demo-net.sh)): PLCs, drives, an HMI and a camera that announce themselves over mDNS, a DHCP and DNS server, an engineering laptop, a drive that joins later and a laptop with a conflicting static address. The MAC addresses carry real vendors' prefixes; the devices are not their products.*
+*The demo above is a highlight cut. The full demo, about three minutes, half CLI and half web UI: [`docs/media/demo.mp4`](docs/media/demo.mp4), with captions in the picture. It runs on a demo LAN of containers ([`docs/media/demo/demo-net.sh`](docs/media/demo/demo-net.sh)): PLCs, drives, an HMI and a camera that announce themselves over mDNS, a DHCP and DNS server, an engineering laptop, a drive that joins later and a laptop with a conflicting static address. The MAC addresses carry real vendors' prefixes; the devices are not their products.*
 
 ## Typical uses
 
