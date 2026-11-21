@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Makes the README's demo video (docs/media/demo.mp4, demo.vtt, demo.gif)
+// Makes the README's demo video (docs/media/demo.mp4, demo.gif)
 // and screenshots (docs/images). It runs against the demo LAN of
 // docs/media/demo/demo-net.sh: a Docker bridge network with PLCs, drives, an
 // HMI, a camera, a DHCP and DNS server and an engineering laptop, watched by
@@ -13,7 +13,7 @@
 //   sleep 150                                          # first ARP, ICMP, TCP and name passes
 //   docs/media/demo/demo-net.sh cli ui url | head -1 > $SCRATCH/url.txt
 //   cp docs/media/record-demo.mjs $SCRATCH && cd $SCRATCH && npm i playwright   # not in the repo
-//   node record-demo.mjs video out/vid url.txt $REPO    # frames, demo.vtt, demo.mp4 (soft subtitles), demo.gif
+//   node record-demo.mjs video out/vid url.txt $REPO    # frames, demo.mp4 (captions in the picture), demo.gif
 //   node record-demo.mjs shots out/png url.txt $REPO    # after the video: 2x screenshots -> docs/images
 //   pngquant --skip-if-larger --ext .png --force out/png/*.png
 //
@@ -55,10 +55,9 @@ await context.addInitScript((isVideo) => {
       const cap = document.createElement('div');
       cap.id = 'demo-caption';
       cap.style.cssText =
-        'position:fixed;z-index:2147483646;left:50%;bottom:24px;transform:translateX(-50%);max-width:960px;width:max-content;' +
-        'padding:10px 18px;border-radius:6px;border:1px solid var(--ot-accent);' +
-        'background:color-mix(in srgb, var(--ot-surface) 94%, transparent);color:var(--ot-fg-strong);' +
-        'box-shadow:0 6px 24px rgba(0,0,0,.35);font:500 17px/1.45 var(--ot-font-body);text-align:center;' +
+        'position:fixed;z-index:2147483646;left:50%;bottom:18px;transform:translateX(-50%);max-width:880px;width:max-content;' +
+        'padding:6px 14px;border-radius:6px;border:1px solid color-mix(in srgb, var(--ot-accent) 60%, transparent);' +
+        'background:rgba(9,15,19,.86);color:#e8f1f2;font:500 15px/1.4 var(--ot-font-body);text-align:center;' +
         'pointer-events:none;opacity:0;transition:opacity .3s';
       document.body.appendChild(cap);
     }
@@ -73,7 +72,7 @@ await context.addInitScript((isVideo) => {
       '<span data-s="width:11px;height:11px;border-radius:50%;background:#ff5f57"></span><span data-s="width:11px;height:11px;border-radius:50%;background:#febc2e"></span>' +
       '<span data-s="width:11px;height:11px;border-radius:50%;background:#28c840"></span>' +
       '<span data-s="margin-left:10px;font:500 13px var(--ot-font-body);color:var(--ot-muted)">ssh edge-box: the lan-tracker CLI</span></div>' +
-      '<pre id="demo-term-text" data-s="margin:0;height:560px;overflow:hidden;padding:14px 16px;background:#0b0f14;color:#d6dde6;' +
+      '<pre id="demo-term-text" data-s="margin:0;height:520px;overflow:hidden;padding:14px 16px;background:#0b0f14;color:#d6dde6;' +
       'font:13px/1.5 var(--ot-font-mono);white-space:pre-wrap;overflow-wrap:anywhere"></pre></div>';
     // The UI's Content-Security-Policy drops inline style attributes;
     // styles set through the CSSOM apply, so data-s becomes style.cssText.
@@ -112,20 +111,15 @@ const step = async (name, fn) => {
   }
 };
 
-const cues = [];
 const now = async () => (video ? (await cdp.send('Runtime.evaluate', { expression: 'Date.now()', returnByValue: true })).result.value / 1000 : 0);
 const caption = async (html) => {
   if (!video) return;
-  const t = await now();
-  const last = cues.at(-1);
-  if (last && last.end === undefined) last.end = t;
   await page.evaluate((h) => {
     const cap = document.getElementById('demo-caption');
     if (!cap) return;
     if (h) cap.innerHTML = h;
     cap.style.opacity = h ? '1' : '0';
   }, html);
-  if (html) cues.push({ start: t, html });
 };
 const sections = [];
 const highlight = async (seconds) => { if (video) sections.push({ start: await now(), seconds }); };
@@ -373,32 +367,21 @@ if (video) {
   const start = frames[0].t;
   console.log('frames', frames.length, 'seconds', (frames.at(-1).t - start + 1).toFixed(1));
 
-  const stamp = (s) => {
-    const ms = Math.max(0, Math.round(s * 1000));
-    const p = (n, w = 2) => String(n).padStart(w, '0');
-    return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)}.${p(ms % 1000, 3)}`;
-  };
-  const text = (h) => h.replace(/<br>/g, '\n').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&');
-  const vtt = ['WEBVTT', ''];
-  cues.forEach((c, i) => {
-    vtt.push(String(i + 1), `${stamp(c.start - start)} --> ${stamp((c.end ?? frames.at(-1).t) - start)}`, text(c.html), '');
-  });
-  writeFileSync(join(out, 'demo.vtt'), vtt.join('\n'));
-
   const ffmpeg = (args) => {
     const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', ...args], { cwd: out, stdio: 'inherit' });
     if (r.status !== 0) throw new Error(`ffmpeg ${args.join(' ')} failed`);
   };
-  ffmpeg(['-f', 'concat', '-safe', '0', '-i', 'frames.txt', '-i', 'demo.vtt', '-map', '0:v', '-map', '1:s',
+  // The captions are in the picture only: a soft subtitle track as well
+  // would show them twice in players that turn it on by default.
+  ffmpeg(['-f', 'concat', '-safe', '0', '-i', 'frames.txt',
     '-vf', 'fps=25,format=yuv420p', '-c:v', 'libx264', '-preset', 'slow', '-crf', '28', '-tune', 'stillimage',
-    '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng', '-metadata:s:s:0', 'title=English',
     '-movflags', '+faststart', 'demo.mp4']);
   const parts = sections.map((s) => ({ ss: s.start - start, t: s.seconds }));
   const inputs = parts.flatMap((p) => ['-ss', p.ss.toFixed(2), '-t', String(p.t), '-i', 'demo.mp4']);
   const chain = parts.map((_, i) => `[${i}:v]`).join('') + `concat=n=${parts.length}:v=1:a=0,fps=8,scale=960:-1:flags=lanczos,split[a][b];` +
     '[a]palettegen=max_colors=96:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle';
   ffmpeg([...inputs, '-filter_complex', chain, 'demo.gif']);
-  console.log('wrote demo.mp4, demo.vtt, demo.gif');
+  console.log('wrote demo.mp4, demo.gif');
 }
 await context.close();
 await browser.close();
