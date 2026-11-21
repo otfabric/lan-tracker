@@ -55,7 +55,7 @@ func TestLoadRefusesDamagedState(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			db, err := sql.Open("sqlite", "file:"+h.path)
+			db, err := sql.Open("sqlite", "file:"+h.path+"?_pragma=busy_timeout(5000)")
 			if err != nil {
 				t.Fatal(err)
 			}

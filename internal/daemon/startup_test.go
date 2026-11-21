@@ -102,7 +102,7 @@ func damage(stmt string) func(t *testing.T, dir string) {
 		if err := st.Close(); err != nil {
 			t.Fatal(err)
 		}
-		db, err := sql.Open("sqlite", "file:"+path)
+		db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -276,7 +276,7 @@ func TestStatusOfLinksAndDamage(t *testing.T) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(h.dir, "hosts.db"))
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(h.dir, "hosts.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}

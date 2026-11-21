@@ -13,7 +13,7 @@ import (
 // through the daemon and with --offline alike (docs/CLI.md exit codes).
 func TestReadsOfADamagedDatabase(t *testing.T) {
 	f := serve(t)
-	db, err := sql.Open("sqlite", "file:"+f.db)
+	db, err := sql.Open("sqlite", "file:"+f.db+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
