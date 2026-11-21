@@ -1,0 +1,51 @@
+# Demo configuration for docs/media (the README's recording and screenshots):
+# the daemon in a Docker container on the demo LAN of demo-net.sh. Thresholds
+# and intervals are short so a few minutes show what a site shows in a day;
+# a real site keeps the defaults (deploy/config.yaml).
+version: 1
+
+interfaces:
+  - name: eth0
+    passive: { enabled: true }
+    active:
+      enabled: true
+      networks: [172.30.40.0/24]
+      exclude:  [172.30.40.1]
+    dhcp:
+      servers: [172.30.40.3]
+
+active:
+  startup_delay: 5s
+  max_starts_per_second: 20
+  min_target_interval: 1s
+  budgets:
+    arp:   { starts_per_second: 20 }
+    icmp:  { starts_per_second: 5 }
+    names: { starts_per_second: 5 }
+    tcp:   { connects_per_second: 5 }
+  arp:  { enabled: true, interval: 2m }
+  icmp: { enabled: true, interval: 1m }
+  tcp:
+    enabled: true
+    interval: 1m
+    targets:
+      - { port: 80,    name: http,        timeout: 750ms }
+      - { port: 102,   name: s7comm,      timeout: 750ms }
+      - { port: 502,   name: modbus,      timeout: 750ms }
+      - { port: 44818, name: ethernet-ip, timeout: 750ms }
+  names:
+    enabled: true
+    interval: 2m
+    service_types: [_http._tcp]
+    resolvers: [172.30.40.3]
+
+presence:
+  active: 1m
+  recent: 3m
+  stale:  6m
+
+ui:
+  enabled: true
+  listen: 0.0.0.0:9735
+
+logging: { level: info, format: text }
