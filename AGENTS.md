@@ -46,6 +46,7 @@ Fixed names and paths:
 | `TESTING.md` | How to run each test tier, prerequisites, coverage policy, replaying failures |
 | `docs/TEST_PLAN.md` | The manual hardware test procedure for the boards |
 | `docs/adr/` | Why the foundational decisions were taken, and what they rule out |
+| `docs/media/`, `docs/images/` | The README's demo video and screenshots; `record-demo.mjs` makes them on the demo LAN of `demo/demo-net.sh` (header comments say how) |
 | `docs/AI_REPO_MAP.md` | The package map; where each concern lives and which tests cover it |
 | `docs/COMMON_TASKS.md` | Recipes for recurring changes; which docs each change updates |
 | `docs/ROADMAP.md` | The only list of open work: everything not implemented, deferred or blocked, open hardware checks, open questions and rejected proposals |

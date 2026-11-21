@@ -1,0 +1,94 @@
+WEBVTT
+
+1
+00:00:00.287 --> 00:00:08.294
+LAN Tracker: the history of every device on an OT network segment.
+Passive listening first; active discovery only where you allow it, within strict rates.
+
+2
+00:00:08.294 --> 00:00:13.527
+On the edge box, one daemon watches eth0: packet capture, the kernel neighbour table, and bounded ARP, ICMP, TCP and name probes.
+
+3
+00:00:13.527 --> 00:00:19.030
+daemon status shows every collector, the last pass of each probe, and whether the web UI is on (here: all addresses, port 9735).
+
+4
+00:00:19.030 --> 00:00:28.445
+The inventory: one host per MAC and interface, its addresses, names from mDNS, DHCP and DNS, the IEEE registrant and its presence.
+
+5
+00:00:28.445 --> 00:00:32.946
+The same data in the browser: lan-tracker ui url prints the address with its access token.
+
+6
+00:00:32.946 --> 00:00:39.342
+The overview counts what changed in the chosen range, and shows when the tracker heard each kind of evidence.
+
+7
+00:00:39.342 --> 00:00:47.343
+Devices: search by name, address, MAC, registrant or description; sort by presence or last seen.
+
+8
+00:00:47.343 --> 00:00:55.238
+A device’s record: every address and name over time with their sources, its TCP endpoints and its event timeline.
+
+9
+00:00:55.238 --> 00:00:59.740
+Descriptions are the one thing the UI writes: an operator’s note, kept with the host’s history.
+
+10
+00:00:59.740 --> 00:01:07.635
+Active discovery is planned before it runs: scan plan shows targets, rates and a duration estimate and sends nothing.
+
+11
+00:01:07.635 --> 00:01:23.243
+scan run then connects within the same safety envelope: one connect at a time per host, closed at once, no payload.
+
+12
+00:01:23.243 --> 00:01:31.164
+TCP endpoints: which device answers on which port. A port name is a label, not proof of the protocol.
+
+13
+00:01:31.164 --> 00:01:33.813
+Events record each change with its evidence. Now a second drive is connected to line 1…
+
+14
+00:01:33.813 --> 00:01:39.318
+…and New device (HOST_DISCOVERED) arrives from its first ARP frame: passive, nothing was sent to it.
+
+15
+00:01:39.318 --> 00:01:41.961
+A service laptop is plugged in with a static address copied from the packaging PLC: 172.30.40.11.
+
+16
+00:01:41.961 --> 00:01:48.965
+Duplicate IP (DUPLICATE_IP_DETECTED): two MACs claim one address. The Modbus port of .11 now answers from the wrong device.
+
+17
+00:01:48.965 --> 00:01:58.353
+hosts find answers “who has this address?”, here with both holders and the conflict.
+
+18
+00:01:58.353 --> 00:02:06.669
+hosts history lists every holder of the address in order, with first and last seen.
+
+19
+00:02:06.669 --> 00:02:18.089
+events list filters the history by type, address, MAC, interface or time, as table, JSON, JSONL or CSV.
+
+20
+00:02:18.089 --> 00:02:27.092
+DHCP: servers against the allowlist, leases and every exchange, passively. The laptop renews its lease every two minutes.
+
+21
+00:02:27.092 --> 00:02:41.455
+On a sensitive segment, one command stops all active probing, with a reason, and it stays off across restarts.
+
+22
+00:02:41.455 --> 00:02:49.325
+Tracker health: the daemon, its database and every collector and probe engine, with their last passes.
+
+23
+00:02:49.325 --> 00:02:54.328
+OT Fabric LAN Tracker: one static binary, one SQLite file, a CLI, an API and this UI. MIT licensed.

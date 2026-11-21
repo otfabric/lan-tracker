@@ -16,6 +16,58 @@
 
 It listens passively by default and sends nothing. Optional active discovery (ARP sweeps, ping, plain TCP connects, name queries) is off until you enable it per interface for explicit networks, and stays inside a strict rate budget with a kill switch. It does **not** identify equipment: no models, firmware or operating systems, no banner grabbing; your own description on a device is the only statement about what it is.
 
+![A highlight cut of the demo: daemon status and the inventory in the CLI, the devices view, a planned TCP scan, and a duplicate IP address detected live](docs/media/demo.gif)
+
+*The demo above is a highlight cut. The full demo, about three minutes, half CLI and half web UI: [`docs/media/demo.mp4`](docs/media/demo.mp4), with captions in the picture and as an English subtitle track (also [`docs/media/demo.vtt`](docs/media/demo.vtt)). It runs on a demo LAN of containers ([`docs/media/demo/demo-net.sh`](docs/media/demo/demo-net.sh)): PLCs, drives, an HMI and a camera that announce themselves over mDNS, a DHCP and DNS server, an engineering laptop, a drive that joins later and a laptop with a conflicting static address. The MAC addresses carry real vendors' prefixes; the devices are not their products.*
+
+## Typical uses
+
+**Know what is on the segment, and since when.** Leave the daemon listening; within minutes every device that sends ARP, DHCP, mDNS or IP traffic is in the inventory with its addresses, the names it announced or resolved to, the IEEE registrant of its MAC prefix and its presence. Add your own description to the devices that matter.
+
+```bash
+sudo lan-tracker hosts list
+sudo lan-tracker hosts set 00:1b:1b:4a:10:01 --description "Press line 1 PLC, cabinet +A12"
+```
+
+![The devices view: one row per MAC and interface with address, names, registrant, presence and description](docs/images/devices.png)
+
+**Find a device and its history.** Search by name, address, MAC, registrant or description. A device's page shows every address and name it held with their sources, its TCP endpoints, its activity and its event timeline; each view shows the equivalent CLI command.
+
+```bash
+sudo lan-tracker hosts show 00:1b:1b:4a:10:01
+sudo lan-tracker hosts history 172.30.40.11 --since 7d
+```
+
+![A device's page: when it was last heard and by which evidence, its activity, address history, names and TCP endpoints](docs/images/host-detail.png)
+
+**Catch a duplicate IP address as it happens.** When a second MAC claims an address, `DUPLICATE_IP_DETECTED` is written to the history, the journal and the live event stream, and both holders carry the conflict. In the demo a service laptop takes the packaging PLC's address, and the PLC's Modbus port answers from the wrong device.
+
+```bash
+sudo lan-tracker hosts find 172.30.40.11
+sudo lan-tracker events list --type duplicate-ip --since 24h
+sudo lan-tracker watch                      # events as they happen
+```
+
+![The events view: events over time by kind, when things change by weekday and hour, and the event list with filters](docs/images/events.png)
+
+**Check reachability without touching the process.** Where you enable it, active discovery sweeps only the networks you list, with plain TCP connects (no payload, closed at once) inside a rate budget. Plan a scan first: it prints the targets, rates and a duration estimate and sends nothing.
+
+```bash
+sudo lan-tracker scan plan --tcp 102 --tcp 502 --tcp 44818
+sudo lan-tracker scan run  --tcp 102 --tcp 502 --tcp 44818
+sudo lan-tracker active disable --reason "line 1 commissioning"   # stops all probing; persists across restarts
+```
+
+![The TCP endpoints view: which device answered on which port, and when it changed](docs/images/services.png)
+
+**Read DHCP after the fact.** Servers are checked against your allowlist; leases and every exchange are kept per client, passively.
+
+![The DHCP view: servers with their verdicts, leases, exchanges over time and the busiest clients](docs/images/dhcp.png)
+
+**Know whether the tracker itself could see.** The health view and `lan-tracker daemon status` show the daemon, the database, every collector and probe engine with its last pass, and whether the web UI is on and where.
+
+![The tracker health view: daemon, database, collectors and probe engines](docs/images/health.png)
+
 ## Install on Linux
 
 Requirements: a systemd Linux (tested on Debian 11, 12 and 13), kernel 5.10 or newer, `amd64` or `arm64`, and `sudo`. There are no packages: a release is one tarball per architecture with the static binary, the systemd unit and a default configuration.
