@@ -161,7 +161,7 @@ func addr16(b []byte) netip.Addr { return netip.AddrFrom16([16]byte(b[:16])) }
 func be16(b []byte) uint16 { return binary.BigEndian.Uint16(b) }
 
 // text makes frame data safe to store and print: valid UTF-8, no control
-// characters, surrounding space trimmed, at most n bytes.
+// or format characters, surrounding space trimmed, at most n bytes.
 func text(b []byte, n int) string {
 	var sb strings.Builder
 	for len(b) > 0 && sb.Len() < n {
@@ -170,7 +170,9 @@ func text(b []byte, n int) string {
 		switch {
 		case r == utf8.RuneError && size <= 1, r == 0:
 			continue
-		case unicode.IsControl(r):
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			// Control and format characters (bidi overrides, zero-width
+			// marks) would change how the name reads in a terminal.
 			r = ' '
 		}
 		if sb.Len()+utf8.RuneLen(r) > n {

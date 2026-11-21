@@ -8,7 +8,7 @@ exceptions:
       through make, never directly on a macOS host). The shared go-ci
       workflow runs the host toolchain. ci.yml instead runs
       `make mod-verify check` in the container, which covers the same gates
-      (fmt, tidy, vet, lint, govulncheck, race tests, coverage >= 90 %),
+      (fmt, tidy, vet, lint, govulncheck, race tests, coverage >= 95 %),
       plus fuzz, test-net and test-systemd jobs.
     owner: bartvanbos
     reviewed: "2026-10-30"

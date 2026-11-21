@@ -22,6 +22,10 @@ const packetOutgoing = 4
 // vlanIDMask selects the VLAN ID in a tag control field.
 const vlanIDMask = 0x0fff
 
+// bpfMaxInsns is the kernel's BPF_MAXINSNS, the longest classic-BPF
+// program a socket filter may hold.
+const bpfMaxInsns = 4096
+
 // Filter returns the classic-BPF program for the enabled protocols
 // (docs/ARCHITECTURE.md §3): ARP, LLDP, NDP, DHCP (67/68), mDNS (5353) and
 // DNS responses (from 53) in full, other IPv4 and IPv6 frames truncated to
@@ -176,9 +180,14 @@ func (a *asm) assemble() ([]bpf.RawInstruction, error) {
 			return nil, fmt.Errorf("bpf: undefined label %q", j.label)
 		}
 		skip := target - j.at - 1
+		// Classic BPF jumps only forward, and the kernel accepts at most
+		// BPF_MAXINSNS instructions, so no valid offset is negative or larger.
+		if skip < 0 || skip > bpfMaxInsns {
+			return nil, fmt.Errorf("bpf: jump to %q out of range", j.label)
+		}
 		switch i := a.prog[j.at].(type) {
 		case bpf.JumpIf:
-			if skip < 0 || skip > 255 {
+			if skip > 255 {
 				return nil, fmt.Errorf("bpf: jump to %q out of range", j.label)
 			}
 			i.SkipTrue = uint8(skip)

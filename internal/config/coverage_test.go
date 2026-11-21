@@ -16,12 +16,15 @@ func TestEnvAndFlagTypes(t *testing.T) {
 			"LAN_TRACKER_METRICS_ENABLED=false",
 			"LAN_TRACKER_ACTIVE_MAX_CONCURRENT_JOBS=3",
 			"LAN_TRACKER_API_LISTEN=127.0.0.1:9734",
+			"LAN_TRACKER_UI_ENABLED=true",
+			"LAN_TRACKER_UI_LISTEN=127.0.0.1:9800",
 		},
 		Flags: []Override{{Key: "logging.level", Value: "debug", Origin: "--log-level"}},
 	})
 	c := l.Config
 	if c.Presence.Active.String() != "2m" || c.Storage.Retention.MaxDBSize != 1<<30 || c.Metrics.Enabled ||
-		c.Active.MaxConcurrentJobs != 3 || c.API.Listen != "127.0.0.1:9734" || c.Logging.Level != "debug" {
+		c.Active.MaxConcurrentJobs != 3 || c.API.Listen != "127.0.0.1:9734" || c.Logging.Level != "debug" ||
+		!c.UI.Enabled || c.UI.Listen != "127.0.0.1:9800" {
 		t.Errorf("values not applied: %+v %+v %+v", c.Presence, c.Storage, c.Active)
 	}
 
@@ -104,6 +107,7 @@ func TestValidationRules(t *testing.T) {
 		{"presence stale order", iface + "presence: { recent: 30m, stale: 10m }\n", "presence.stale", "longer than presence.recent"},
 		{"duplicate name type", iface + "identity: { hostname_preference: [mdns, mdns] }\n", "identity.hostname_preference[1]", "more than once"},
 		{"proxy threshold", iface + "identity: { proxy_arp_threshold: 1 }\n", "identity.proxy_arp_threshold", "at least 2"},
+		{"host cap zero", iface + "identity: { max_hosts_per_interface: 0 }\n", "identity.max_hosts_per_interface", "at least 1"},
 		{"empty storage path", iface + "storage: { path: \"\" }\n", "storage.path", "is required"},
 		{"zero retention", iface + "storage: { retention: { events: 0s } }\n", "storage.retention.events", "greater than zero"},
 		{"empty socket", iface + "api: { socket: \"\" }\n", "api.socket", "is required"},

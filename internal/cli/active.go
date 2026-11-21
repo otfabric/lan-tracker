@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net/netip"
-	"slices"
 	"sort"
 	"strings"
 
@@ -50,7 +49,7 @@ func (a *app) activeCmd() *cobra.Command {
 		Use:     "enable",
 		Short:   "Clear the kill switch",
 		Example: "  sudo lan-tracker active enable",
-		Long: "Clears the kill switch. It fails (exit 2) while LAN_TRACKER_ACTIVE_DISABLED=1\n" +
+		Long: "Clears the kill switch. It fails (exit 2) while LAN_TRACKER_ACTIVE_DISABLED\n" +
 			"is set, and does not override per-interface active.enabled: false.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -230,10 +229,10 @@ func (a *app) plan(ctx context.Context, req probe.Request) (probe.Plan, error) {
 	if err != nil {
 		return probe.Plan{}, err
 	}
-	if slices.Contains(a.env.Environ, config.EnvActiveDisabled+"=1") {
+	if forced, _, setting := config.ActiveDisabledEnv(a.env.Environ); forced {
 		st.Disabled, st.Forced = true, true
 		if st.Reason == "" {
-			st.Reason = config.EnvActiveDisabled + "=1"
+			st.Reason = setting
 		}
 	}
 	in := probe.PlanInput{Config: cfg, Active: st, Known: map[string][]netip.Addr{}}

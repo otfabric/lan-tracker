@@ -45,6 +45,10 @@ func (systemdNotifier) Watchdog() error { return notify(daemon.SdNotifyWatchdog)
 
 func (systemdNotifier) Status(msg string) error { return notify("STATUS=" + msg) }
 
+func (systemdNotifier) ExtendTimeout(d time.Duration) error {
+	return notify("EXTEND_TIMEOUT_USEC=" + strconv.FormatInt(d.Microseconds(), 10))
+}
+
 func (systemdNotifier) WatchdogInterval() (int64, bool) {
 	d, err := daemon.SdWatchdogEnabled(false)
 	if err != nil || d == 0 {

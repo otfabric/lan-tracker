@@ -59,6 +59,7 @@ identity:
   name_expiry: 168h           # names without a TTL not confirmed this long show as stale; time never closes them
   proxy_arp_threshold: 16
   oui_override: ""            # optional path
+  max_hosts_per_interface: 4096  # a new MAC beyond this evicts the longest-missing host, or is refused (ADR 0013)
 storage:
   path: /data/lan-tracker/hosts.db
   retention:

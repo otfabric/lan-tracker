@@ -55,7 +55,7 @@ func (d *Daemon) startPipeline(ctx context.Context) error {
 	}
 	d.events = events.NewEngine(d.store, d.log, clockState)
 	d.correlator, err = correlate.New(ctx, correlate.Options{
-		Store: d.store, Events: d.events, Vendors: vendors, Clock: d.clock, Logger: d.log, Config: cfg,
+		Store: d.store, Reader: d.reader, Events: d.events, Vendors: vendors, Clock: d.clock, Logger: d.log, Config: cfg,
 		DataDriven: cfg.ReplayMode(), Recovery: d.store.Recovery(),
 	})
 	if err != nil {

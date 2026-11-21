@@ -103,7 +103,7 @@ Which address an observation carries:
 
 Sources: `passive_arp`, `passive_ipv4`, `passive_ipv6`, `passive_ndp`, `passive_dhcp`, `passive_dhcp_server`, `passive_mdns`, `passive_dns`, `passive_lldp`, `kernel_neighbor`, `arp_scan`, `icmp_scan`, `ndp_probe`, `tcp_connect`, `dns_query`, `mdns_query`. `ndp_probe` is accepted (in a replay file, for example) and handled like `passive_ndp`, but no engine emits it: there is no NDP solicitation probe (AGENTS.md rule 12).
 
-Events that are not caused by an observation use one of these internal causes instead of a source: `presence` (presence ticker), `expiry` (binding expiry), `iface_monitor` (interface manager), `operator` (kill switch, operator scans, host descriptions), `integrity_check` (start-up database check).
+Events that are not caused by an observation use one of these internal causes instead of a source: `presence` (presence ticker), `expiry` (binding expiry), `iface_monitor` (interface manager), `operator` (kill switch, operator scans, host descriptions), `integrity_check` (start-up database check), `host_cap` (the host cap, §5.9).
 
 ## 3. Time and interval semantics
 
@@ -121,15 +121,15 @@ A binding is **in effect at time T** when `first_seen <= T AND (ended_at IS NULL
 
 A binding in effect at T with `T > last_seen` was **unconfirmed** at T: it was the last known state, but no evidence was received between `last_seen` and T. Queries return `last_seen` so the CLI can show this (§7). An end by expiry is an inference, not the moment the device changed its configuration; the event says so in its `reason`.
 
-`hosts` has `first_seen` and `last_seen` (no `ended_at`: hosts are never closed, only their presence changes), plus the three evidence times of §2.
+`hosts` has `first_seen` and `last_seen` (no `ended_at`: hosts are never closed, only their presence changes), plus the three evidence times of §2, and `evicted_at`, set while the correlator does not hold the host (§5.9).
 
-## 4. Schema (`migrations/0001_init.sql`)
+## 4. Schema (`migrations/0001_init.sql`, `0002_host_cap.sql`)
 
 | Table | Columns | Purpose |
 | --- | --- | --- |
 | `network_contexts` | id, interface, first_seen, last_seen | One row per monitored interface name |
 | `context_prefixes` | id, context_id, prefix, first_seen, last_seen, ended_at | The interface's own addresses/subnets over time (CIDR text) |
-| `hosts` | host_id (UUID), context_id, mac, oui_registrant, locally_administered, presence, preferred_name, description, proxy_arp, first_seen, last_seen, last_frame_seen, last_address_confirmed, last_endpoint_answer | One row per (context, MAC). `oui_registrant` is the MAC prefix's IEEE registrant (§5.7); `proxy_arp` the diagnostic flag (§5.2); `description` set by an operator (§5.8); the three evidence times of §2 |
+| `hosts` | host_id (UUID), context_id, mac, oui_registrant, locally_administered, presence, preferred_name, description, proxy_arp, first_seen, last_seen, last_frame_seen, last_address_confirmed, last_endpoint_answer | One row per (context, MAC). `oui_registrant` is the MAC prefix's IEEE registrant (§5.7); `proxy_arp` the diagnostic flag (§5.2); `description` set by an operator (§5.8); the three evidence times of §2; `evicted_at` when the host cap evicted it, NULL while it is held (§5.9, migration 0002) |
 | `addresses` | id, context_id, host_id, ip, family, conflict, first_seen, last_seen, ended_at | IP bindings over time |
 | `address_sources` | address_id, source, first_seen, last_seen | Which sources confirmed a binding |
 | `name_records` | id, context_id, name, name_type, record_type, address, value, source, advertiser_mac, advertiser_ip, host_id, link, ttl_seconds, first_seen, last_seen, expires_at, ended_at, end_reason | Every advertised or resolved name record (§5.4); `host_id` set only by `link` |
@@ -283,6 +283,7 @@ The advertiser is never assumed to own what it advertises: an mDNS proxy, reflec
 - `cache_flush`: an mDNS record with the cache-flush bit ends the other open records of that name, type and source (another address or value) last seen more than a second earlier (RFC 6762 §10.2); they end after the new record is counted, so a name moving to a new address is not reported as removed and added again;
 - `address now held by another MAC`: an address record seen again while another single MAC holds the address ends its link to the previous holder, and opens a record linked to the new one;
 - `evicted`: beyond 16,384 open records the least recently seen are ended, without an event.
+- `host evicted`: the host the record was linked to was evicted by the host cap (§5.9), without an event.
 
 When a host's last open record of a name ends (other than by eviction), `HOSTNAME_REMOVED` gives the reason. Time alone never ends a record. A record whose TTL has run out is shown as *expired* when it is read (API, CLI), and one without a TTL not confirmed for `identity.name_expiry` (default 7 d) as *stale*; both stay in effect and nothing is written. On a switched port DHCP names are often seen only at boot and mDNS names only when someone queries, so not seeing a naming protocol again is not evidence that the name changed. Every read reports a record's freshness: `fresh`, `expired`, `stale` or `ended`.
 
@@ -324,7 +325,7 @@ A client message is `passive_dhcp`; a server reply is `passive_dhcp_server`. Bot
 - The same address, server identifier and configuration as the client's open lease renews that row: `last_ack`, `acks`, `expires_at`, and the lease time and T1/T2 when the ACK carried them. Repeated renewals are counts, not events.
 - A different address opens a new row and ends the old one `superseded`, emitting `DHCP_LEASE_ASSIGNED` (old and new address); a client's first lease emits it with no old address. The same address with a different configuration or server identifier also opens a new row, the old one `superseded`, and emits `DHCP_CLIENT_CONFIG_CHANGED` with the settings that differ (and `server_id=` when the server changed).
 - Configurations are compared on the options both ACKs carried: an option one of them left out is unknown, not a change.
-- A DECLINE (of option 50) or a RELEASE (of `ciaddr`) of the open lease's address ends it, `declined` or `released`. A NAK, a DECLINE and a RELEASE each emit their event (`DHCP_LEASE_NAK` once per exchange, `DHCP_LEASE_DECLINED`, `DHCP_LEASE_RELEASED`) whether or not a lease was open. None of them proves that a static address went away.
+- A DECLINE (of option 50) or a RELEASE (of `ciaddr`) of the open lease's address ends it, `declined` or `released`. A new client's first lease on an interface that holds `identity.max_hosts_per_interface` open leases ends the lease with the oldest ACK, `evicted`, without an event (§5.9). A NAK, a DECLINE and a RELEASE each emit their event (`DHCP_LEASE_NAK` once per exchange, `DHCP_LEASE_DECLINED`, `DHCP_LEASE_RELEASED`) whether or not a lease was open. None of them proves that a static address went away.
 - An ACK older than the client's last one changes nothing.
 
 `config_json` is the immutable snapshot of the ACK that opened the row. It holds only the options the ACK carried, under these keys:
@@ -355,7 +356,19 @@ LAN Tracker does not identify equipment (ADR 0011). The OUI lookup (`internal/id
 
 ### 5.8 Host descriptions
 
-An operator can describe a host with free text, such as "Solar panel rooftop" or "Mobile phone Bart": context the network cannot tell, and the only statement LAN Tracker holds about what a device is. `lan-tracker hosts set <host> --description TEXT` sets or replaces it, `hosts unset <host> --description` removes it. The text is trimmed and must be one line of at most 200 characters without control characters. A description belongs to a host, a MAC on an interface: it survives address and name changes, and a device that changes its MAC becomes a new host without it; it is never moved or copied to another MAC or interface. The CLI resolves the query to exactly one current host (with `--interface` or the host ID when several match), and the change goes through the API to the correlator as an operator action, like the kill switch, so the single writer holds: the correlator sets `hosts.description` (NULL when removed) and, when the text changes, emits `HOST_DESCRIBED` with the old and new text and the calling user (`SO_PEERCRED`). The same text again changes nothing. `preferred_name` never overwrites it. Descriptions are never pruned; they show in `hosts show`, `hosts find` and `hosts list` and are searched by `hosts list --description`.
+An operator can describe a host with free text, such as "Solar panel rooftop" or "Mobile phone Bart": context the network cannot tell, and the only statement LAN Tracker holds about what a device is. `lan-tracker hosts set <host> --description TEXT` sets or replaces it, `hosts unset <host> --description` removes it. The text is trimmed and must be one line of at most 200 characters without control characters or bidirectional formatting characters. A description belongs to a host, a MAC on an interface: it survives address and name changes, and a device that changes its MAC becomes a new host without it; it is never moved or copied to another MAC or interface. The CLI resolves the query to exactly one current host (with `--interface` or the host ID when several match), and the change goes through the API to the correlator as an operator action, like the kill switch, so the single writer holds: the correlator sets `hosts.description` (NULL when removed) and, when the text changes, emits `HOST_DESCRIBED` with the old and new text and the calling user (`SO_PEERCRED`). The same text again changes nothing. `preferred_name` never overwrites it. Descriptions are never pruned; they show in `hosts show`, `hosts find` and `hosts list` and are searched by `hosts list --description`.
+
+### 5.9 Host cap
+
+The correlator holds at most `identity.max_hosts_per_interface` hosts per interface (default 4096; reloads; ADR 0013), so a segment that shows many distinct source MACs, such as a misbehaving device or a MAC table overflow, cannot grow its current state without bound. Presence and binding expiry are evaluated from a deadline-ordered queue, so an observation costs the same however many hosts are held.
+
+- A MAC that is not a host on a full interface evicts the host on that interface that has been MISSING the longest (the oldest `last_seen`). The eviction closes the host's open bindings at that moment (`IP_REMOVED`, cause `host_cap`, with `DUPLICATE_IP_RESOLVED` where a conflict ends), ends its open name records (`host evicted`), sets `hosts.evicted_at` and emits `HOST_EVICTED`. The `hosts` row and all its history stay; reads show the host as before, MISSING.
+- When no host on the interface is MISSING, the new MAC's observation is dropped: it is not stored or correlated and counts in `lan_tracker_observations_refused_total`. `HOST_CAP_REACHED` is emitted when refusing starts and again only after a new host has been admitted on the interface since, so a stream of new MACs does not repeat it.
+- An evicted MAC seen again on that interface is the same host (AGENTS.md rule 6: hosts are never split): the correlator reads the row back, clears `evicted_at` and holds it again under its `host_id`, with its description and preferred name; presence evidence makes it `HOST_REAPPEARED`, and its addresses are bound again as new bindings (`IP_ADDED`). It takes a place under the cap like any new MAC. At start-up evicted hosts are not loaded.
+- An operator can still describe an evicted host; the correlator writes the description to its row and emits `HOST_DESCRIBED`.
+- The same cap bounds each interface's open DHCP leases (§5.6): a new client's first lease on a full interface ends the lease with the oldest last ACK (`evicted`), counted in `lan_tracker_dhcp_leases_evicted_total`.
+
+Evictions count in `lan_tracker_hosts_evicted_total`. The metrics are labelled by interface only (AGENTS.md rule 9).
 
 ## 6. Presence
 
@@ -378,7 +391,7 @@ Event types are public: the catalogue in `internal/events` lists exactly the typ
 | `HOST_DISAPPEARED` | `disappeared` | notice | Presence became MISSING |
 | `HOST_REAPPEARED` | `reappeared` | notice | A MISSING host was observed again |
 | `IP_ADDED` | `ip-added` | notice | Host gained an address binding |
-| `IP_REMOVED` | `ip-removed` | notice | An address binding was closed: takeover by another MAC, expiry, or a proxy-ARP answer (§5.2, §5.3) |
+| `IP_REMOVED` | `ip-removed` | notice | An address binding was closed: takeover by another MAC, expiry, a proxy-ARP answer, or the host's eviction (§5.2, §5.3, §5.9) |
 | `MAC_ALSO_OBSERVED` | `mac-also-observed` | notice | A MAC known on another interface was observed on this one (new host, `related_host_id` = the other) |
 | `PROXY_ARP_DETECTED` | `proxy-arp` | warning | A MAC was flagged as answering ARP for other hosts' addresses (§5.2) |
 | `HOSTNAME_ADDED` | `name-added` | notice | A host gained a linked name (§5.4) |
@@ -403,6 +416,8 @@ Event types are public: the catalogue in `internal/events` lists exactly the typ
 | `DHCP_LEASE_DECLINED` | `dhcp-decline` | warning | A client declined an address |
 | `DHCP_LEASE_RELEASED` | `dhcp-release` | notice | A client released an address |
 | `HOST_DESCRIBED` | `described` | notice | An operator set, changed or removed a host's description (§5.8) |
+| `HOST_EVICTED` | `evicted` | notice | The host cap evicted the host missing the longest to make room for a new MAC (§5.9) |
+| `HOST_CAP_REACHED` | `host-cap` | warning | An interface at the host cap with no MISSING host began refusing new MACs (§5.9) |
 | `OBSERVATION_GAP` | `observation-gap` | warning | Nothing was observed on an interface for a while: a passive collector (capture, neighbour) was not running, or the daemon was not. History inside the gap is unknown, not quiet |
 
 ### Values
@@ -420,7 +435,7 @@ Event types are public: the catalogue in `internal/events` lists exactly the typ
 | `DUPLICATE_IP_DETECTED` | — | IP | `host_id` = new claimer, `related_host_id` = existing holder |
 | `DUPLICATE_IP_RESOLVED` | — | IP | `host_id` = remaining holder, `related_host_id` = the host that left |
 | `SCAN_STARTED`, `SCAN_COMPLETED` | — | summary text (probes, targets; counts, duration, or why it was aborted) | context of the scanned interface, no host; evidence `{actor, interface}` |
-| `ACTIVE_DISABLED`, `ACTIVE_ENABLED` | — | `active discovery disabled by <actor>: <reason>` (`enabled` for `ACTIVE_ENABLED`) | no host or context; evidence `{actor, reason}`; actor `env` when `LAN_TRACKER_ACTIVE_DISABLED=1` stopped it at start-up |
+| `ACTIVE_DISABLED`, `ACTIVE_ENABLED` | — | `active discovery disabled by <actor>: <reason>` (`enabled` for `ACTIVE_ENABLED`) | no host or context; evidence `{actor, reason}`; actor `env`, reason the assignment as given (`LAN_TRACKER_ACTIVE_DISABLED=yes`), when the environment stopped it at start-up |
 | `INTERFACE_*` | — | `up` / `down` | no host |
 | `SUBNET_CHANGED` | prefix closed (— when one opened) | prefix opened (— when one closed) | one event per prefix; cause `iface_monitor`; no host |
 | `OBSERVATION_GAP` | when the gap began (RFC 3339) | when it ended | context of the interface, no host; cause `capture` or `neighbor` (the collector failed and came back to `running`, or was still failed at shutdown; evidence `reason` = its last error) or `daemon` (the time from the previous run's last heartbeat to this start, on every configured interface, when at least 1 minute; evidence `reason`). The heartbeat is `runtime_state` `observed_until`, written every 15 s and at shutdown. A collector disabled by configuration or unsupported is no gap; replay records none |
@@ -434,6 +449,8 @@ Event types are public: the catalogue in `internal/events` lists exactly the typ
 | `DHCP_LEASE_DECLINED` | the declined address (option 50; empty without it) | — | |
 | `DHCP_LEASE_RELEASED` | the released address (`ciaddr`) | — | |
 | `HOST_DESCRIBED` | the previous description (— for a first one) | the new description (— when removed) | cause `operator`; evidence `{actor, interface, mac}` |
+| `HOST_EVICTED` | `MISSING` | — | cause `host_cap`; evidence: the host's last observation and `reason` (since when it was missing, the cap); the live stream's related MAC is the new MAC |
+| `HOST_CAP_REACHED` | — | the cap | context of the interface, no host; cause the refused observation's source; evidence: that observation (its MAC) and `reason` |
 
 ### Provenance
 
@@ -442,7 +459,7 @@ Every event is self-contained, so pruning observations never weakens history:
 | Column | Content |
 | --- | --- |
 | `old_value`, `new_value` | Text form of the changed attribute (IP, name, state, prefix, lease address or settings) |
-| `cause` | The observation's `Source`, or an internal cause (`presence`, `expiry`, `iface_monitor`, `operator`, `integrity_check`) |
+| `cause` | The observation's `Source`, or an internal cause (`presence`, `expiry`, `iface_monitor`, `operator`, `integrity_check`, `host_cap`) |
 | `observation_id` | ID of the causing observation if any. May point at a pruned row; informational only. |
 | `evidence_json` | Snapshot copied at write time: `{ts, source, interface, mac, ip, hostname, name_type, service: {proto, port, state}, neighbor_state}` of the causing observation, plus `reason` where the event is an inference or needs explaining, and `contested` for proxy ARP. For timer-driven events: the snapshot of the last supporting observation plus `reason` (e.g. `"no observation for 24h"`). For operator events: `{actor, reason}`. |
 | `clock_sync` | The kernel clock's state when the event was written (NFR-REL-2): `synced`, `unsynced` (before NTP synchronisation, so `ts` may be off) or `unknown` (the state could not be read, or a replay, whose times come from the recording). Read with a read-only `adjtimex` (`STA_UNSYNC`), whatever the NTP client. |
@@ -465,7 +482,7 @@ Configurable per site under `storage.retention`. Defaults: raw observations 7 da
 | `dhcp_leases` that ended | the events' retention | `ended_at` |
 | `dhcp_exchanges` | the roll-ups' retention | `last_seen` |
 
-Open name records and open leases are never pruned, however old; nor are the current-state and binding tables (`network_contexts`, `context_prefixes`, `hosts`, `addresses`, `address_sources`, `endpoints`, `dhcp_servers`, `scans`). An endpoint keeps its last and last definite results in `endpoints` after its history rows are pruned. Raw observations do not hold records or DHCP messages (§4), so the name and DHCP history lives in these tables and survives roll-up.
+Open name records and open leases are never pruned, however old; nor are the current-state and binding tables (`network_contexts`, `context_prefixes`, `hosts`, `addresses`, `address_sources`, `endpoints`, `dhcp_servers`, `scans`). The one bound on current state is the host cap (§5.9): it ends bindings, name records and leases and marks hosts evicted, but deletes no row. An endpoint keeps its last and last definite results in `endpoints` after its history rows are pruned. Raw observations do not hold records or DHCP messages (§4), so the name and DHCP history lives in these tables and survives roll-up.
 
 `max_db_size` (default 200 MB) then applies to the data size (pages minus free pages): while above it, the same steps run in the table's order regardless of age, oldest first: raw observations are rolled up, then roll-ups, exchanges and the history rows (endpoint results, ended name records, ended leases) are deleted, and events last, each table until it is empty before the next: the events, which carry their own evidence, outlive the history they summarise. Size pressure can therefore shorten the configured retention. Freed pages are returned to the file system (`auto_vacuum=INCREMENTAL`). Compaction runs at start-up and hourly in batches of 2,000 rows, each its own committed op, so it never blocks the writer; replay mode does not compact. Because every event carries its evidence (§7), answers and provenance are unchanged by compaction (§10).
 

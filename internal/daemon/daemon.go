@@ -158,7 +158,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.log.Info("lan-tracker starting", "version", bi.Version, "commit", bi.Commit, "platform", bi.Platform,
 		"config", loaded.Path)
 
+	stopExtending := d.extendStart()
 	st, err := store.Open(ctx, store.Options{Path: loaded.Config.Storage.Path, Clock: d.clock, Logger: d.log})
+	stopExtending()
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -307,6 +309,7 @@ var restartOnly = []struct {
 	{"storage", func(c *config.Config) any { return c.Storage }, func(o, n *config.Config) { n.Storage = o.Storage }},
 	{"api", func(c *config.Config) any { return c.API }, func(o, n *config.Config) { n.API = o.API }},
 	{"metrics", func(c *config.Config) any { return c.Metrics }, func(o, n *config.Config) { n.Metrics = o.Metrics }},
+	{"ui", func(c *config.Config) any { return c.UI }, func(o, n *config.Config) { n.UI = o.UI }},
 	{"logging.format", func(c *config.Config) any { return c.Logging.Format }, func(o, n *config.Config) { n.Logging.Format = o.Logging.Format }},
 	{"replay", func(c *config.Config) any { return c.Replay }, func(o, n *config.Config) { n.Replay = o.Replay }},
 	// The neighbour collector's resync ticker is set up at start-up.
@@ -481,6 +484,43 @@ func (d *Daemon) watchdog(ctx context.Context, t clock.Ticker, interval time.Dur
 			d.notify("watchdog", d.notifier.Watchdog)
 		}
 	}
+}
+
+// While the database opens, the start timeout is extended every
+// startExtendEvery by startExtendBy (and the watchdog pinged): a migration
+// that rebuilds a large table (0002 rebuilds events; deploy/README.md,
+// Upgrade) or the integrity check of a large database can take longer than
+// systemd's default start timeout (90 s), more so under the unit's
+// CPUQuota. Variables so a test can shorten them.
+var (
+	startExtendEvery = 10 * time.Second
+	startExtendBy    = 30 * time.Second
+)
+
+// extendStart extends the start timeout at once and then every
+// startExtendEvery until the returned function is called. It uses the wall
+// clock: the service manager's timeout is wall time, also under replay.
+func (d *Daemon) extendStart() (stop func()) {
+	extend := func() {
+		d.notify("extend timeout", func() error { return d.notifier.ExtendTimeout(startExtendBy) })
+		d.notify("watchdog", d.notifier.Watchdog)
+	}
+	extend()
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(startExtendEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				extend()
+			}
+		}
+	}()
+	return func() { close(done); <-exited }
 }
 
 func (d *Daemon) notify(what string, fn func() error) {

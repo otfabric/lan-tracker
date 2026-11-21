@@ -291,6 +291,8 @@ type dhcpLease struct {
 	config   map[string]any
 	lastAck  time.Time
 	acks     int
+	key      leaseKey
+	pos      int // in its context's lease queue (hostcap.go)
 }
 
 type leaseKey struct {
@@ -522,6 +524,7 @@ func (c *Correlator) leaseAck(ctx context.Context, n *netContext, x *exchange, m
 	if cur != nil && cur.ip == ip && cur.serverID == sid && sameConfig(cur.config, snap) {
 		cur.lastAck = o.Time
 		cur.acks++
+		n.leaseQueue().set(cur)
 		x.leaseID = cur.id
 		c.exec(ctx, "renew lease", `UPDATE dhcp_leases SET last_ack = ?, acks = acks + 1, expires_at = ?, lease_seconds = coalesce(?, lease_seconds),
 			t1_seconds = coalesce(?, t1_seconds), t2_seconds = coalesce(?, t2_seconds) WHERE id = ?`,
@@ -541,11 +544,13 @@ func (c *Correlator) leaseAck(ctx context.Context, n *netContext, x *exchange, m
 			event(events.DHCPClientConfigChanged, old, nw)
 		}
 	} else {
+		c.limitLeases(ctx, n, o) // a new client (ADR 0013)
 		event(events.DHCPLeaseAssigned, "", ip)
 	}
 	c.st.nextLeaseID++
-	l := &dhcpLease{id: c.st.nextLeaseID, ip: ip, serverID: sid, config: snap, lastAck: o.Time, acks: 1}
+	l := &dhcpLease{id: c.st.nextLeaseID, ip: ip, serverID: sid, config: snap, lastAck: o.Time, acks: 1, key: lk}
 	c.st.leases[lk] = l
+	n.leaseQueue().set(l)
 	x.leaseID = l.id
 	hostID := ""
 	if host != nil {
@@ -615,6 +620,9 @@ func (c *Correlator) endLease(ctx context.Context, k leaseKey, t time.Time, reas
 		return
 	}
 	delete(c.st.leases, k)
+	if n := c.st.contextsByID[k.ctx]; n != nil {
+		n.leaseQueue().remove(l)
+	}
 	c.exec(ctx, "end lease", `UPDATE dhcp_leases SET ended_at = max(first_ack, ?), end_reason = ? WHERE id = ?`, ms(t), reason, l.id)
 }
 
@@ -768,8 +776,11 @@ func (s *state) loadLeases(ctx context.Context, tx *sql.Tx) error {
 		if err := json.Unmarshal([]byte(cfg), &l.config); err != nil || l.config == nil {
 			l.config = map[string]any{}
 		}
-		l.lastAck = fromMS(last)
+		l.lastAck, l.key = fromMS(last), k
 		s.leases[k] = l
+		if n := s.contextsByID[k.ctx]; n != nil {
+			n.leaseQueue().set(l)
+		}
 	}
 	return rows.Err()
 }

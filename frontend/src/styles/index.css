@@ -1,0 +1,81 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* Tailwind's palette is replaced by the OT Fabric tokens, so a component
+   cannot reach a color that is not a token. */
+@theme {
+  --color-*: initial;
+}
+
+@theme inline {
+  --color-bg: var(--ot-bg);
+  --color-surface: var(--ot-surface);
+  --color-header: var(--ot-header-bg);
+  --color-line: var(--ot-line);
+  --color-control: var(--ot-control-line);
+  --color-fg: var(--ot-fg);
+  --color-fg-strong: var(--ot-fg-strong);
+  --color-muted: var(--ot-muted);
+  --color-accent: var(--ot-accent);
+  --color-accent-soft: var(--ot-accent-soft);
+  --color-accent-strong: var(--ot-accent-strong);
+  --color-wire: var(--ot-wire-text);
+  --color-danger: var(--ot-danger);
+  --color-blue: var(--ot-blue);
+  --color-good: var(--st-good);
+  --color-warn: var(--st-warn);
+  --color-bad: var(--st-bad);
+  --color-transparent: transparent;
+
+  --font-display: var(--ot-font-display);
+  --font-sans: var(--ot-font-body);
+  --font-mono: var(--ot-font-mono);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--ot-bg);
+  color: var(--ot-fg);
+  font-family: var(--ot-font-body);
+  font-size: 14px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ot-accent);
+  outline-offset: 1px;
+}
+
+/* Thin scrollbars that follow the theme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ot-line) transparent;
+}
+
+@keyframes lt-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ot-accent) 60%, transparent); }
+  100% { box-shadow: 0 0 0 8px transparent; }
+}
+.lt-live { animation: lt-pulse 1.6s ease-out infinite; }
+
+@keyframes lt-flash {
+  from { background: var(--ot-accent-soft); }
+  to { background: transparent; }
+}
+.lt-new { animation: lt-flash 2.4s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lt-live, .lt-new { animation: none; }
+}

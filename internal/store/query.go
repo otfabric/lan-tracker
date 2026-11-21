@@ -193,13 +193,13 @@ func hostsTx(ctx context.Context, tx *sql.Tx, w where) ([]HostSummary, error) {
 	for rows.Next() {
 		h, err := scanSummary(rows)
 		if err != nil {
-			rows.Close()
+			_ = rows.Close() // the Scan error is the one to report
 			return nil, err
 		}
 		out = append(out, h)
 		ids = append(ids, h.HostID)
 	}
-	rows.Close()
+	_ = rows.Close() // Next returning false closed it; rows.Err reports the outcome
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -297,14 +297,14 @@ func bindings(ctx context.Context, tx *sql.Tx, cond string, args ...any) ([]Bind
 		var ended sql.NullInt64
 		var conflict int
 		if err := rows.Scan(&id, &b.IP, &first, &last, &ended, &conflict); err != nil {
-			rows.Close()
+			_ = rows.Close() // the Scan error is the one to report
 			return nil, err
 		}
 		b.FirstSeen, b.LastSeen, b.EndedAt, b.Conflict = timeOf(first), timeOf(last), timePtr(ended), conflict == 1
 		out = append(out, b)
 		ids = append(ids, id)
 	}
-	rows.Close()
+	_ = rows.Close() // Next returning false closed it; rows.Err reports the outcome
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -317,13 +317,13 @@ func bindings(ctx context.Context, tx *sql.Tx, cond string, args ...any) ([]Bind
 			var s SourceSeen
 			var first, last int64
 			if err := src.Scan(&s.Source, &first, &last); err != nil {
-				src.Close()
+				_ = src.Close() // the Scan error is the one to report
 				return nil, err
 			}
 			s.FirstSeen, s.LastSeen = timeOf(first), timeOf(last)
 			out[i].Sources = append(out[i].Sources, s)
 		}
-		src.Close()
+		_ = src.Close() // Next returning false closed it; src.Err reports the outcome
 		if err := src.Err(); err != nil {
 			return nil, err
 		}
@@ -757,6 +757,23 @@ func normalizeFilter(kind QueryKind, v string) (string, error) {
 // never loads two years of events at once.
 const DefaultEventLimit = 10000
 
+// MaxListLimit is the largest limit the list reads accept (observations,
+// roll-ups, events, DHCP leases and exchanges), online and `--offline`
+// alike: each read materialises every row it returns.
+const MaxListLimit = 10000
+
+// boundLimit returns def for a limit of zero or less, and an ErrBadQuery
+// for one above MaxListLimit.
+func boundLimit(limit, def int) (int, error) {
+	switch {
+	case limit <= 0:
+		return def, nil
+	case limit > MaxListLimit:
+		return 0, fmt.Errorf("%w: limit at most %d, got %d", ErrBadQuery, MaxListLimit, limit)
+	}
+	return limit, nil
+}
+
 // Events lists the latest events matching f (at most f.Limit, default
 // DefaultEventLimit), in time order.
 func (r *Reader) Events(ctx context.Context, f EventFilter) ([]Event, error) {
@@ -767,8 +784,8 @@ func (r *Reader) Events(ctx context.Context, f EventFilter) ([]Event, error) {
 	if f.IP, err = normalizeFilter(KindIP, f.IP); err != nil {
 		return nil, err
 	}
-	if f.Limit <= 0 {
-		f.Limit = DefaultEventLimit
+	if f.Limit, err = boundLimit(f.Limit, DefaultEventLimit); err != nil {
+		return nil, err
 	}
 	var w where
 	timeRange(&w, "e.ts", f.Since, f.Until)
@@ -825,12 +842,12 @@ func (r *Reader) Observations(ctx context.Context, f ObservationFilter) ([]Obser
 		return nil, err
 	}
 	w := observationWhere(f, "o.ts")
-	limit := f.Limit
-	if limit <= 0 {
-		limit = DefaultObservationLimit
+	limit, err := boundLimit(f.Limit, DefaultObservationLimit)
+	if err != nil {
+		return nil, err
 	}
 	out := []Observation{}
-	err := r.read(ctx, func(tx *sql.Tx) error {
+	err = r.read(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT o.id, o.ts, c.interface, o.source, coalesce(o.mac, ''), coalesce(o.ip, ''),
 			coalesce(o.hostname, ''), coalesce(o.name_type, ''), coalesce(o.service_json, ''), coalesce(o.meta_json, ''), coalesce(o.host_id, '')
 			FROM observations o JOIN network_contexts c ON c.id = o.context_id`+w.sql()+
@@ -893,12 +910,12 @@ func (r *Reader) Rollups(ctx context.Context, f ObservationFilter) ([]Rollup, er
 		return nil, err
 	}
 	w := observationWhere(f, "o.hour")
-	limit := f.Limit
-	if limit <= 0 {
-		limit = DefaultObservationLimit
+	limit, err := boundLimit(f.Limit, DefaultObservationLimit)
+	if err != nil {
+		return nil, err
 	}
 	out := []Rollup{}
-	err := r.read(ctx, func(tx *sql.Tx) error {
+	err = r.read(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT o.hour, c.interface, coalesce(o.host_id, ''), o.source, coalesce(o.mac, ''), coalesce(o.ip, ''),
 			o.count, o.first_ts, o.last_ts FROM observation_rollups o JOIN network_contexts c ON c.id = o.context_id`+w.sql()+
 			fmt.Sprintf(` ORDER BY o.hour DESC, o.id DESC LIMIT %d`, limit), w.args...)
@@ -992,7 +1009,7 @@ func endpointsAt(ctx context.Context, tx *sql.Tx, eps []Endpoint, t time.Time) (
 		for rows.Next() {
 			var ts int64
 			if err := rows.Scan(&e.LastResult, &ts, &e.HostID, &e.LastDetail, &e.MAC); err != nil {
-				rows.Close()
+				_ = rows.Close() // the Scan error is the one to report
 				return nil, err
 			}
 			at := timeOf(ts)
@@ -1004,7 +1021,7 @@ func endpointsAt(ctx context.Context, tx *sql.Tx, eps []Endpoint, t time.Time) (
 				e.LastOpenAt = &at
 			}
 		}
-		rows.Close()
+		_ = rows.Close() // Next returning false closed it; rows.Err reports the outcome
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
@@ -1038,7 +1055,7 @@ func (r *Reader) Interfaces(ctx context.Context) ([]InterfaceInfo, error) {
 			var id, first, last int64
 			var ev string
 			if err := rows.Scan(&id, &i.Name, &first, &last, &i.Hosts, &ev); err != nil {
-				rows.Close()
+				_ = rows.Close() // the Scan error is the one to report
 				return err
 			}
 			i.FirstSeen, i.LastSeen, i.Prefixes = timeOf(first), timeOf(last), []string{}
@@ -1053,7 +1070,7 @@ func (r *Reader) Interfaces(ctx context.Context) ([]InterfaceInfo, error) {
 			out = append(out, i)
 			ids = append(ids, id)
 		}
-		rows.Close()
+		_ = rows.Close() // Next returning false closed it; rows.Err reports the outcome
 		if err := rows.Err(); err != nil {
 			return err
 		}
@@ -1065,12 +1082,12 @@ func (r *Reader) Interfaces(ctx context.Context) ([]InterfaceInfo, error) {
 			for ps.Next() {
 				var p string
 				if err := ps.Scan(&p); err != nil {
-					ps.Close()
+					_ = ps.Close() // the Scan error is the one to report
 					return err
 				}
 				out[k].Prefixes = append(out[k].Prefixes, p)
 			}
-			ps.Close()
+			_ = ps.Close() // Next returning false closed it; ps.Err reports the outcome
 			if err := ps.Err(); err != nil {
 				return err
 			}
@@ -1217,13 +1234,13 @@ func (r *Reader) evidenceTx(ctx context.Context, tx *sql.Tx, id string, since ti
 		var c SourceCount
 		var first, last int64
 		if err := rows.Scan(&c.Source, &c.IP, &c.Count, &first, &last); err != nil {
-			rows.Close()
+			_ = rows.Close() // the Scan error is the one to report
 			return ev, err
 		}
 		c.FirstSeen, c.LastSeen = timeOf(first), timeOf(last)
 		ev.Counts = append(ev.Counts, c)
 	}
-	rows.Close()
+	_ = rows.Close() // Next returning false closed it; rows.Err reports the outcome
 	if err := rows.Err(); err != nil {
 		return ev, err
 	}

@@ -301,6 +301,9 @@ func TestOfflineAndUsage(t *testing.T) {
 		{"evidence csv", []string{"-o", "csv", "hosts", "evidence", "x"}, ExitUsage, "", "not supported"},
 		{"watch csv", []string{"-o", "csv", "watch"}, ExitUsage, "", "not supported"},
 		{"show csv", []string{"-o", "csv", "hosts", "show", "x"}, ExitUsage, "", "not supported"},
+		{"limit too large", []string{"events", "list", "--limit", "10001"}, ExitUsage, "", "limit at most 10000"},
+		{"offline limit too large", []string{"--offline", "observations", "list", "--limit", "1000000000"}, ExitUsage, "", "limit at most 10000"},
+		{"offline limit at most", []string{"--offline", "dhcp", "leases", "--limit", "10000"}, 0, "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

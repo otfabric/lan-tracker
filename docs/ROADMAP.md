@@ -35,6 +35,8 @@ Decided against for now; each needs a new recorded decision in `REQUIREMENTS.md`
 - **More CLI commands.** `neighbors list` (the kernel neighbour table as the daemon sees it), `interfaces show` (one interface in detail), `scan status` (a running operator scan; today `daemon status` shows the last one), `db vacuum` (offline) and `db export`. Each needs a `CLI.md` specification, a `store.Reader` query and an API endpoint (`docs/COMMON_TASKS.md`).
 - **Coloured table output.** `--no-color` is accepted, but no command prints colour.
 - **Recording periodic passes as scans.** The `scans.trigger` column accepts `scheduled`, but only operator scans are written; periodic passes show in `daemon status` (last pass) and metrics only.
+- **A syslog receiver.** Access points and routers (for example ASUS AiMesh) log Wi-Fi associations, WPA failures and band steering over syslog; the web UI could chart them next to the tracker's own evidence. Deferred when the web UI was decided (21 Nov 2026, ADR 0012): it is a new collector with its own listener, parser, storage and retention, and needs its own specification and decision.
+- **A desktop shell for the web UI.** A Wails v3 app like OT Fabric's explorers, wrapping the same frontend and talking to a daemon over an SSH tunnel. Deferred (ADR 0012); the browser through `ui url` covers it today.
 - **The `ndp_probe` source.** Defined and accepted in replay files (handled like `passive_ndp`), but no engine emits it until IPv6 active probing exists.
 
 ## Known gaps and limitations
@@ -73,4 +75,4 @@ Scenarios that `TEST_PLAN.md` (Acceptance matrix) marks partly covered or open, 
 
 ## Out of scope (not planned)
 
-Device identification of any kind, SYN or UDP port scanning, VLAN tagging, a web UI, alerting, any data leaving the box and the rest of the list in `REQUIREMENTS.md` §4 and ADR 0011 (AGENTS.md rule 11). These are not roadmap items: do not build, design, scaffold or stub them without an explicit request and a recorded decision.
+Device identification of any kind, SYN or UDP port scanning, VLAN tagging, alerting, any data leaving the box and the rest of the list in `REQUIREMENTS.md` §4 and ADR 0011 (AGENTS.md rule 11). These are not roadmap items: do not build, design, scaffold or stub them without an explicit request and a recorded decision.

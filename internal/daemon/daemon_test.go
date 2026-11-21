@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -65,6 +66,9 @@ func (f *fakeNotifier) Reloading() error        { return f.record("RELOADING") }
 func (f *fakeNotifier) Stopping() error         { return f.record("STOPPING") }
 func (f *fakeNotifier) Watchdog() error         { return f.record("WATCHDOG") }
 func (f *fakeNotifier) Status(msg string) error { return f.record("STATUS=" + msg) }
+func (f *fakeNotifier) ExtendTimeout(d time.Duration) error {
+	return f.record("EXTEND_TIMEOUT=" + d.String())
+}
 func (f *fakeNotifier) WatchdogInterval() (int64, bool) {
 	return int64(f.watchdog), f.watchdog > 0
 }
@@ -254,6 +258,10 @@ func TestStartupAndShutdown(t *testing.T) {
 
 	if h.notifier.count("READY") != 1 || h.notifier.count("STATUS=running") != 1 {
 		t.Errorf("notifications = %v", h.notifier.snapshot())
+	}
+	// The start timeout is extended while the database opens, before READY.
+	if calls := h.notifier.snapshot(); len(calls) == 0 || calls[0] != "EXTEND_TIMEOUT=30s" {
+		t.Errorf("notifications = %v", calls)
 	}
 	want := map[string]platform.State{
 		"capture": platform.StateRunning, "interface": platform.StateRunning, "neighbor": platform.StateRunning,
@@ -584,6 +592,9 @@ logging: { format: text }
 		"lan_tracker_active_disabled 0",
 		`lan_tracker_collector_up{interface="eth1",collector="neighbor"} 1`,
 		`lan_tracker_dhcp_servers{interface="eth1",status="unchecked"} 0`,
+		`lan_tracker_hosts_evicted_total{interface="eth1"} 0`,
+		`lan_tracker_observations_refused_total{interface="eth1"} 0`,
+		`lan_tracker_dhcp_leases_evicted_total{interface="eth1"} 0`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("metrics lack %q", want)
@@ -646,5 +657,29 @@ func TestSocketInUse(t *testing.T) {
 		Notifier: &fakeNotifier{}, Signals: make(chan os.Signal)})
 	if err == nil || !strings.Contains(err.Error(), "another daemon is listening") {
 		t.Errorf("second daemon: %v", err)
+	}
+}
+
+// TestExtendStart: the start timeout is extended at once and then
+// periodically, with a watchdog ping, until stopped.
+func TestExtendStart(t *testing.T) {
+	old := startExtendEvery
+	startExtendEvery = 5 * time.Millisecond
+	defer func() { startExtendEvery = old }()
+	f := &fakeNotifier{}
+	d := &Daemon{notifier: f, log: slog.New(slog.DiscardHandler)}
+	stop := d.extendStart()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.count("EXTEND_TIMEOUT=30s") < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("notifications = %v", f.snapshot())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stop()
+	n := f.count("EXTEND_TIMEOUT=30s")
+	time.Sleep(30 * time.Millisecond)
+	if f.count("EXTEND_TIMEOUT=30s") != n || f.count("WATCHDOG") != n {
+		t.Errorf("after stop: %v", f.snapshot())
 	}
 }

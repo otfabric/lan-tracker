@@ -22,6 +22,8 @@ jobs:
       id-token: write # Codecov OIDC token exchange
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: mod-verify, fmt-check, tidy-check, vet, lint, vuln, tests with race and coverage
         env:
           LT_REQUIRE_KERNEL: "1" # the runner has what internal/platform's tests need: a skip is a failure
@@ -43,12 +45,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: make fuzz FUZZTIME=30s
 
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Network integration tests (Docker, CAP_NET_RAW only)
         env:
           LT_REQUIRE_NET: "1" # a missing LT_TEST_* or IPv6 network is a failure here, not a skip
@@ -61,6 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Static linux/amd64 and linux/arm64 binaries, capcheck and the release tarballs
         run: make package

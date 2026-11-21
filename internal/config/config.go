@@ -26,6 +26,7 @@ type Config struct {
 	Storage    StorageConfig            `yaml:"storage" json:"storage"`
 	API        APIConfig                `yaml:"api" json:"api"`
 	Metrics    MetricsConfig            `yaml:"metrics" json:"metrics"`
+	UI         UIConfig                 `yaml:"ui" json:"ui"`
 	Logging    LoggingConfig            `yaml:"logging" json:"logging"`
 	Replay     ReplayConfig             `yaml:"replay" json:"replay"`
 }
@@ -238,6 +239,11 @@ type IdentityConfig struct {
 	NameExpiry        Duration `yaml:"name_expiry" json:"name_expiry"`
 	ProxyARPThreshold int      `yaml:"proxy_arp_threshold" json:"proxy_arp_threshold"`
 	OUIOverride       string   `yaml:"oui_override" json:"oui_override"`
+	// MaxHostsPerInterface caps the hosts the correlator holds per
+	// interface, and the open DHCP leases (ADR 0013, docs/DATA_MODEL.md
+	// §5.9): a new MAC on a full interface evicts the host missing the
+	// longest, or is refused when none is missing.
+	MaxHostsPerInterface int `yaml:"max_hosts_per_interface" json:"max_hosts_per_interface"`
 }
 
 // StorageConfig configures the SQLite database.
@@ -263,6 +269,13 @@ type APIConfig struct {
 // MetricsConfig enables /metrics on the local TCP listener.
 type MetricsConfig struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// UIConfig enables the web user interface (ADR 0012): the daemon serves
+// it on a loopback listener of its own, behind a bearer token.
+type UIConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Listen  string `yaml:"listen" json:"listen"`
 }
 
 // LoggingConfig configures logging.

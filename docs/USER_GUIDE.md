@@ -106,6 +106,8 @@ TCP endpoints:
 
 `Last seen` lists the three kinds of presence evidence apart. A name is `fresh`, `expired` (its TTL ran out since it was last advertised) or `stale`; expired names stay on record, because time alone never ends a name.
 
+The tracker holds at most `identity.max_hosts_per_interface` hosts per interface (4096 by default; ADR 0013). On a full interface a new MAC evicts the host that has been MISSING the longest (`HOST_EVICTED`; the host keeps its history and comes back under the same ID if its MAC returns). When no host is missing, frames from new MACs are dropped and counted (`HOST_CAP_REACHED`, `lan_tracker_observations_refused_total`). Normal OT segments stay far below the cap; reaching it means a segment shows unusually many MACs.
+
 ## 4. Who has, and who had, this address?
 
 Now:
@@ -569,7 +571,7 @@ TIME                  TYPE             IFACE  MAC  VALUE                        
 * written before the system clock was synchronised: the time may be off
 ```
 
-`LAN_TRACKER_ACTIVE_DISABLED=1` in the unit's environment forces active discovery off regardless (`active enable` then refuses). Periodic probing starts with `active.arp`, `active.icmp`, `active.tcp` and `active.names` in the configuration and `sudo lan-tracker config reload`; `daemon status` shows each probe's last pass.
+`LAN_TRACKER_ACTIVE_DISABLED=1` (or `true`, `yes`) in the unit's environment forces active discovery off regardless (`active enable` then refuses); a value other than `0`, `false`, `no` or empty forces it off too and logs a warning. Periodic probing starts with `active.arp`, `active.icmp`, `active.tcp` and `active.names` in the configuration and `sudo lan-tracker config reload`; `daemon status` shows each probe's last pass.
 
 ## 12. When the daemon is down: offline mode
 
@@ -651,3 +653,32 @@ Compaction runs hourly: raw observations older than 7 days are folded into hourl
 | Warnings in the journal | `journalctl -u lan-tracker -p warning` |
 | Was the tracker blind? | `journalctl -u lan-tracker EVENT=observation_gap` |
 | Stop all probing now | `sudo lan-tracker active disable --reason "..."` |
+| The same, as charts in a browser | `sudo lan-tracker ui url` (§16) |
+
+## 16. The web UI
+
+The same history as the commands above, as charts: activity over time by how the tracker learned it, presence, what changed, DHCP outcomes, a TCP reachability matrix, every device with its address history and timeline, and the tracker's own health. Each view shows the command that gives the same answer. It is off by default and changes nothing on the network.
+
+Turn it on in `/etc/lan-tracker/config.yaml` and restart (`ui` is not reloaded):
+
+```yaml
+ui:
+  enabled: true
+  listen: 127.0.0.1:9735
+```
+
+```bash
+sudo systemctl restart lan-tracker
+sudo lan-tracker ui url
+```
+
+`ui url` prints `http://127.0.0.1:9735/#token=…`. The part after `#token=` is the access token: treat the URL like a password. The UI listens on loopback only, so from your workstation forward the port first, then open the URL there:
+
+```bash
+ssh -N -L 9735:127.0.0.1:9735 user@edge-box
+```
+
+- **Describing devices.** On a device's page, *Edit* sets its description, as `hosts set` does; the event records the actor `ui`. Nothing else can be changed from the browser: the kill switch, scans and `config reload` stay on the command line.
+- **Live.** New events arrive as they happen (the *LIVE* dot in the header); the charts refresh every 30 seconds.
+- **Revoking access.** The token is kept in `ui.token` next to the database. Delete it and restart the daemon to invalidate every URL handed out; `ui url` then prints the new one.
+- **Empty charts** mean nothing was recorded, never that nothing was there.

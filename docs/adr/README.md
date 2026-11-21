@@ -29,4 +29,6 @@ If an ADR and a specification disagree, stop and ask (`AGENTS.md` §2).
 | [0008](0008-active-discovery-safety-envelope.md) | Active discovery inside a fixed OT safety envelope | Accepted; amended by 0011 (probe starts) |
 | [0009](0009-operator-changes-through-the-daemon.md) | Operator changes travel through the bus to the correlator | Accepted |
 | [0010](0010-precomputed-oui-table.md) | The OUI table is precomputed and searched in place | Accepted |
-| [0011](0011-connectivity-tracker-scope.md) | A connectivity tracker with history, without identification; probe starts as the rate contract | Accepted |
+| [0011](0011-connectivity-tracker-scope.md) | A connectivity tracker with history, without identification; probe starts as the rate contract | Accepted; UI item superseded by 0012 |
+| [0012](0012-web-ui-served-by-the-daemon.md) | An opt-in web UI, served by the daemon on loopback with a token; descriptions its only write | Accepted |
+| [0013](0013-host-cap-per-interface.md) | Timers from a deadline queue; a per-interface host cap that evicts the longest-missing host | Accepted |

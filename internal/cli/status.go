@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
 	"github.com/otfabric/lan-tracker/internal/platform"
 	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
 	"github.com/otfabric/lan-tracker/internal/store"
@@ -70,8 +71,10 @@ func (a *app) statusText(w io.Writer, st api.Status) {
 	active := "enabled"
 	if st.Active.Disabled {
 		active = "DISABLED"
-		if st.Active.Forced {
-			active += " (" + "LAN_TRACKER_ACTIVE_DISABLED=1)"
+		if st.Active.Forced && strings.HasPrefix(st.Active.Reason, config.EnvActiveDisabled+"=") {
+			active += " (" + st.Active.Reason + ")"
+		} else if st.Active.Forced {
+			active += " (" + config.EnvActiveDisabled + " is set)"
 		} else if st.Active.Reason != "" {
 			active += " (" + st.Active.Reason + ")"
 		}

@@ -200,7 +200,7 @@ func TestEnvironmentSwitchCannotBeCleared(t *testing.T) {
 		t.Fatal(err)
 	}
 	backends, _, _, _, _ := fake.Backends()
-	d, err := New(Options{Load: config.LoadOptions{Path: cfgPath, Environ: []string{config.EnvActiveDisabled + "=1"}},
+	d, err := New(Options{Load: config.LoadOptions{Path: cfgPath, Environ: []string{config.EnvActiveDisabled + "=yes"}},
 		Stderr: &syncBuffer{}, Backends: &backends, Notifier: &fakeNotifier{}, Signals: make(chan os.Signal)})
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +223,7 @@ func TestEnvironmentSwitchCannotBeCleared(t *testing.T) {
 	}
 	got := queryDB(t, filepath.Join(dir, "data", "hosts.db"),
 		`SELECT json_extract(evidence_json, '$.actor') || ' ' || new_value FROM events WHERE type = 'ACTIVE_DISABLED' ORDER BY id`)
-	if len(got) != 2 || !strings.HasPrefix(got[0], "env active discovery disabled by env: LAN_TRACKER_ACTIVE_DISABLED=1") {
+	if len(got) != 2 || !strings.HasPrefix(got[0], "env active discovery disabled by env: LAN_TRACKER_ACTIVE_DISABLED=yes") {
 		t.Errorf("events = %v", got)
 	}
 }
@@ -459,5 +459,37 @@ func TestUnsyncedClockAtStartIsLogged(t *testing.T) {
 	st, err := api.NewClient(filepath.Join(h.dir, "api.sock"), 5*time.Second).Status(context.Background())
 	if err != nil || st.Clock != platform.ClockUnsynced {
 		t.Errorf("status clock = %q, %v", st.Clock, err)
+	}
+}
+
+// TestEnvSwitchUnknownValue: a value the daemon does not know keeps active
+// discovery off and is logged as a warning.
+func TestEnvSwitchUnknownValue(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(testConfig(dir, "info", "")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backends, _, _, _, _ := fake.Backends()
+	log := &syncBuffer{}
+	d, err := New(Options{Load: config.LoadOptions{Path: cfgPath, Environ: []string{config.EnvActiveDisabled + "=enabled"}},
+		Stderr: log, Backends: &backends, Notifier: &fakeNotifier{}, Signals: make(chan os.Signal)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- d.Run(ctx) }()
+	<-d.Ready()
+	st, err := api.NewClient(filepath.Join(dir, "api.sock"), 5*time.Second).Status(context.Background())
+	if err != nil || !st.Active.Disabled || !st.Active.Forced || st.Active.Reason != config.EnvActiveDisabled+"=enabled" {
+		t.Errorf("active state = %+v, %v", st.Active, err)
+	}
+	cancel()
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "treating it as set") {
+		t.Errorf("log:\n%s", log)
 	}
 }

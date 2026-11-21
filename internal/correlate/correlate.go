@@ -37,11 +37,15 @@ const (
 	causeExpiry    = "expiry"
 	causeIface     = "iface_monitor"
 	causeIntegrity = "integrity_check"
+	causeHostCap   = "host_cap"
 )
 
 // Options configures a Correlator.
 type Options struct {
-	Store   *store.Store
+	Store *store.Store
+	// Reader reads committed rows without making the writer commit: the
+	// host cap reads evicted hosts back through it (hostcap.go).
+	Reader  *store.Reader
 	Events  *events.Engine
 	Vendors *identify.Vendors
 	Clock   clock.Clock
@@ -61,6 +65,7 @@ type Options struct {
 // Correlator is the identity engine.
 type Correlator struct {
 	store   *store.Store
+	reader  *store.Reader
 	events  *events.Engine
 	vendors *identify.Vendors
 	clock   clock.Clock
@@ -72,6 +77,9 @@ type Correlator struct {
 
 	st         *state
 	advancedTo time.Time
+	timing     timing             // the thresholds the timers were computed with
+	due        []*host            // advance's buffer
+	bindingBuf []*binding         // bindingsByIP's buffer
 	gaps       map[gapKey]openGap // passive collectors not running, since when
 
 	unbound atomic.Uint64
@@ -85,8 +93,8 @@ type Correlator struct {
 // New loads the current state from the store and makes sure every
 // configured interface has a network context.
 func New(ctx context.Context, o Options) (*Correlator, error) {
-	if o.Store == nil || o.Events == nil || o.Config == nil {
-		return nil, errors.New("correlate: store, events and config are required")
+	if o.Store == nil || o.Reader == nil || o.Events == nil || o.Config == nil {
+		return nil, errors.New("correlate: store, reader, events and config are required")
 	}
 	if o.Clock == nil {
 		o.Clock = clock.Real()
@@ -101,7 +109,7 @@ func New(ctx context.Context, o Options) (*Correlator, error) {
 		o.NewID = func() string { return uuid.Must(uuid.NewV7()).String() }
 	}
 	c := &Correlator{
-		store: o.Store, events: o.Events, vendors: o.Vendors, clock: o.Clock, log: o.Logger,
+		store: o.Store, reader: o.Reader, events: o.Events, vendors: o.Vendors, clock: o.Clock, log: o.Logger,
 		data: o.DataDriven, tick: o.Tick, newID: o.NewID, st: newState(), gaps: map[gapKey]openGap{},
 		bySource: map[observation.Source]*atomic.Uint64{}, unboundBySource: map[observation.Source]*atomic.Uint64{},
 	}
@@ -130,6 +138,9 @@ func New(ctx context.Context, o Options) (*Correlator, error) {
 		n := &netContext{id: c.st.nextContextID, iface: ic.Name, prefixes: map[netip.Prefix]*prefixRow{}, lastSeen: now}
 		c.st.contexts[n.iface], c.st.contextsByID[n.id] = n, n
 		c.dbInsertContext(ctx, n, now)
+	}
+	for _, n := range c.st.contextsByID {
+		n.caps = &capCounters{}
 	}
 	if !c.data { // replay has no downtime of its own
 		if err := c.downtime(ctx, now); err != nil {

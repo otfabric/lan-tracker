@@ -51,6 +51,10 @@ var (
 	ErrRefused  = errors.New("probe refused")
 )
 
+// ErrPassCap reports a name pass stopped at its query cap
+// (Pass.MaxQueries): cut short, not failed.
+var ErrPassCap = errors.New("pass reached max_queries_per_pass")
+
 // Policy decides whether a probe may be sent at all; Budget asks it before
 // reserving a slot and again right before the send (NFR-SAFE-4).
 type Policy interface {
