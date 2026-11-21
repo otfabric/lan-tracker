@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/otfabric/lan-tracker/internal/events"
@@ -33,6 +34,16 @@ type netContext struct {
 	up       *bool                       // nil until the first link state
 	lastSeen time.Time
 	dirty    bool // lastSeen not yet written
+
+	// The host cap (ADR 0013, docs/DATA_MODEL.md §5.9): the context's hosts
+	// by last_seen, so the one missing the longest is found without a
+	// scan; its open DHCP leases by last ACK; how many of its hosts the
+	// database holds as evicted; and whether new MACs are being refused.
+	ages     pq[*host]
+	leaseQ   pq[*dhcpLease]
+	evicted  int
+	refusing bool
+	caps     *capCounters
 }
 
 type prefixRow struct {
@@ -61,6 +72,15 @@ type host struct {
 	preferred string
 
 	description string // set by an operator (§5.8)
+
+	// Timers and the host cap (timers.go, hostcap.go): creation order (the
+	// deterministic order of simultaneous transitions), the next moment a
+	// timer may change the host, and the hosts' positions in the queues.
+	seq            uint64
+	wake           time.Time
+	timerPos       int
+	agePos         int
+	dirty, evicted bool
 
 	// Proxy-ARP detection (docs/DATA_MODEL.md §5.2): when this MAC last
 	// answered ARP for each address, and for those held by another live host.
@@ -114,8 +134,11 @@ type state struct {
 	contextsByID map[int64]*netContext
 	hosts        map[int64]map[string]*host // context id → MAC → host
 	hostsByMAC   map[string][]*host         // MAC → hosts on every context
-	order        []*host                    // creation order, for deterministic timers
-	holders      map[ipKey][]*binding       // open bindings per IP
+	byID         map[string]*host
+	nextSeq      uint64
+	timers       pq[*host]
+	dirty        []*host              // changed since their timers were last computed
+	holders      map[ipKey][]*binding // open bindings per IP
 	ipLastChange map[ipKey]time.Time
 
 	dhcpServers map[dhcpKey]*dhcpServer   // §5.6
@@ -123,6 +146,14 @@ type state struct {
 	records     map[recordKey]*record     // open name records, §5.4
 	exchanges   map[exchKey]*exchange     // open DHCP exchanges, §5.6
 	leases      map[leaseKey]*dhcpLease   // clients' open leases, §5.6
+
+	// Evicted hosts whose writes may not be committed yet (hostcap.go), by
+	// context and MAC and by host id, and in the order their markers were
+	// queued.
+	pendingByMAC map[evictedKey]*pendingRow
+	pendingByID  map[string]*pendingRow
+	pendingQ     []*pendingRow
+
 	// exchangesSwept is when idle exchanges were last closed.
 	exchangesSwept time.Time
 
@@ -141,10 +172,11 @@ type openScan struct {
 func newState() *state {
 	return &state{
 		contexts: map[string]*netContext{}, contextsByID: map[int64]*netContext{},
-		hosts: map[int64]map[string]*host{}, hostsByMAC: map[string][]*host{},
+		hosts: map[int64]map[string]*host{}, hostsByMAC: map[string][]*host{}, byID: map[string]*host{},
 		holders: map[ipKey][]*binding{}, ipLastChange: map[ipKey]time.Time{}, dhcpServers: map[dhcpKey]*dhcpServer{},
 		endpoints: map[endpointKey]*endpoint{}, records: map[recordKey]*record{},
 		exchanges: map[exchKey]*exchange{}, leases: map[leaseKey]*dhcpLease{},
+		pendingByMAC: map[evictedKey]*pendingRow{}, pendingByID: map[string]*pendingRow{},
 	}
 }
 
@@ -155,10 +187,43 @@ func (s *state) addHost(h *host) {
 	key := h.mac.String()
 	s.hosts[h.ctx.id][key] = h
 	s.hostsByMAC[key] = append(s.hostsByMAC[key], h)
-	s.order = append(s.order, h)
+	s.byID[h.id] = h
+	s.nextSeq++
+	h.seq = s.nextSeq
+	h.ctx.hostAges().set(h)
+	s.touch(h)
+}
+
+// removeHost forgets an evicted host (hostcap.go). Its bindings are
+// already closed.
+func (s *state) removeHost(h *host) {
+	key := h.mac.String()
+	delete(s.hosts[h.ctx.id], key)
+	hs := s.hostsByMAC[key]
+	if i := slices.Index(hs, h); i >= 0 {
+		hs = slices.Delete(hs, i, i+1)
+	}
+	if len(hs) == 0 {
+		delete(s.hostsByMAC, key)
+	} else {
+		s.hostsByMAC[key] = hs
+	}
+	delete(s.byID, h.id)
+	s.hostTimers().remove(h)
+	h.ctx.hostAges().remove(h)
+	h.evicted = true
+}
+
+// touch marks h for its timers to be computed again at the next advance.
+func (s *state) touch(h *host) {
+	if !h.dirty {
+		h.dirty = true
+		s.dirty = append(s.dirty, h)
+	}
 }
 
 func (s *state) addBinding(b *binding) {
+	s.touch(b.host)
 	b.host.bindings[b.ip] = b
 	k := ipKey{b.host.ctx.id, b.ip}
 	s.holders[k] = append(s.holders[k], b)
@@ -260,7 +325,7 @@ func (s *state) load(ctx context.Context, tx *sql.Tx) error {
 	byID := map[string]*host{}
 	q(`SELECT host_id, context_id, mac, coalesce(oui_registrant, ''), presence, coalesce(preferred_name, ''), proxy_arp,
 		coalesce(description, ''), first_seen, last_seen, coalesce(last_frame_seen, 0), coalesce(last_address_confirmed, 0),
-		coalesce(last_endpoint_answer, 0) FROM hosts ORDER BY first_seen, host_id`, func(r *sql.Rows) error {
+		coalesce(last_endpoint_answer, 0) FROM hosts WHERE evicted_at IS NULL ORDER BY first_seen, host_id`, func(r *sql.Rows) error {
 		h := newHost()
 		var cid, first, last, frame, addr, answer int64
 		var mac, presence string
@@ -283,7 +348,20 @@ func (s *state) load(ctx context.Context, tx *sql.Tx) error {
 		byID[h.id] = h
 		return nil
 	})
-	q(`SELECT id, host_id, ip, conflict, first_seen, last_seen FROM addresses WHERE ended_at IS NULL`, func(r *sql.Rows) error {
+	q(`SELECT context_id, count(*) FROM hosts WHERE evicted_at IS NOT NULL GROUP BY context_id`, func(r *sql.Rows) error {
+		var cid int64
+		var n int
+		if err := r.Scan(&cid, &n); err != nil {
+			return err
+		}
+		if c := s.contextsByID[cid]; c != nil {
+			c.evicted = n
+		}
+		return nil
+	})
+	// An evicted host's bindings were closed when it was evicted.
+	q(`SELECT id, host_id, ip, conflict, first_seen, last_seen FROM addresses WHERE ended_at IS NULL
+		AND host_id NOT IN (SELECT host_id FROM hosts WHERE evicted_at IS NOT NULL)`, func(r *sql.Rows) error {
 		b := &binding{}
 		var hid, ip string
 		var conflict int

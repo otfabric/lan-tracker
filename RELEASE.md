@@ -1,5 +1,101 @@
 # lan-tracker Releases
 
+## v0.4.1
+
+**Date:** 2026-11-21
+**Previous release:** v0.4.0
+
+### Summary
+
+Patch release: kernel neighbour-table entries no longer date a new address binding before it existed.
+
+### Fixed
+
+- A binding first learned from the kernel neighbour table was stamped with the kernel's confirmation time. For an entry the kernel had just created from a received packet, that time is synthetic: twice `base_reachable_time` (60 s by default) before the entry existed. For an entry whose MAC a received packet had changed, it is the previous MAC's last confirmation, possibly hours earlier. `HOST_DISCOVERED`, `IP_ADDED` and `DUPLICATE_IP_DETECTED` from such entries, and the bindings' start times, were dated that much too early, and a second holder of an address could appear to have claimed it first. Such a binding is now stamped no earlier than the entry's last update (`ndm_updated`); re-confirmations keep their confirmation time, so a lingering STALE entry still adds no fresh evidence. Data already recorded is not changed.
+
+---
+
+## v0.4.0
+
+**Date:** 2026-11-21
+**Previous release:** v0.3.0
+
+### Summary
+
+Minor release: the web UI can listen on an address of the box, and `daemon status` says whether the UI is on and where. Nothing changes for a configuration that keeps the default `ui.listen`.
+
+### Added
+
+- `ui.listen` may be `localhost` or any IP address of the box, `0.0.0.0` or `::` for all of them, so the UI can be opened from the LAN without an SSH tunnel (ADR 0012, Amendment). The default stays `127.0.0.1:9735`. Off loopback the UI takes a `Host` that is an IP address or the box's hostname and still refuses other names, and the daemon logs a warning at start: the UI is plain HTTP, so the token and the data travel unencrypted.
+- `sudo lan-tracker ui url` prints one URL per address the UI answers at (loopback first) when it listens on `0.0.0.0` or `::`; `GET /v1/ui` has a new `urls` list.
+- `daemon status` prints a `Web UI:` line (`disabled`, or `enabled on <listen>`), and `/v1/status` has a `ui` object (`enabled`, `listen`; never the token).
+
+### Changed
+
+- `ui.listen` must use another port than `api.listen` (it had to differ only as an address).
+
+---
+
+## v0.3.0
+
+**Date:** 2026-11-21
+**Previous release:** v0.2.4
+
+### Summary
+
+Minor release: an optional **web UI** served by the daemon, a **per-interface host cap**, and tighter bounds on the local API, passive capture and active name lookups. Migration 0002 runs at start-up. The web UI is off by default; nothing else changes for a site that does not reach the new limits.
+
+### Added
+
+- **Web UI** (`ui.enabled`, off by default; ADR 0012). The daemon serves an embedded UI on a loopback listener (`ui.listen`, default `127.0.0.1:9735`) with a bearer token kept in `ui.token` next to the database. `sudo lan-tracker ui url` prints the URL carrying it; reach it over an SSH tunnel. The UI reads what the CLI reads and changes only host descriptions (actor `ui`). `make frontend` and `make frontend-check` build and test it in a pinned Node container.
+- `GET /v1/activity` (the UI's charts; its default 24 h window ends at the daemon's clock, the recorded time under replay) and `GET /v1/ui` (socket only, `ui url`).
+- **Host cap** `identity.max_hosts_per_interface` (default 4096, reloads; ADR 0013). On a full interface a new MAC evicts the host MISSING the longest; with none missing, the observation is dropped and counted. The same cap bounds each interface's open DHCP leases. New events `HOST_EVICTED` (`evicted`) and `HOST_CAP_REACHED` (`host-cap`), new IP_REMOVED cause `host_cap`, and the metrics `lan_tracker_hosts_evicted_total`, `lan_tracker_observations_refused_total` and `lan_tracker_dhcp_leases_evicted_total` (label `interface`).
+- Migration 0002: `hosts.evicted_at`, and the `events` table rebuilt for the two new types. While the database opens the daemon extends systemd's start timeout every 10 s (`EXTEND_TIMEOUT_USEC`), so a long migration or integrity check does not fail the start (`deploy/README.md`, Upgrade).
+
+### Changed
+
+- Presence and address expiry are evaluated from a deadline queue: the correlator's cost per observation no longer grows with the number of hosts. Events and their order are unchanged.
+- `limit` on `/v1/observations` (also with `rollups=true`), `/v1/events`, `/v1/dhcp/leases` and `/v1/dhcp/exchanges`, and `--limit` on the matching CLI commands, is at most 10000: a larger value is a 400 from the API and exit 64 from the CLI, online and `--offline`.
+- A busy `api.listen` or `ui.listen` port no longer stops the daemon. It runs without that listener, `daemon status` reports `degraded` with the problem (exit 1), and the daemon retries the bind (1 s, doubling to 1 min).
+- The loopback listeners give reads a 30 s deadline, and allow at most 16 event streams at once on the loopback listeners together (503 above that; streams on the Unix socket are not counted); a stream write that does not finish within 10 s ends the stream. `/v1/db/check` is served on the Unix socket only.
+- `LAN_TRACKER_ACTIVE_DISABLED` accepts `1`, `true` and `yes` (any case) as set and `0`, `false`, `no` or empty as unset; any other value also sets the kill switch, with a warning at start. The reason recorded and shown is the assignment as given (`LAN_TRACKER_ACTIVE_DISABLED=yes`), no longer always `=1`; `daemon status` shows `DISABLED (LAN_TRACKER_ACTIVE_DISABLED is set)` when an operator's reason is kept instead.
+- `max_queries_per_pass` of active name lookups counts every query sent, CNAME follow-ups included; a pass that reaches it stops and shows as not complete. A CNAME whose target does not exist or cannot be resolved within the pass is kept as a negative answer.
+- Passive capture's repeat suppression keeps a fixed-size digest per observation instead of its full content, so its memory stays small whatever the frames carry.
+- ICMP echo requests use a random identifier from `crypto/rand`.
+- `ui.token` is opened without following symbolic links; a token file readable by others or owned by another user is replaced by a new one. A new token whose write fails leaves no partial file.
+- The UI's one write is recognised by its route, not by the request path.
+- Text decoded from frames (names, LLDP and DHCP strings) has format characters such as bidirectional overrides and zero-width marks replaced by a space, as control characters already were. A host description with a bidirectional formatting character is refused (400, exit 64).
+
+### Upgrade
+
+- Migration 0002 runs at the first start: about 40 s per million rows in `events` on a development machine (slower on a board under the unit's `CPUQuota`), and it temporarily needs free disk about the size of the `events` table and its indexes. v0.2.4 refuses the migrated database: copy `hosts.db` before upgrading, as [`deploy/README.md`](deploy/README.md#upgrade-and-rollback) shows.
+- Scripts that called `/v1/db/check` on `api.listen` must use the Unix socket (`lan-tracker db check`).
+
+### Build and CI
+
+- golangci-lint in the dev image is installed from its release tarball and checked against the published SHA-256; the Node image is pinned by digest.
+- Workflow checkouts no longer keep the job token in the git configuration, except the release job that pushes the tag.
+- Coverage of `internal/` is gated at 95% (was 90%).
+
+---
+
+## v0.2.4
+
+**Date:** 2026-11-14
+**Previous release:** v0.2.3
+
+No change to the application.
+
+### Security
+
+- Built with Go 1.27.4 (was 1.27.3). Go 1.27.4 fixes GO-2026-6859 in `net/http`, a crash of an HTTP/1 server through a race in the `MaxBytesReader` handling of request headers; govulncheck reported the API server as reachable from it. The dev image `build/dev.Dockerfile`, which also builds the release, is pinned to the new `golang:1.27-bookworm` digest.
+
+### Changed
+
+- CI: otfabric/engineering policy 1.6, the shared actions v3.8.0, and one pull request workflow with a single required check.
+
+---
+
 ## v0.2.3
 
 **Date:** 2026-10-31

@@ -18,6 +18,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/otfabric/lan-tracker/internal/config"
@@ -51,6 +53,14 @@ type Status struct {
 	Interfaces []InterfaceStatus         `json:"interfaces"`
 	Hosts      map[string]map[string]int `json:"hosts"` // interface → presence → count
 	LastScan   *store.Scan               `json:"last_scan"`
+	UI         UIStatus                  `json:"ui"`
+}
+
+// UIStatus says whether the web UI is enabled and where it listens (never
+// its token: `ui url` on the socket gives that).
+type UIStatus struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen,omitempty"`
 }
 
 // DatabaseStatus is the database part of the status.
@@ -93,7 +103,13 @@ type Options struct {
 	// Control serves the operator endpoints (kill switch, scans); nil
 	// answers them with 503.
 	Control Control
-	Logger  *slog.Logger
+	// UI serves the web user interface on a listener of its own when set
+	// (ADR 0012).
+	UI *UIOptions
+	// Now is the daemon's clock (recorded time under replay), for the
+	// default range of /v1/activity; nil is the wall clock.
+	Now    func() time.Time
+	Logger *slog.Logger
 }
 
 // Server serves the API.
@@ -101,12 +117,19 @@ type Server struct {
 	o    Options
 	mux  *http.ServeMux
 	done chan error
+
+	mu       sync.Mutex
+	problems map[string]string // optional listener → why it is not bound
+	streams  atomic.Int32      // open /v1/events/stream requests on the loopback listeners
 }
 
 // New returns a server.
 func New(o Options) *Server {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	if o.Now == nil {
+		o.Now = time.Now
 	}
 	s := &Server{o: o, mux: http.NewServeMux()}
 	for path, h := range map[string]http.HandlerFunc{
@@ -121,14 +144,14 @@ func New(o Options) *Server {
 		"/v1/history":             s.history,
 		"/v1/observations":        s.observations,
 		"/v1/events":              s.events,
-		"/v1/events/stream":       s.stream,
+		streamPath:                s.stream,
+		"/v1/activity":            s.activity,
 		"/v1/services":            s.services,
 		"/v1/dhcp/servers":        s.dhcpServers,
 		"/v1/dhcp/leases":         s.dhcpLeases,
 		"/v1/dhcp/exchanges":      s.dhcpExchanges,
 		"/v1/config":              s.config,
 		"/v1/db":                  s.db,
-		"/v1/db/check":            s.dbCheck,
 	} {
 		s.mux.HandleFunc(path, readOnly(h))
 	}
@@ -139,7 +162,7 @@ func New(o Options) *Server {
 		"/v1/scans":          s.scan,
 		"/v1/config/reload":  s.configReload,
 
-		"/v1/hosts/{id}/description": s.hostDescription,
+		descriptionPattern: s.hostDescription,
 	} {
 		s.mux.HandleFunc(path, postOnly(h))
 	}
@@ -169,12 +192,7 @@ func readOnly(h http.HandlerFunc) http.HandlerFunc {
 // SO_PEERCRED apply.
 func loopbackOnly(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if hst, _, err := net.SplitHostPort(r.Host); err == nil {
-			host = hst
-		}
-		ip := net.ParseIP(host)
-		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		if !loopbackHost(r) {
 			writeJSON(w, http.StatusForbidden, errorBody{Error: "Host must be a loopback address"})
 			return
 		}
@@ -187,6 +205,27 @@ func loopbackOnly(h http.Handler) http.Handler {
 	})
 }
 
+// readTimeoutDuration bounds a read on the loopback listeners: its context
+// ends after that, which ends the query. The event stream is not bounded.
+var readTimeoutDuration = 30 * time.Second
+
+// readTimeout gives every read but the event stream a deadline
+// (readTimeoutDuration).
+func readTimeout(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path != streamPath {
+			ctx, cancel := context.WithTimeout(r.Context(), readTimeoutDuration)
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// descriptionPattern is the route of a host's description, the web UI's
+// only write.
+const descriptionPattern = "/v1/hosts/{id}/description"
+
 // Handler returns the API handler (without /metrics).
 func (s *Server) Handler() http.Handler { return s.mux }
 
@@ -194,40 +233,69 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // set) and serves in the background until ctx is cancelled; Wait returns
 // once the servers have shut down. The socket is created with mode 0660 so
 // only its owner (root, under the reference unit) and group can use it.
+//
+// The socket is mandatory: Start fails when it cannot be created. The
+// loopback listeners (api.listen, ui.listen) are optional: when one cannot
+// be bound (another local process holds the port) the daemon keeps running
+// without it, Problems reports it, and it is retried with back-off until
+// it binds or ctx ends.
 func (s *Server) Start(ctx context.Context, socket, listen string) error {
 	ul, err := listenUnix(socket)
 	if err != nil {
 		return err
 	}
-	servers := []*http.Server{s.server(ctx, s.mux)}
-	listeners := []net.Listener{ul}
-	if listen != "" {
-		tl, err := net.Listen("tcp", listen)
-		if err != nil {
-			_ = ul.Close()
-			_ = os.Remove(socket)
-			return fmt.Errorf("api listener %s: %w", listen, err)
+	// GET /v1/ui hands out the UI's token and /v1/db/check runs a full
+	// integrity check, so both are served on the socket only, where file
+	// permissions apply.
+	sock := http.NewServeMux()
+	sock.Handle("/", s.mux)
+	sock.HandleFunc("/v1/ui", readOnly(s.uiInfo))
+	sock.HandleFunc("/v1/db/check", readOnly(s.dbCheck))
+	// rctx ends the retries of optional listeners, on ctx or a server
+	// error.
+	rctx, stop := context.WithCancel(ctx)
+	servers := []*http.Server{s.server(ctx, sock)}
+	errc := make(chan error, 3)
+	serve := func(srv *http.Server, l net.Listener) { go func() { errc <- srv.Serve(l) }() }
+	serve(servers[0], ul)
+	var retries sync.WaitGroup
+	// The first attempt is made here, so a free port is bound when Start
+	// returns; a busy one is retried in the background.
+	optional := func(name, addr string, h http.Handler) {
+		srv := s.server(ctx, h)
+		servers = append(servers, srv)
+		l, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+		if err == nil {
+			s.o.Logger.Info(name+" listening", "listen", addr)
+			serve(srv, l)
+			return
 		}
+		s.notBound(name, addr, err)
+		retries.Go(func() { s.retryOptional(rctx, name, addr, func(l net.Listener) { serve(srv, l) }) })
+	}
+	if listen != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/v1/", s.mux)
 		if s.o.Metrics != nil {
 			mux.Handle("GET /metrics", s.o.Metrics)
 		}
-		servers, listeners = append(servers, s.server(ctx, loopbackOnly(mux))), append(listeners, tl)
+		optional("api.listen", listen, loopbackOnly(readTimeout(mux)))
+	}
+	if s.o.UI != nil {
+		optional("ui.listen", s.o.UI.Listen, s.uiHandler())
 	}
 	s.done = make(chan error, 1)
-	errc := make(chan error, len(servers))
-	for i, srv := range servers {
-		go func() { errc <- srv.Serve(listeners[i]) }()
-	}
-	s.o.Logger.Info("api listening", "socket", socket, "listen", listen)
+	s.o.Logger.Info("api listening", "socket", socket)
 	go func() {
 		var err error
 		select {
 		case <-ctx.Done():
 		case err = <-errc:
 		}
-		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		stop()
+		retries.Wait() // no listener is bound after this
+		// ctx may be done already; shutdown gets its own deadline.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
 		for _, srv := range servers {
 			_ = srv.Shutdown(sctx)
@@ -241,6 +309,79 @@ func (s *Server) Start(ctx context.Context, socket, listen string) error {
 		s.done <- err
 	}()
 	return nil
+}
+
+// Back-off of an optional listener that could not be bound: the first
+// retry after listenRetryMin, doubling up to listenRetryMax. Variables so
+// a test can shorten them.
+var (
+	listenRetryMin = time.Second
+	listenRetryMax = time.Minute
+)
+
+// notBound records that an optional listener could not be bound, logging
+// it the first time.
+func (s *Server) notBound(name, addr string, err error) {
+	if s.setProblem(name, fmt.Sprintf("%s %s: not listening (%v); retrying", name, addr, err)) {
+		s.o.Logger.Warn(name+" not listening; the daemon runs without it and retries", "listen", addr, "err", err)
+	}
+}
+
+// retryOptional retries an optional loopback listener with back-off until
+// it binds, handing it to serve, or ctx ends. While it is not bound,
+// Problems names it.
+func (s *Server) retryOptional(ctx context.Context, name, addr string, serve func(net.Listener)) {
+	defer s.setProblem(name, "") // bound, or no longer tried
+	var lc net.ListenConfig
+	for delay := listenRetryMin; ; delay = min(2*delay, listenRetryMax) {
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		l, err := lc.Listen(ctx, "tcp", addr)
+		if err == nil {
+			s.o.Logger.Info(name+" listening", "listen", addr)
+			serve(l)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		s.notBound(name, addr, err)
+	}
+}
+
+// setProblem records (or with "" clears) the problem of an optional
+// listener; it reports whether there was none before.
+func (s *Server) setProblem(name, msg string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, had := s.problems[name]
+	if msg == "" {
+		delete(s.problems, name)
+	} else {
+		if s.problems == nil {
+			s.problems = map[string]string{}
+		}
+		s.problems[name] = msg
+	}
+	return !had
+}
+
+// Problems lists the optional listeners that are not bound, for the
+// status (degraded while any is missing).
+func (s *Server) Problems() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.problems))
+	for _, p := range s.problems {
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Wait blocks until the servers started by Start have shut down.
@@ -415,6 +556,24 @@ func EventType(name string) (events.Type, bool) {
 	return events.ByCLIName(strings.ToLower(name))
 }
 
+func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
+	p := &params{r: r}
+	f := store.ActivityFilter{Interface: p.str("interface"), HostID: p.str("host"), Since: p.time("since"), Until: p.time("until"),
+		Buckets: p.int("buckets")}
+	if p.err != nil {
+		s.fail(w, p.err)
+		return
+	}
+	if f.Until.IsZero() {
+		f.Until = s.o.Now().UTC()
+	}
+	if f.Since.IsZero() {
+		f.Since = f.Until.Add(-24 * time.Hour)
+	}
+	a, err := s.o.Reader.Activity(r.Context(), f)
+	s.reply(w, a, err)
+}
+
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.o.Status(r.Context()))
 }
@@ -562,6 +721,19 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	s.reply(w, evs, err)
 }
 
+// streamPath is the live event stream.
+const streamPath = "/v1/events/stream"
+
+// Bounds of the event stream: at most MaxStreams streams at once on the
+// loopback listeners (503 above), and a write that does not complete within
+// streamWriteTimeout (a client that stopped reading) ends the stream. The
+// Unix socket is not counted: file permissions already limit who can use
+// it, and the operator's `watch` must not be refused because loopback
+// clients hold every place.
+const MaxStreams = 16
+
+var streamWriteTimeout = 10 * time.Second
+
 // stream writes live events as JSON lines until the client goes away
 // (`watch`). Filters: interface, type (repeatable) and port (service
 // events of that port).
@@ -576,13 +748,27 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, errors.New("event stream unavailable"))
 		return
 	}
+	if !onSocket(r) {
+		if s.streams.Add(1) > MaxStreams {
+			s.streams.Add(-1)
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: fmt.Sprintf("at most %d event streams at once on the loopback listeners", MaxStreams)})
+			return
+		}
+		defer s.streams.Add(-1)
+	}
 	ch, cancel := s.o.Events.Subscribe(256)
 	defer cancel()
+	rc := http.NewResponseController(w)
+	// deadline arms the write deadline; a connection without one (a test
+	// recorder) just has none.
+	deadline := func() { _ = rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout)) }
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }() // the connection may serve more requests
+	flush := func() bool { err := rc.Flush(); return err == nil || errors.Is(err, http.ErrNotSupported) }
 	w.Header().Set("Content-Type", "application/x-ndjson")
+	deadline()
 	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-	if flusher != nil {
-		flusher.Flush()
+	if !flush() {
+		return
 	}
 	enc := json.NewEncoder(w)
 	for {
@@ -596,11 +782,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			if !matches(e, iface, types, port) {
 				continue
 			}
+			deadline()
 			if err := enc.Encode(e); err != nil {
 				return
 			}
-			if flusher != nil {
-				flusher.Flush()
+			if !flush() {
+				return
 			}
 		}
 	}

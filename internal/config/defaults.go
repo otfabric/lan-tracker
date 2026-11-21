@@ -8,11 +8,15 @@ const (
 	DefaultConfigPath = "/etc/lan-tracker/config.yaml"
 	DefaultDBPath     = "/data/lan-tracker/hosts.db"
 	DefaultSocketPath = "/run/lan-tracker/api.sock"
+	// DefaultUIListen is the web UI's loopback listener (ADR 0012).
+	DefaultUIListen = "127.0.0.1:9735"
 	// maxSocketPath is the longest Unix socket path Linux accepts (sun_path).
 	maxSocketPath = 107
 	// DefaultTCPTimeout is a TCP check's connect timeout; slower links
 	// set active.tcp.targets[].timeout.
 	DefaultTCPTimeout = 750 * time.Millisecond
+	// DefaultMaxHostsPerInterface is identity.max_hosts_per_interface.
+	DefaultMaxHostsPerInterface = 4096
 )
 
 // Defaults returns the compiled defaults.
@@ -61,6 +65,8 @@ func Defaults() *Config {
 			AddressExpiry:      Duration(24 * time.Hour),
 			NameExpiry:         Duration(168 * time.Hour),
 			ProxyARPThreshold:  16,
+			// ADR 0013: bounds the correlator's current state per interface.
+			MaxHostsPerInterface: DefaultMaxHostsPerInterface,
 		},
 		Storage: StorageConfig{
 			Path: DefaultDBPath,
@@ -73,6 +79,7 @@ func Defaults() *Config {
 		},
 		API:     APIConfig{Socket: DefaultSocketPath},
 		Metrics: MetricsConfig{Enabled: true},
+		UI:      UIConfig{Listen: DefaultUIListen},
 		Logging: LoggingConfig{Level: "info", Format: "journald"},
 	}
 }

@@ -1,9 +1,11 @@
 package capture
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"io"
 	"sort"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/otfabric/lan-tracker/internal/collect/capture/decoders"
@@ -22,18 +24,19 @@ const maxTracked = 16384
 
 // Decoder decodes frames and suppresses repeats: an observation identical
 // to one emitted less than RefreshInterval earlier (same source, MAC, IP,
-// name and metadata) is dropped. Live capture and pcap replay use it alike,
+// name, metadata, records and DHCP message) is dropped. The table keys
+// are fixed-size digests of that content. Live capture and pcap replay use it alike,
 // so a replay stores what the live daemon would have stored. A Decoder is
 // not safe for concurrent use.
 type Decoder struct {
 	protocols decoders.Protocols
-	last      map[string]time.Time
+	last      map[digest]time.Time
 	pruned    time.Time
 }
 
 // NewDecoder returns a decoder for the enabled protocols.
 func NewDecoder(p decoders.Protocols) *Decoder {
-	return &Decoder{protocols: p, last: map[string]time.Time{}}
+	return &Decoder{protocols: p, last: map[digest]time.Time{}}
 }
 
 // Decode returns the new or refreshed observations in one frame.
@@ -74,44 +77,53 @@ func (d *Decoder) prune(t time.Time) {
 	}
 }
 
-// key identifies an observation's content apart from its time.
-func key(o observation.Observation) string {
-	var sb strings.Builder
-	sb.WriteString(o.Interface)
-	sb.WriteByte('|')
-	sb.WriteString(string(o.Source))
-	sb.WriteByte('|')
-	sb.WriteString(o.MAC.String())
-	sb.WriteByte('|')
-	if o.IP.IsValid() {
-		sb.WriteString(o.IP.String())
+// digest is a refresh-table key: a SHA-256 of the observation's content,
+// so every entry has the same small size however many records the
+// observation carries.
+type digest [sha256.Size]byte
+
+// key identifies an observation's content apart from its time. Each field
+// is written with its length, so two observations share a key only when
+// their content is identical.
+func key(o observation.Observation) digest {
+	h := sha256.New()
+	field := func(s string) {
+		_, _ = io.WriteString(h, strconv.Itoa(len(s)))
+		_, _ = io.WriteString(h, ":")
+		_, _ = io.WriteString(h, s)
 	}
-	sb.WriteByte('|')
-	sb.WriteString(string(o.NameType))
-	sb.WriteByte(':')
-	sb.WriteString(o.Hostname)
+	field(o.Interface)
+	field(string(o.Source))
+	field(o.MAC.String())
+	ip := ""
+	if o.IP.IsValid() {
+		ip = o.IP.String()
+	}
+	field(ip)
+	field(string(o.NameType))
+	field(o.Hostname)
 	keys := make([]string, 0, len(o.Meta))
 	for k := range o.Meta {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	field(strconv.Itoa(len(keys)))
 	for _, k := range keys {
-		sb.WriteByte('|')
-		sb.WriteString(k)
-		sb.WriteByte('=')
-		sb.WriteString(o.Meta[k])
+		field(k)
+		field(o.Meta[k])
 	}
 	// Name records and DHCP messages count whole: an mDNS goodbye differs
 	// from the announcement only in its TTL, and a DHCP message of another
 	// transaction, stage or retransmission (secs) is new evidence even for
-	// the same client and address.
+	// the same client and address. They are streamed into the hash, not
+	// kept.
 	if len(o.Records) > 0 || o.DHCP != nil {
-		b, _ := json.Marshal(struct {
+		_ = json.NewEncoder(h).Encode(struct {
 			R []observation.Record
 			D *observation.DHCPMessage
 		}{o.Records, o.DHCP})
-		sb.WriteByte('|')
-		sb.Write(b)
 	}
-	return sb.String()
+	var d digest
+	h.Sum(d[:0])
+	return d
 }

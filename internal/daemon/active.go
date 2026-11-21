@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	"github.com/otfabric/lan-tracker/internal/api"
@@ -20,9 +19,11 @@ import (
 // envActor is the actor of a kill switch forced by the environment.
 const envActor = "env"
 
-// envForced reports whether LAN_TRACKER_ACTIVE_DISABLED=1 is set.
+// envForced reports whether LAN_TRACKER_ACTIVE_DISABLED is set
+// (config.ActiveDisabledEnv).
 func (d *Daemon) envForced() bool {
-	return slices.Contains(d.opts.Load.Environ, config.EnvActiveDisabled+"=1")
+	forced, _, _ := config.ActiveDisabledEnv(d.opts.Load.Environ)
+	return forced
 }
 
 // initSwitch loads the persisted kill switch and applies the environment.
@@ -31,10 +32,14 @@ func (d *Daemon) initSwitch(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if d.envForced() {
+	forced, known, setting := config.ActiveDisabledEnv(d.opts.Load.Environ)
+	if forced && !known {
+		d.log.Warn(config.EnvActiveDisabled + " has a value other than 1, true, yes, 0, false or no; treating it as set: active discovery is off")
+	}
+	if forced {
 		if !st.Disabled {
 			now := d.clock.Now().UTC()
-			st = store.ActiveState{Disabled: true, Reason: config.EnvActiveDisabled + "=1", By: envActor, At: &now}
+			st = store.ActiveState{Disabled: true, Reason: setting, By: envActor, At: &now}
 		}
 		st.Forced = true
 	}
@@ -47,9 +52,9 @@ func (d *Daemon) initSwitch(ctx context.Context) error {
 // persisted.
 func (d *Daemon) startScheduler(ctx context.Context, start func(string, func(context.Context) error)) error {
 	cfg := d.cfg.Load()
-	if d.envForced() {
+	if forced, _, setting := config.ActiveDisabledEnv(d.opts.Load.Environ); forced {
 		if err := d.bus.PublishOperator(ctx, observation.Operator{
-			Time: d.clock.Now(), Kind: observation.OpActiveDisabled, Actor: envActor, Reason: config.EnvActiveDisabled + "=1",
+			Time: d.clock.Now(), Kind: observation.OpActiveDisabled, Actor: envActor, Reason: setting,
 		}); err != nil {
 			return err
 		}

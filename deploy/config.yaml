@@ -15,11 +15,19 @@ interfaces:
 passive:
   protocols: { arp: true, ipv4: true, ipv6: false, dhcp: true, mdns: true, dns: true, lldp: true }
 
+# identity:
+#   max_hosts_per_interface: 4096   # hosts held per interface; beyond it a new MAC evicts the longest-missing host
+#                                   # or is refused while none is missing (HOST_EVICTED, HOST_CAP_REACHED)
+
 storage:
   path: /data/lan-tracker/hosts.db
 
 api:
   socket: /run/lan-tracker/api.sock
   listen: ""            # e.g. 127.0.0.1:9734 to serve /metrics
+
+ui:
+  enabled: false        # the web UI; then `sudo lan-tracker ui url` (restart to change)
+  listen: 127.0.0.1:9735   # loopback; 0.0.0.0:9735 or an address of the box opens it to the LAN (plain HTTP, SECURITY.md)
 
 logging: { level: info, format: journald }

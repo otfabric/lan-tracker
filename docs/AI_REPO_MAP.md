@@ -8,7 +8,7 @@ Where each concern lives, what to read before changing it, and which tests cover
 | --- | --- |
 | `cmd/lan-tracker` | `main`: hands off to `internal/cli` |
 | `internal/cli` | cobra commands. A `backend` interface serves both online (API client) and `--offline` (read-only DB) reads; table, JSON, JSONL and CSV output |
-| `internal/api` | REST server on the Unix socket (plus an optional `127.0.0.1` listener with `/metrics`) and the CLI's client. Operator endpoints go through `Control` |
+| `internal/api` | REST server on the Unix socket (plus an optional `127.0.0.1` listener with `/metrics`), the web UI listener (`ui.go`: token, host check, asset serving) and the CLI's client. Operator endpoints go through `Control` |
 | `internal/daemon` | Lifecycle: config, store, pipeline, SIGHUP and `config reload`, sd_notify and watchdog, shutdown; implements `api.Control` |
 | `internal/config` | Schema version 1 (`config.go`; value types in `types.go`), defaults, YAML + env + flags loading, strict validation, the reload diff (`summary.go`) |
 | `internal/observation` | The `Observation` type, sources, evidence kinds (`Evidence()`) and meta keys, the decoded DHCP message (`DHCPMessage`), JSONL encoding, the bounded bus with barriers and operator messages |
@@ -40,6 +40,7 @@ Where each concern lives, what to read before changing it, and which tests cover
 | `test/systemd` | The daemon under systemd on Debian 11/12/13 (`make test-systemd`) |
 | `test/crash`, `test/soak` | kill -9 during writes (in `make check`); 90 simulated days (tag `soak`, `make soak`) |
 | `tools/capcheck` | Privilege and feasibility check for boards; shipped in the release tarballs |
+| `frontend/` | The web UI (ADR 0012): React, Tailwind and SVG charts in `src/` (views, charts, API client; `api/mock.ts` is dev-only mock data at `/?mock`), vitest tests beside the code, `embed.go` embeds `dist/`. Built and checked by `make frontend` / `make frontend-check` in a Node container |
 | `build/` | The dev container (`dev.Dockerfile`) and the scripts make runs in it |
 | `deploy/` | Reference unit, default config, the reviewed ARP + TCP example (`config.active-example.yaml`), replay dev config, install guide |
 

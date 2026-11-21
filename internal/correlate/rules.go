@@ -2,6 +2,7 @@ package correlate
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"net/netip"
 	"slices"
@@ -13,14 +14,7 @@ import (
 	"github.com/otfabric/lan-tracker/internal/observation"
 )
 
-func (c *Correlator) hostByID(id string) *host {
-	for _, h := range c.st.order {
-		if h.id == id {
-			return h
-		}
-	}
-	return nil
-}
+func (c *Correlator) hostByID(id string) *host { return c.st.byID[id] }
 
 // observe applies docs/DATA_MODEL.md §5 to one observation.
 func (c *Correlator) observe(ctx context.Context, o observation.Observation) {
@@ -41,6 +35,12 @@ func (c *Correlator) observe(ctx context.Context, o observation.Observation) {
 	}
 	if mac == nil && !ip.IsValid() && len(o.Records) == 0 {
 		c.ignored.Add(1)
+		return
+	}
+	// A new MAC on an interface at its host cap (ADR 0013): room is made
+	// by evicting the host missing the longest, or the observation is
+	// dropped.
+	if mac != nil && c.st.hosts[n.id][mac.String()] == nil && !c.admit(ctx, n, o, mac) {
 		return
 	}
 	if o.Time.After(n.lastSeen) {
@@ -177,7 +177,9 @@ func (c *Correlator) seen(ctx context.Context, h *host, o observation.Observatio
 	moved := h.mark(o, kind)
 	if o.Time.After(h.lastSeen) {
 		h.lastSeen, h.evidence = o.Time, ev
+		h.ctx.hostAges().set(h)
 	}
+	c.st.touch(h)
 	p := c.presenceAt(h.lastSeen, c.refTime(o.Time))
 	if h.presence == Missing && p != Missing {
 		e := hostEvent(events.HostReappeared, o.Time, h, string(o.Source), ev)
@@ -234,9 +236,8 @@ func notHostAddress(n *netContext, ip netip.Addr) bool {
 func lastAddr(p netip.Prefix) netip.Addr {
 	a := p.Masked().Addr().As4()
 	host := uint32(1)<<(32-p.Bits()) - 1
-	v := uint32(a[0])<<24 | uint32(a[1])<<16 | uint32(a[2])<<8 | uint32(a[3])
-	v |= host
-	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+	binary.BigEndian.PutUint32(a[:], binary.BigEndian.Uint32(a[:])|host)
+	return netip.AddrFrom4(a)
 }
 
 // attribute applies the address binding lifecycle (§5.3) for ip on h. A
@@ -261,6 +262,7 @@ func (c *Correlator) attribute(ctx context.Context, h *host, ip netip.Addr, o ob
 		}
 		if o.Time.After(b.lastSeen) {
 			b.lastSeen = o.Time
+			c.st.touch(h)
 		}
 		b.arpOnly = b.arpOnly && reply
 		c.dbBindingSeen(ctx, b, o.Source, o.Time)
@@ -350,51 +352,6 @@ func (c *Correlator) resolve(ctx context.Context, k ipKey, t time.Time, cause st
 	e := hostEvent(events.DuplicateIPResolved, t, b.host, cause, ev)
 	e.New, e.RelatedHostID, e.RelatedMAC, e.ObservationID = k.ip.String(), leaving.id, leaving.mac.String(), obsID
 	c.emit(ctx, e)
-}
-
-// advance evaluates presence (§6) and binding expiry (§5.3) up to now.
-// Transitions are stamped with the moment the threshold was crossed.
-func (c *Correlator) advance(ctx context.Context, now time.Time) {
-	if !now.After(c.advancedTo) {
-		return
-	}
-	c.advancedTo = now
-	c.expireExchanges(ctx, now)
-	cfg := c.cfg.Load()
-	stale, expiry := cfg.Presence.Stale.D(), cfg.Identity.AddressExpiry.D()
-
-	for _, h := range c.st.order {
-		// Expiry: unconfirmed for address_expiry while the host was seen since.
-		for _, b := range sortedBindings(h) {
-			if now.Sub(b.lastSeen) < expiry || !h.lastSeen.After(b.lastSeen) {
-				continue
-			}
-			ended := b.lastSeen.Add(expiry)
-			c.close(b, ended)
-			ev := h.evidence
-			ev.Reason = "address not confirmed for " + cfg.Identity.AddressExpiry.String()
-			e := hostEvent(events.IPRemoved, ended, h, causeExpiry, ev)
-			e.Old = b.ip.String()
-			c.emit(ctx, e)
-			c.resolve(ctx, ipKey{h.ctx.id, b.ip}, ended, causeExpiry, 0, ev, h)
-		}
-
-		p := c.presenceAt(h.lastSeen, now)
-		if p == h.presence {
-			continue
-		}
-		h.presence = p
-		c.dbHostSeen(ctx, h)
-		if p == Missing {
-			ev := h.evidence
-			ev.Reason = "no observation for " + cfg.Presence.Stale.String()
-			// The state just before MISSING is always STALE (thresholds are
-			// ordered), however coarsely presence was evaluated.
-			e := hostEvent(events.HostDisappeared, h.lastSeen.Add(stale), h, causePresence, ev)
-			e.Old, e.New = string(Stale), string(Missing)
-			c.emit(ctx, e)
-		}
-	}
 }
 
 func sortedBindings(h *host) []*binding {

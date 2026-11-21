@@ -415,7 +415,7 @@ func (s *Scheduler) loop(ctx context.Context, iface string, p probe.Protocol) {
 		}
 		switch {
 		case errors.Is(err, probe.ErrDisabled), ctx.Err() != nil:
-		case err != nil:
+		case err != nil && !errors.Is(err, probe.ErrPassCap): // a capped pass is cut short, not failed
 			if !failed {
 				s.o.Logger.Warn("probe pass failed", "interface", iface, "protocol", p, "err", err)
 			}
@@ -509,6 +509,7 @@ func (s *Scheduler) periodic(pctx context.Context, cfg *config.Config, ic config
 		if pass.Names = s.nameQueries(pctx, cfg, iface); len(pass.Names) == 0 {
 			return nil, nil
 		}
+		pass.MaxQueries = cfg.Active.Names.MaxQueriesPerPass // follow-ups count too
 		return eng.Run(pctx, pass)
 	}
 	found, err := s.o.Known.Known(pctx, iface)

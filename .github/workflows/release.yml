@@ -38,6 +38,7 @@ jobs:
           exit 1
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Next version
         id: next
@@ -61,6 +62,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: mod-verify, fmt-check, tidy-check, vet, lint, vuln, tests with race and coverage
         run: make mod-verify check
 
@@ -69,6 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: make fuzz FUZZTIME=30s
 
   docker:
@@ -76,6 +81,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Network integration tests (Docker, CAP_NET_RAW only)
         run: make test-net
       - name: systemd unit test (Debian 11, 12 and 13)
@@ -89,6 +96,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      # Keeps the job token's credentials: this job pushes the release tag.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0

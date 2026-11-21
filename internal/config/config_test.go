@@ -207,6 +207,20 @@ func TestValidation(t *testing.T) {
 		{"profile without probes", minimal + "profiles: { empty: {} }\n", "profiles.empty", "enables no probe"},
 		{"listen not loopback", minimal + "api: { listen: \"0.0.0.0:9734\" }\n", "api.listen", "loopback"},
 		{"listen loopback", minimal + "api: { listen: \"127.0.0.1:9734\" }\n", "", ""},
+		{"ui off with any listen", minimal + "ui: { listen: \"0.0.0.0:80\" }\n", "", ""},
+		{"ui loopback", minimal + "ui: { enabled: true }\n", "", ""},
+		{"ui ipv6 loopback", minimal + "ui: { enabled: true, listen: \"[::1]:9735\" }\n", "", ""},
+		{"ui on every address", minimal + "ui: { enabled: true, listen: \"0.0.0.0:9735\" }\n", "", ""},
+		{"ui on every v6 address", minimal + "ui: { enabled: true, listen: \"[::]:9735\" }\n", "", ""},
+		{"ui on an interface address", minimal + "ui: { enabled: true, listen: \"192.168.0.106:9735\" }\n", "", ""},
+		{"ui on localhost", minimal + "ui: { enabled: true, listen: \"localhost:9735\" }\n", "", ""},
+		{"ui on a hostname", minimal + "ui: { enabled: true, listen: \"edge-box:9735\" }\n", "ui.listen", "localhost or an IP address"},
+		{"ui without listen", minimal + "ui: { enabled: true, listen: \"\" }\n", "ui.listen", "is required"},
+		{"ui without port", minimal + "ui: { enabled: true, listen: \"127.0.0.1\" }\n", "ui.listen", "host:port"},
+		{"ui bad port", minimal + "ui: { enabled: true, listen: \"127.0.0.1:0\" }\n", "ui.listen", "invalid port"},
+		{"ui on api listener", minimal + "api: { listen: \"127.0.0.1:9735\" }\nui: { enabled: true }\n", "ui.listen", "another port than api.listen"},
+		{"ui on api port", minimal + "api: { listen: \"127.0.0.1:9734\" }\nui: { enabled: true, listen: \"0.0.0.0:9734\" }\n", "ui.listen", "another port than api.listen"},
+		{"ui unknown key", minimal + "ui: { enabled: true, port: 1 }\n", "ui.port", "unknown key"},
 		{"socket path too long", minimal + "api: { socket: /" + strings.Repeat("x", 110) + " }\n", "api.socket", "limited to 107"},
 		{"bad log level", minimal + "logging: { level: verbose }\n", "logging.level", "must be one of"},
 		{"db size too small", minimal + "storage: { retention: { max_db_size: 1MB } }\n", "storage.retention.max_db_size", "at least 10MB"},
@@ -454,5 +468,45 @@ func TestDeployConfigs(t *testing.T) {
 				t.Errorf("invalid: %v", errs)
 			}
 		})
+	}
+}
+
+// TestActiveDisabledEnv: LAN_TRACKER_ACTIVE_DISABLED is set by 1, true or
+// yes, unset by 0, false, no or empty, and set by any other value; the
+// setting is the assignment as given.
+func TestActiveDisabledEnv(t *testing.T) {
+	env := func(v string) []string { return []string{"PATH=/bin", EnvActiveDisabled + "=" + v} }
+	for _, c := range []struct {
+		environ       []string
+		forced, known bool
+		setting       string
+	}{
+		{nil, false, true, ""},
+		{env("1"), true, true, "LAN_TRACKER_ACTIVE_DISABLED=1"},
+		{env("TRUE"), true, true, "LAN_TRACKER_ACTIVE_DISABLED=TRUE"},
+		{env("Yes"), true, true, "LAN_TRACKER_ACTIVE_DISABLED=Yes"},
+		{env(""), false, true, "LAN_TRACKER_ACTIVE_DISABLED="},
+		{env("0"), false, true, "LAN_TRACKER_ACTIVE_DISABLED=0"},
+		{env("False"), false, true, "LAN_TRACKER_ACTIVE_DISABLED=False"},
+		{env("NO"), false, true, "LAN_TRACKER_ACTIVE_DISABLED=NO"},
+		{env("2"), true, false, "LAN_TRACKER_ACTIVE_DISABLED=2"},
+		{env("off"), true, false, "LAN_TRACKER_ACTIVE_DISABLED=off"},
+		{append(env("1"), EnvActiveDisabled+"=0"), false, true, "LAN_TRACKER_ACTIVE_DISABLED=0"}, // the last wins
+	} {
+		forced, known, setting := ActiveDisabledEnv(c.environ)
+		if forced != c.forced || known != c.known || setting != c.setting {
+			t.Errorf("%q: %v %v %q, want %v %v %q", c.environ, forced, known, setting, c.forced, c.known, c.setting)
+		}
+	}
+}
+
+func TestLoopbackListen(t *testing.T) {
+	for listen, want := range map[string]bool{
+		"127.0.0.1:9735": true, "[::1]:9735": true, "localhost:9735": true, "127.0.0.2:1": true,
+		"0.0.0.0:9735": false, "[::]:9735": false, "192.168.0.106:9735": false, "127.0.0.1": false,
+	} {
+		if got := LoopbackListen(listen); got != want {
+			t.Errorf("LoopbackListen(%q) = %v", listen, got)
+		}
 	}
 }

@@ -48,8 +48,8 @@ type ReloadResult struct {
 
 // Errors a Control returns, mapped to 409 Conflict.
 var (
-	// ErrForced: LAN_TRACKER_ACTIVE_DISABLED=1 keeps active discovery off.
-	ErrForced = errors.New("active discovery is forced off by LAN_TRACKER_ACTIVE_DISABLED=1; unset it and restart the daemon")
+	// ErrForced: LAN_TRACKER_ACTIVE_DISABLED keeps active discovery off.
+	ErrForced = errors.New("active discovery is forced off by LAN_TRACKER_ACTIVE_DISABLED; unset it and restart the daemon")
 	// ErrNoScanner: replay mode runs no probes.
 	ErrNoScanner = errors.New("active discovery does not run in replay mode")
 )
@@ -68,8 +68,21 @@ const maxBody = 64 << 10
 
 type connKey struct{}
 
+// onSocket reports whether the request came through the Unix socket.
+func onSocket(r *http.Request) bool {
+	_, ok := r.Context().Value(connKey{}).(*net.UnixConn)
+	return ok
+}
+
+// actorKey overrides the actor of a request that did not come through the
+// Unix socket (the web UI's "ui").
+type actorKey struct{}
+
 // actor names the Unix user behind the request (SO_PEERCRED).
 func actor(r *http.Request) string {
+	if a, ok := r.Context().Value(actorKey{}).(string); ok {
+		return a
+	}
 	c, _ := r.Context().Value(connKey{}).(net.Conn)
 	if c == nil {
 		return "unknown"

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
+	"github.com/otfabric/lan-tracker/frontend"
 	"github.com/otfabric/lan-tracker/internal/api"
 	"github.com/otfabric/lan-tracker/internal/buildinfo"
+	"github.com/otfabric/lan-tracker/internal/config"
 	"github.com/otfabric/lan-tracker/internal/events"
 	"github.com/otfabric/lan-tracker/internal/metrics"
 	"github.com/otfabric/lan-tracker/internal/observation"
@@ -18,6 +21,9 @@ import (
 	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
 	"github.com/otfabric/lan-tracker/internal/store"
 )
+
+// UITokenFile is the web UI's token file, in the database's directory.
+const UITokenFile = "ui.token"
 
 // presences are the presence states, for status and metrics.
 var presences = []string{"ACTIVE", "RECENT", "STALE", "MISSING"}
@@ -33,9 +39,23 @@ func (d *Daemon) startAPI(ctx context.Context) error {
 	if cfg.Metrics.Enabled {
 		m = metrics.Handler(func(req *http.Request) []metrics.Family { return d.gather(req.Context()) })
 	}
+	var ui *api.UIOptions
+	if cfg.UI.Enabled {
+		// The token lives beside the database, in the daemon's own
+		// directory (ADR 0012).
+		token, err := api.LoadUIToken(filepath.Join(filepath.Dir(cfg.Storage.Path), UITokenFile), d.log)
+		if err != nil {
+			return err
+		}
+		ui = &api.UIOptions{Listen: cfg.UI.Listen, Token: token, Assets: frontend.Web()}
+		if !config.LoopbackListen(cfg.UI.Listen) {
+			d.log.Warn("the web UI listens beyond loopback: its token and data cross the network unencrypted; prefer an SSH tunnel to 127.0.0.1 (SECURITY.md)",
+				"listen", cfg.UI.Listen)
+		}
+	}
 	d.api = api.New(api.Options{
 		Reader: d.reader, Status: d.status, Interfaces: d.interfaces, Config: func() any { return d.cfg.Load() },
-		Events: d.events, Metrics: m, Control: d, Logger: d.log,
+		Events: d.events, Metrics: m, Control: d, UI: ui, Now: d.clock.Now, Logger: d.log,
 	})
 	return d.api.Start(ctx, cfg.API.Socket, cfg.API.Listen)
 }
@@ -87,7 +107,8 @@ func (d *Daemon) interfaces(ctx context.Context) ([]store.InterfaceInfo, error) 
 }
 
 // status builds /v1/status: unhealthy when the database does not answer,
-// degraded when a configured collector is not running.
+// degraded when a configured collector is not running or an optional
+// loopback listener is not bound.
 func (d *Daemon) status(ctx context.Context) api.Status {
 	bi := buildinfo.Get()
 	cfg := d.cfg.Load()
@@ -95,6 +116,9 @@ func (d *Daemon) status(ctx context.Context) api.Status {
 		Version: bi.Version, Commit: bi.Commit, Platform: bi.Platform, PID: os.Getpid(), Started: d.started.UTC(), Now: time.Now().UTC(),
 		Replay: cfg.ReplayMode(), State: api.StateOK, Database: api.DatabaseStatus{Path: d.store.Path(), OK: true},
 		Hosts: map[string]map[string]int{},
+	}
+	if cfg.UI.Enabled { // restart-only: the running value
+		s.UI = api.UIStatus{Enabled: true, Listen: cfg.UI.Listen}
 	}
 	pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -142,11 +166,14 @@ func (d *Daemon) status(ctx context.Context) api.Status {
 		}
 		s.Interfaces = append(s.Interfaces, is)
 	}
+	// An optional loopback listener another process holds the port of.
+	listeners := d.api.Problems()
+	s.Problems = append(s.Problems, listeners...)
 	switch {
 	case !s.Database.OK:
 		s.State = api.StateUnhealthy
 		s.Problems = append(s.Problems, s.Database.Error)
-	case d.registry.Degraded():
+	case d.registry.Degraded(), len(listeners) > 0:
 		s.State = api.StateDegraded
 	}
 	return s
@@ -198,6 +225,18 @@ func (d *Daemon) gather(ctx context.Context) []metrics.Family {
 	add("observations_total", "Observations processed by the correlator.", metrics.Counter, obs...)
 	add("observations_unbound_total", "Observations without a MAC that matched no host.", metrics.Counter, unb...)
 	add("bus_dropped_total", "Observations dropped because the bus was full.", metrics.Counter, metrics.Sample{Value: float64(d.bus.Dropped())})
+
+	caps := d.correlator.CapCounts()
+	var evicted, refused, leases []metrics.Sample
+	for _, ic := range cfg.Interfaces {
+		cc, l := caps[ic.Name], metrics.L("interface", ic.Name)
+		evicted = append(evicted, metrics.Sample{Labels: l, Value: float64(cc.HostsEvicted)})
+		refused = append(refused, metrics.Sample{Labels: l, Value: float64(cc.ObservationsRefused)})
+		leases = append(leases, metrics.Sample{Labels: l, Value: float64(cc.LeasesEvicted)})
+	}
+	add("hosts_evicted_total", "Hosts evicted at identity.max_hosts_per_interface to make room for a new MAC.", metrics.Counter, evicted...)
+	add("observations_refused_total", "Observations of a new MAC dropped at identity.max_hosts_per_interface with no host missing.", metrics.Counter, refused...)
+	add("dhcp_leases_evicted_total", "Open DHCP leases ended at identity.max_hosts_per_interface to make room for a new client.", metrics.Counter, leases...)
 
 	if d.capture != nil {
 		var drops []metrics.Sample

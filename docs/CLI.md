@@ -45,7 +45,7 @@ The daemon runs as root with `UMask=0027` and the data directory is `0750 root:r
 | Command | Purpose | Key options |
 | --- | --- | --- |
 | `daemon run` | Run the service in the foreground | `--config`, `--log-level` |
-| `daemon status` | Version, platform, PID, uptime, DB health, interfaces, host counts, kill-switch state, clock synchronisation, last scan, and per-interface collector state (`running`/`disabled`/`unsupported`/`failed`, backend or error); for each probe (`arp`, `icmp`, `tcp`, `names`) its last periodic pass, e.g. `arp running afpacket last pass 2m ago: 253 swept, 14 replied (65 s)` (`asked` for name queries; blocked probes, `cut short` and an overrun when they apply). Passes are shown here only, never logged | `-o json`; `--quiet` exit codes |
+| `daemon status` | Version, platform, PID, uptime, DB health, interfaces, host counts, kill-switch state, clock synchronisation, last scan, whether the web UI is enabled and where it listens (`Web UI: enabled on 0.0.0.0:9735`), and per-interface collector state (`running`/`disabled`/`unsupported`/`failed`, backend or error); for each probe (`arp`, `icmp`, `tcp`, `names`) its last periodic pass, e.g. `arp running afpacket last pass 2m ago: 253 swept, 14 replied (65 s)` (`asked` for name queries; blocked probes, `cut short` and an overrun when they apply). Passes are shown here only, never logged | `-o json`; `--quiet` exit codes |
 | `hosts list` | Inventory: MAC, IP, hostname, OUI registrant, interface, presence, last seen, description. `--active`: live hosts (ACTIVE or RECENT); `--stale`: the others (STALE or MISSING); `--port`: a TCP endpoint of the host on that port last answered OPEN; `--vendor`: substring of the OUI registrant; `--description`: substring of the description | `--interface`, `--active`, `--stale`, `--vendor`, `--description`, `--port`, `--seen-within` |
 | `hosts show <query>` | Full record of one current host: addresses over time, names, TCP endpoints, DHCP leases, the description and the evidence kinds behind last seen. The query is the same as `hosts find` and must match exactly one current host | `--interface`, `--ip`/`--mac`/`--hostname`/`--id` |
 | `hosts find <query>` | Current or point-in-time holder(s) with addresses, names and TCP endpoints and their sources; for a name, also the records no single MAC holds; exit 1 when no host matches | `--interface`, `--at <time>`, `--ip`/`--mac`/`--hostname`/`--id` |
@@ -68,6 +68,7 @@ The daemon runs as root with `UMask=0027` and the data directory is `0750 root:r
 | `config show` | Effective config after merging defaults, file, env and flags | `--sources` |
 | `config validate` | Validate a config before rollout | `--config` |
 | `config reload` | Make the running daemon re-read its configuration file and print what took effect and what needs a restart | `-o json` |
+| `ui url` | Print the web UI's URL with its access token (`ui.enabled`); treat it like a password. On the default loopback listener, forward the port from another machine first (`ssh -N -L 9735:127.0.0.1:9735 <box>`); on `0.0.0.0` or `::` it prints one URL per address of the box, loopback first. Needs the daemon; exit 2 when the UI is not enabled | `-o json` |
 | `db info` | Path, schema version, journal mode, size, WAL size, row counts | |
 | `db check` | SQLite integrity check | |
 | `version` | Version, commit, commit date (release builds are reproducible), Go version, architecture; `--quiet` prints the version alone | |
@@ -118,7 +119,7 @@ For each attribute (each address, name and TCP endpoint) the sources that confir
 
 ### `observations list`
 
-Columns: time, interface, source, MAC, IP, hostname, service, host ID. The latest `--limit` rows, in time order. `--unbound` shows observations that matched no host. Observations older than raw retention are only available with `--rollups` (one row per host, source, MAC, IP and hour, with count). Default `--limit` 1000.
+Columns: time, interface, source, MAC, IP, hostname, service, host ID. The latest `--limit` rows, in time order. `--unbound` shows observations that matched no host. Observations older than raw retention are only available with `--rollups` (one row per host, source, MAC, IP and hour, with count). Default `--limit` 1000. In every list that takes it (`observations list`, `events list`, `dhcp leases`, `dhcp exchanges`) `--limit` is at most 10000, online and `--offline` alike; a larger one is a usage error (exit 64).
 
 ### `services list`
 
@@ -130,7 +131,7 @@ One row per TCP endpoint checked: interface, address and port (`DATA_MODEL.md` �
 
 ### `active disable` / `active enable`
 
-`disable` stops all probe engines at once (every probe checks the switch right before it is sent, and running passes and scans are cancelled), writes the persisted kill switch (`DATA_MODEL.md` §8) and emits `ACTIVE_DISABLED` with the reason and the calling Unix user (from `SO_PEERCRED`); it returns once that is committed. `enable` clears it and emits `ACTIVE_ENABLED` (a no-op when it is not set); probing resumes only once that is committed. It fails with exit 2 if `LAN_TRACKER_ACTIVE_DISABLED=1` is set. Enabling the switch does not override per-interface `active.enabled: false`. Both need the daemon; `-o json` prints the resulting state.
+`disable` stops all probe engines at once (every probe checks the switch right before it is sent, and running passes and scans are cancelled), writes the persisted kill switch (`DATA_MODEL.md` §8) and emits `ACTIVE_DISABLED` with the reason and the calling Unix user (from `SO_PEERCRED`); it returns once that is committed. `enable` clears it and emits `ACTIVE_ENABLED` (a no-op when it is not set); probing resumes only once that is committed. It fails with exit 2 while `LAN_TRACKER_ACTIVE_DISABLED` forces the switch. Enabling the switch does not override per-interface `active.enabled: false`. Both need the daemon; `-o json` prints the resulting state.
 
 ### `scan plan`
 
@@ -191,6 +192,7 @@ One row per DHCP transaction seen (interface, xid and client hardware address), 
 | `dhcp-lease`, `dhcp-client-config-changed` | `DHCP_LEASE_ASSIGNED`, `DHCP_CLIENT_CONFIG_CHANGED` |
 | `dhcp-nak`, `dhcp-decline`, `dhcp-release` | `DHCP_LEASE_NAK`, `DHCP_LEASE_DECLINED`, `DHCP_LEASE_RELEASED` |
 | `described` | `HOST_DESCRIBED` |
+| `evicted`, `host-cap` | `HOST_EVICTED`, `HOST_CAP_REACHED` (the host cap, `DATA_MODEL.md` §5.9) |
 | `scan-started`, `scan-completed`, `active-disabled`, `active-enabled` | `SCAN_STARTED`, `SCAN_COMPLETED`, `ACTIVE_DISABLED`, `ACTIVE_ENABLED` |
 | `interface-up`, `interface-down`, `subnet-changed` | `INTERFACE_UP`, `INTERFACE_DOWN`, `SUBNET_CHANGED` |
 | `observation-gap`, `db-recreated` | `OBSERVATION_GAP`, `DATABASE_RECREATED` |
@@ -200,8 +202,8 @@ One row per DHCP transaction seen (interface, xid and client hardware address), 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success / healthy |
-| 1 | Degraded (`daemon status`, e.g. a configured collector not running), no results for `hosts find` or `hosts evidence`, or no host for `hosts show`, `hosts set` and `hosts unset` |
-| 2 | Unhealthy (`daemon status`), command error or scan refused |
+| 1 | Degraded (`daemon status`, e.g. a configured collector not running or a loopback listener not bound), no results for `hosts find` or `hosts evidence`, or no host for `hosts show`, `hosts set` and `hosts unset` |
+| 2 | Unhealthy (`daemon status`), command error, scan refused, or the web UI not enabled (`ui url`) |
 | 3 | Daemon unreachable (online mode) |
 | 64 | Usage error |
 
@@ -211,7 +213,7 @@ Prints interfaces with passive/active mode, active scan networks and excludes wi
 
 ### `config reload`
 
-Makes the daemon re-read the configuration file it was started with, exactly as `systemctl reload lan-tracker` (SIGHUP) does, through `POST /v1/config/reload` (`API.md`); `--config` does not change which file. The reload is all or nothing: a file that does not load or validate changes nothing, and the command prints the per-key errors and exits 2. Otherwise it prints the keys whose new values took effect (key, old, new) and the changed keys that need a restart (key, running value, value in the file), which keep their running values; with neither, `No changes.` Exit 0 in both cases. What a reload applies and what needs a restart is FR-CFG-3: each interface's `active` settings (enabling or disabling active discovery, networks, excludes) and `dhcp` allowlist, the probes and their intervals, rates, presence thresholds, identity settings and the log level apply at once; adding, removing or renaming interfaces, their passive settings, `passive`, the concurrency caps (`active.max_concurrent_jobs`, `active.budgets.tcp.max_concurrent_per_interface`, `active.budgets.tcp.max_concurrent_per_host`), `storage`, `api`, `metrics`, `logging.format`, `replay`, `identity.oui_override` and `neighbor.resync_interval` need a restart. Keys are named as in `config show --sources`. The daemon logs the reload with the calling Unix user and the applied keys; its message says what active discovery now runs (`configuration reloaded; active discovery: arp every 15m on eth0 (192.168.0.0/24)`, or `off (replay)` in replay mode). Check the file first with `config validate`, and preview a newly enabled interface's sweep with `scan plan`. Needs the daemon; `-o json` prints `ReloadResult`.
+Makes the daemon re-read the configuration file it was started with, exactly as `systemctl reload lan-tracker` (SIGHUP) does, through `POST /v1/config/reload` (`API.md`); `--config` does not change which file. The reload is all or nothing: a file that does not load or validate changes nothing, and the command prints the per-key errors and exits 2. Otherwise it prints the keys whose new values took effect (key, old, new) and the changed keys that need a restart (key, running value, value in the file), which keep their running values; with neither, `No changes.` Exit 0 in both cases. What a reload applies and what needs a restart is FR-CFG-3: each interface's `active` settings (enabling or disabling active discovery, networks, excludes) and `dhcp` allowlist, the probes and their intervals, rates, presence thresholds, identity settings and the log level apply at once; adding, removing or renaming interfaces, their passive settings, `passive`, the concurrency caps (`active.max_concurrent_jobs`, `active.budgets.tcp.max_concurrent_per_interface`, `active.budgets.tcp.max_concurrent_per_host`), `storage`, `api`, `ui`, `metrics`, `logging.format`, `replay`, `identity.oui_override` and `neighbor.resync_interval` need a restart. Keys are named as in `config show --sources`. The daemon logs the reload with the calling Unix user and the applied keys; its message says what active discovery now runs (`configuration reloaded; active discovery: arp every 15m on eth0 (192.168.0.0/24)`, or `off (replay)` in replay mode). Check the file first with `config validate`, and preview a newly enabled interface's sweep with `scan plan`. Needs the daemon; `-o json` prints `ReloadResult`.
 
 ### `config show --sources`
 

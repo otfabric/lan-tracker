@@ -4,7 +4,7 @@ This file is the entry point for every AI coding agent working in this repositor
 
 ## Organisation standards
 
-This repository follows **otfabric/engineering policy 1.2**, profile **application** (`.otfabric/policy.yaml`, mode `enforce`). Organisation skills come from the `otfabric` plugin (maintainer's user settings). Local exceptions: `.otfabric/exceptions.yaml`. Where this file and the organisation standards disagree, this file wins for this repository — say so in your report.
+This repository follows **otfabric/engineering policy 1.6**, profile **application** (`.otfabric/policy.yaml`, mode `enforce`). Organisation skills come from the `otfabric` plugin (maintainer's user settings). Local exceptions: `.otfabric/exceptions.yaml`. Where this file and the organisation standards disagree, this file wins for this repository — say so in your report.
 
 ## 1. What this is
 
@@ -109,8 +109,9 @@ Every package and top-level directory, with its responsibility: [`docs/AI_REPO_M
     - Do not introduce anything that needs `CAP_NET_ADMIN`, another capability or root's file access.
 11. **Out of scope** (ADR 0011).
     - Device identification of any kind: payload probes, banner reading, passive OS/device/vendor classification, confidence ranking, fingerprint databases, and running `modbusctl`, `sunspecctl`, `otprobe` or any external tool from the daemon. Do not build, scaffold or stub it.
-    - VLAN tagging, a web UI, any data leaving the box (fleet aggregation, remote API), alerting, automatic network repair, continuous packet recording, DHCPv6, a DHCP client or server.
+    - VLAN tagging, any data leaving the box (fleet aggregation, remote API), alerting, automatic network repair, continuous packet recording, DHCPv6, a DHCP client or server.
     - Do not build, design, scaffold or stub these without an explicit request and a recorded decision.
+    - The web UI (`ui.enabled`, `frontend/`) is in scope since 21 Nov 2026 (ADR 0012): loopback by default (any local address since 21 Nov 2026, by explicit `ui.listen`), token-protected, on the data already collected, with host descriptions its only write. Widening it (another write, TLS or other authentication, new collectors for it) needs a new decision.
 12. **IPv4-first.** v1 active discovery is IPv4, and ARP is the primary LAN discovery mechanism. IPv6 active probing (NDP solicitation) is not built; it waits on a request (`docs/ROADMAP.md`). Passive IPv6/NDP decoding stays.
 
 ## 5. Read this before editing
@@ -159,7 +160,7 @@ Every package and top-level directory, with its responsibility: [`docs/AI_REPO_M
   - decoders are tested against frames built with gopacket (`test/frames`), and every decoder has a `go test -fuzz` target;
   - the correlator is tested with golden observation streams (`test/golden`);
   - platform backends and probes are tested in Docker (`test/net`).
-- Coverage of `internal/` (from every test package, `-coverpkg`) stays at or above 90%. Test behaviour (error paths, retries, validation), not lines.
+- Coverage of `internal/` (from every test package, `-coverpkg`) stays at or above 95%. Test behaviour (error paths, retries, validation), not lines.
 - Write like the surrounding code: comment density, naming and idiom. Comments explain why and cite the doc section or rule.
 - Keep it simple. The maintainer prefers the smallest change that meets the requirement; do not add configurability, abstraction or options nobody asked for.
 
@@ -171,7 +172,7 @@ Every Go command runs in the Linux dev container through `make`. **Docker must b
 
 | You changed | Run |
 | --- | --- |
-| Any Go code (before you call it done) | `make check`: fmt-check, tidy-check, vet, lint, vuln, race tests, coverage ≥ 90% |
+| Any Go code (before you call it done) | `make check`: fmt-check, tidy-check, vet, lint, vuln, race tests, coverage ≥ 95% |
 | One package, while iterating | `make test PKGS=./internal/store/...` or `make test PKGS='-run TestHostsSet ./internal/cli/'` |
 | A decoder | `make check`, then `make fuzz FUZZTIME=1m` (or a focused `-fuzz` run in `make shell`) |
 | `internal/platform`, `internal/service`, probes on the wire, `test/net` | `make check-all` (adds `test-net` and `test-systemd`) |

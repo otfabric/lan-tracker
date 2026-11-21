@@ -263,6 +263,11 @@ func TestNinetyDays(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	rd, err := st.Reader(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
 	cfg := config.Defaults()
 	cfg.Interfaces = []config.InterfaceConfig{{Name: iface}}
 	vendors, err := identify.Embedded()
@@ -270,7 +275,7 @@ func TestNinetyDays(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.DiscardHandler)
-	c, err := correlate.New(ctx, correlate.Options{Store: st, Events: events.NewEngine(st, log, nil), Vendors: vendors, Clock: sim,
+	c, err := correlate.New(ctx, correlate.Options{Store: st, Reader: rd, Events: events.NewEngine(st, log, nil), Vendors: vendors, Clock: sim,
 		Logger: log, Config: cfg, DataDriven: true})
 	if err != nil {
 		t.Fatal(err)

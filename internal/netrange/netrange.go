@@ -5,7 +5,7 @@
 package netrange
 
 import (
-	"math/bits"
+	"encoding/binary"
 	"math/rand/v2"
 	"net/netip"
 	"sort"
@@ -16,18 +16,20 @@ type Range struct{ First, Last uint32 }
 
 func toU32(a netip.Addr) uint32 {
 	b := a.As4()
-	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+	return binary.BigEndian.Uint32(b[:])
 }
 
 func toAddr(v uint32) netip.Addr {
-	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return netip.AddrFrom4(b)
 }
 
 // Of returns the range of p's addresses (IPv4 only).
 func Of(p netip.Prefix) Range {
 	p = p.Masked()
 	first := toU32(p.Addr())
-	return Range{first, first | uint32(uint64(1)<<(32-p.Bits())-1)}
+	return Range{first, first | ^uint32(0)>>p.Bits()}
 }
 
 // Hosts returns the host addresses of an IPv4 network: without the network
@@ -121,10 +123,21 @@ func (s Set) Overlaps(r Range) bool {
 	return i < len(s.rs) && s.rs[i].First <= r.Last
 }
 
-// At returns the i-th address in ascending order (0 <= i < Len).
+// At returns the i-th address in ascending order. i < Len is a
+// precondition (callers walk [0, Len)).
 func (s Set) At(i uint64) netip.Addr {
 	k := sort.Search(len(s.rs), func(k int) bool { return s.cum[k+1] > i })
-	return toAddr(s.rs[k].First + uint32(i-s.cum[k]))
+	// For i < Len the offset is below the range's size, at most 2^32, so
+	// it fits in 32 bits; low32 takes those bits without a narrowing
+	// conversion.
+	return toAddr(s.rs[k].First + low32(i-s.cum[k]))
+}
+
+// low32 is the low 32 bits of v.
+func low32(v uint64) uint32 {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], v)
+	return binary.BigEndian.Uint32(b[4:])
 }
 
 // Shuffled walks the set in a random order, each address once, without
@@ -151,9 +164,9 @@ type permutation struct {
 }
 
 func newPermutation(r *rand.Rand, n uint64) permutation {
-	w := uint64(bits.Len64(n - 1)) // bits for values below n
-	if w < 2 {
-		w = 2
+	w := uint64(2) // bits for values below n, at least 2
+	for (n-1)>>w != 0 {
+		w++
 	}
 	if w%2 == 1 {
 		w++

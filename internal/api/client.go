@@ -223,6 +223,20 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return s, c.get(ctx, "/v1/status", nil, &s)
 }
 
+// UI returns where the web UI listens and its URL with the token (GET
+// /v1/ui, socket only).
+func (c *Client) UI(ctx context.Context) (UIInfo, error) {
+	var u UIInfo
+	return u, c.get(ctx, "/v1/ui", nil, &u)
+}
+
+// Activity counts events and observations over a range, per bucket.
+func (c *Client) Activity(ctx context.Context, f store.ActivityFilter) (store.Activity, error) {
+	var a store.Activity
+	q := values{}.str("interface", f.Interface).str("host", f.HostID).time("since", f.Since).time("until", f.Until).int("buckets", f.Buckets)
+	return a, c.get(ctx, "/v1/activity", url.Values(q), &a)
+}
+
 // Interfaces lists the interfaces.
 func (c *Client) Interfaces(ctx context.Context) ([]store.InterfaceInfo, error) {
 	var out []store.InterfaceInfo

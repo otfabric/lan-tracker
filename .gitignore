@@ -20,3 +20,9 @@ coverage.html
 /test/fixtures/gen/gen
 /test/net/inject/inject
 /tools/capcheck/capcheck
+
+# The web UI: dependencies and the build, which make frontend writes and the
+# binary embeds (frontend/embed.go); .gitkeep keeps the embed valid without it.
+/frontend/node_modules/
+/frontend/dist/*
+!/frontend/dist/.gitkeep

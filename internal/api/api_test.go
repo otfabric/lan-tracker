@@ -27,6 +27,10 @@ const golden = "../../test/golden/reconstruction/"
 
 var t0 = storetest.T0
 
+// fixtureNow is the fixture server's clock (a daemon under replay runs on
+// recorded time).
+var fixtureNow = t0.Add(5 * time.Hour)
+
 // hub is a test event source.
 type hub struct {
 	mu   sync.Mutex
@@ -86,6 +90,7 @@ func start(t *testing.T) *fixture {
 			return api.WithConfig(ifs, cfg), err
 		},
 		Config: func() any { return cfg },
+		Now:    func() time.Time { return fixtureNow },
 		Metrics: metrics.Handler(func(*http.Request) []metrics.Family {
 			return []metrics.Family{{Name: "lan_tracker_up", Help: "Up.", Type: metrics.Gauge, Samples: []metrics.Sample{{Value: 1}}}}
 		}),
@@ -321,6 +326,7 @@ func TestStream(t *testing.T) {
 }
 
 func TestSocketHandling(t *testing.T) {
+	defer api.SetListenRetry(10*time.Millisecond, 40*time.Millisecond)()
 	f := start(t)
 	ctx := context.Background()
 	// A second server on the same socket is refused while the first runs.
@@ -355,14 +361,24 @@ func TestSocketHandling(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("socket left after shutdown: %v", err)
 	}
-	// A busy TCP address fails Start and removes the socket again.
+	// A busy TCP address does not fail Start: the socket serves, and the
+	// listener is reported until it binds.
 	third := api.New(api.Options{})
 	sock := filepath.Join(dir, "third.sock")
-	if err := third.Start(ctx, sock, f.listen); err == nil {
-		t.Error("busy listen address accepted")
+	tctx, tcancel := context.WithCancel(ctx)
+	if err := third.Start(tctx, sock, f.listen); err != nil {
+		t.Errorf("busy listen address: %v", err)
 	}
-	if _, err := os.Stat(sock); !os.IsNotExist(err) {
-		t.Errorf("socket left after a failed start: %v", err)
+	waitUntil(t, func() bool {
+		p := third.Problems()
+		return len(p) == 1 && strings.Contains(p[0], "api.listen "+f.listen)
+	})
+	if _, err := os.Stat(sock); err != nil {
+		t.Errorf("socket of a server without its TCP listener: %v", err)
+	}
+	tcancel()
+	if err := third.Wait(); err != nil {
+		t.Errorf("wait: %v", err)
 	}
 	if err := api.New(api.Options{}).Wait(); err != nil {
 		t.Errorf("wait without start: %v", err)

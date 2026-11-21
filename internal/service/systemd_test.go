@@ -50,6 +50,7 @@ func TestNotifier(t *testing.T) {
 		{"stopping", n.Stopping, "STOPPING=1"},
 		{"watchdog", n.Watchdog, "WATCHDOG=1"},
 		{"status", func() error { return n.Status("running") }, "STATUS=running"},
+		{"extend timeout", func() error { return n.ExtendTimeout(30 * time.Second) }, "EXTEND_TIMEOUT_USEC=30000000"},
 	}
 	for _, tt := range tests {
 		if err := tt.call(); err != nil {

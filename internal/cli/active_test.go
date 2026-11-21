@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -128,7 +129,7 @@ func TestActiveCommands(t *testing.T) {
 		{"disable needs a reason", []string{"active", "disable"}, nil, ExitUsage, "", `"reason" not set`},
 		{"enable", []string{"active", "enable"}, nil, 0, "Active discovery enabled.", ""},
 		{"enable json", []string{"-o", "json", "active", "enable", "--reason", "fixed"}, nil, 0, `"disabled": false`, ""},
-		{"enable while forced", []string{"active", "enable"}, api.ErrForced, ExitError, "", "LAN_TRACKER_ACTIVE_DISABLED=1"},
+		{"enable while forced", []string{"active", "enable"}, api.ErrForced, ExitError, "", "forced off by LAN_TRACKER_ACTIVE_DISABLED;"},
 		{"disable fails", []string{"active", "disable", "--reason", "x"}, errors.New("bus closed"), ExitError, "", "bus closed"},
 		{"offline disable", []string{"--offline", "active", "disable", "--reason", "x"}, nil, ExitUsage, "", "needs the running daemon"},
 		{"offline enable", []string{"--offline", "active", "enable"}, nil, ExitUsage, "", "needs the running daemon"},
@@ -330,9 +331,17 @@ func TestOfflineScanPlan(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "253 to sweep") || !strings.Contains(out, "known hosts") || !strings.Contains(out, "ALLOWED") {
 		t.Fatalf("offline plan: exit %d\n%s\n%s", code, out, stderr)
 	}
-	code, out, _ = runOffline([]string{config.EnvActiveDisabled + "=1"}, "scan", "plan")
-	if code != ExitError || !strings.Contains(out, "kill switch (LAN_TRACKER_ACTIVE_DISABLED=1)") {
+	code, out, _ = runOffline([]string{config.EnvActiveDisabled + "=yes"}, "scan", "plan")
+	if code != ExitError || !strings.Contains(out, "kill switch (LAN_TRACKER_ACTIVE_DISABLED=yes)") {
 		t.Errorf("offline plan with the environment switch: exit %d\n%s", code, out)
+	}
+	for _, v := range []string{"yes", "on"} { // a value not listed sets it too
+		if code, out, _ = runOffline([]string{config.EnvActiveDisabled + "=" + v}, "scan", "plan"); code != ExitError || !strings.Contains(out, "kill switch") {
+			t.Errorf("offline plan with %s=%s: exit %d\n%s", config.EnvActiveDisabled, v, code, out)
+		}
+	}
+	if code, _, _ = runOffline([]string{config.EnvActiveDisabled + "=false"}, "scan", "plan"); code != 0 {
+		t.Errorf("offline plan with the switch false: exit %d", code)
 	}
 	ctx := context.Background()
 	if err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -350,6 +359,28 @@ func TestOfflineScanPlan(t *testing.T) {
 	}
 	if code, _, stderr := runOffline(nil, "--db", "/nonexistent.db", "scan", "plan"); code != ExitError || !strings.Contains(stderr, "no such file") {
 		t.Errorf("missing db: exit %d %s", code, stderr)
+	}
+	// A database that cannot say whether the kill switch is set, or which
+	// hosts are known, gives no plan.
+	for _, table := range []string{"runtime_state", "addresses"} {
+		if err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `ALTER TABLE `+table+` RENAME TO damaged`)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if code, out, stderr := runOffline(nil, "scan", "plan"); code != ExitError || out != "" || !strings.Contains(stderr, "no such table: "+table) {
+			t.Errorf("plan without %s: exit %d\n%s\n%s", table, code, out, stderr)
+		}
+		if err := st.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `ALTER TABLE damaged RENAME TO `+table)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -376,6 +407,20 @@ func TestPlanFormatting(t *testing.T) {
 		}})
 	if strings.Count(buf.String(), "Estimate:") != 2 || strings.Contains(buf.String(), "eth2    Networks") {
 		t.Errorf("plan:\n%s", buf.String())
+	}
+
+	// Known hosts a TCP check cannot reach directly are listed, not dialled.
+	buf.Reset()
+	_ = a.printPlan(probe.Plan{Probes: probe.Probes{ICMP: true, TCP: []int{502}}, Rates: probe.Rates{Protocols: map[probe.Protocol]float64{probe.ICMP: 5, probe.TCP: 1},
+		TCPPerInterface: 2, TCPPerHost: 1}, Estimate: probe.Estimate{ICMPEchoes: 3, TCPConnects: 3, Starts: 6, TypicalSeconds: 3, NoResponseSeconds: 4},
+		Interfaces: []probe.InterfacePlan{{Interface: "eth1", Networks: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}, KnownTargets: 3,
+			NoDirectRoute: []string{"10.0.1.5 (via gateway 10.0.0.1)", "10.0.2.5 (via gateway 10.0.0.1)"}}}})
+	for _, want := range []string{"3 known hosts", "No route:   TCP checks need a direct route; these are not dialled (LOCAL_ERROR):\n",
+		"              10.0.1.5 (via gateway 10.0.0.1)\n", "              10.0.2.5 (via gateway 10.0.0.1)\n",
+		"icmp 5 starts/s, tcp 1 connects/s (≤2 per interface, ≤1 per host)", "3 ICMP echoes", "3 TCP connects"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("plan lacks %q:\n%s", want, buf.String())
+		}
 	}
 
 	buf.Reset()
@@ -412,5 +457,57 @@ logging: { format: text }
 	code, out, stderr := run("config", "validate")
 	if code != 0 || !strings.Contains(out, "sweep 262142 addresses (~18.2 h)") || !strings.Contains(out, "Expert override: active.max_sweep_targets 262144") {
 		t.Errorf("config validate: exit %d\n%s%s", code, out, stderr)
+	}
+}
+
+func TestUIURL(t *testing.T) {
+	f := serveControl(t)
+	code, out, stderr := f.run(t, "ui", "url")
+	if code != ExitError || !strings.Contains(stderr, "not enabled") {
+		t.Errorf("disabled: exit %d\n%s%s", code, out, stderr)
+	}
+	if code, out, _ := f.run(t, "-o", "json", "ui", "url"); code != 0 || !strings.Contains(out, `"enabled": false`) {
+		t.Errorf("disabled json: exit %d %s", code, out)
+	}
+	if code, _, stderr := f.run(t, "--offline", "ui", "url"); code != ExitUsage || !strings.Contains(stderr, "needs the running daemon") {
+		t.Errorf("offline: exit %d %s", code, stderr)
+	}
+	if code, _, stderr := f.run(t, "-o", "csv", "ui", "url"); code != ExitUsage {
+		t.Errorf("csv: exit %d %s", code, stderr)
+	}
+
+	// With the UI on: the URL alone, ready to open.
+	socket := filepath.Join(t.TempDir(), "ui.sock")
+	srv := api.New(api.Options{UI: &api.UIOptions{Listen: "127.0.0.1:0", Token: strings.Repeat("k", 43)}})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx, socket, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); _ = srv.Wait() })
+	var outb, errb bytes.Buffer
+	code = Execute(context.Background(), Env{Args: []string{"--socket", socket, "--config", f.cfgPath, "ui", "url"}, Stdout: &outb, Stderr: &errb})
+	if code != 0 || outb.String() != "http://127.0.0.1:0/#token="+strings.Repeat("k", 43)+"\n" {
+		t.Errorf("enabled: exit %d %q %q", code, outb.String(), errb.String())
+	}
+	// On every address: one URL per address of the box, loopback first.
+	socket = filepath.Join(t.TempDir(), "all.sock")
+	addrs := func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.0.106").To4(), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	all := api.New(api.Options{UI: &api.UIOptions{Listen: "0.0.0.0:0", Token: "k", Addrs: addrs}})
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	if err := all.Start(ctx2, socket, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel2(); _ = all.Wait() })
+	outb.Reset()
+	code = Execute(context.Background(), Env{Args: []string{"--socket", socket, "--config", f.cfgPath, "ui", "url"}, Stdout: &outb, Stderr: &errb})
+	if code != 0 || outb.String() != "http://127.0.0.1:0/#token=k\nhttp://192.168.0.106:0/#token=k\n" {
+		t.Errorf("every address: exit %d %q %q", code, outb.String(), errb.String())
+	}
+	// No daemon: unreachable.
+	code = Execute(context.Background(), Env{Args: []string{"--socket", filepath.Join(t.TempDir(), "none.sock"), "--config", f.cfgPath, "ui", "url"}, Stdout: &outb, Stderr: &errb})
+	if code != ExitUnreachable {
+		t.Errorf("no daemon: exit %d", code)
 	}
 }

@@ -80,9 +80,13 @@ func TestDowntimeGap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = st.Close() })
+		rd, err := st.Reader(time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = rd.Close(); _ = st.Close() })
 		log := slog.New(slog.DiscardHandler)
-		c, err := New(context.Background(), Options{Store: st, Events: events.NewEngine(st, log, nil), Clock: h.sim, Logger: log,
+		c, err := New(context.Background(), Options{Store: st, Reader: rd, Events: events.NewEngine(st, log, nil), Clock: h.sim, Logger: log,
 			Config: testConfig()})
 		if err != nil {
 			t.Fatal(err)

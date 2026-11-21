@@ -151,10 +151,10 @@ func TestNeighborWatchResubscribes(t *testing.T) {
 	first := <-f.chans
 	mac := net.HardwareAddr{0, 0x1b, 0x1b, 0, 0, 1}
 	first <- netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH, Neigh: netlink.Neigh{LinkIndex: 7, IP: net.ParseIP("10.0.0.1"),
-		HardwareAddr: mac, State: netlink.NUD_REACHABLE, Confirmed: 150}}
+		HardwareAddr: mac, State: netlink.NUD_REACHABLE, Confirmed: 150, Updated: 40}}
 	first <- netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH, Neigh: netlink.Neigh{LinkIndex: 99, IP: net.ParseIP("10.0.0.9")}} // unknown link: dropped
 	ev := <-ch
-	if ev.Neighbor.Interface != "eth7" || ev.Neighbor.State != "REACHABLE" || ev.Neighbor.ConfirmedAgo != 1500*time.Millisecond {
+	if ev.Neighbor.Interface != "eth7" || ev.Neighbor.State != "REACHABLE" || ev.Neighbor.ConfirmedAgo != 1500*time.Millisecond || ev.Neighbor.UpdatedAgo != 400*time.Millisecond {
 		t.Fatalf("event = %+v", ev)
 	}
 	f.fails = 1

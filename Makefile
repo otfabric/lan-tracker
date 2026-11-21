@@ -19,7 +19,7 @@ TEST_BIN := .build/test
 # Duration each fuzz target runs. Override with FUZZTIME=... (e.g. FUZZTIME=5m).
 FUZZTIME ?= 30s
 # Minimum coverage of internal/ in percent (make coverage, make check).
-COVER_MIN ?= 90
+COVER_MIN ?= 95
 # Per-package floor of the same measure (make coverage-pkg-check, TEST-012).
 # internal/platform sets it: its AF_PACKET, netlink and raw socket paths need
 # CAP_NET_RAW, so they run in make test-net, which is not counted.
@@ -36,12 +36,17 @@ CHAOS_STEPS ?= 2000
 DEV_IMAGE := lan-tracker-dev:$(shell git hash-object build/dev.Dockerfile 2>/dev/null | cut -c1-12)
 CACHE_VOL := lan-tracker-cache
 USER_ID   := $(shell id -u):$(shell id -g)
+# The web UI (frontend/, ADR 0012) builds in a pinned Node container with the
+# same checkout and cache volume, so no Node.js is needed on the host.
+NODE_IMAGE := node:24.14.0-bookworm-slim@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
+NODE_RUN   := docker run --rm -v "$(CURDIR)":/src -w /src -v $(CACHE_VOL):/cache --user $(USER_ID) \
+	-e HOME=/tmp -e npm_config_cache=/cache/npm -e npm_config_update_notifier=false $(NODE_IMAGE)
 RUN       := docker run --rm -v "$(CURDIR)":/src -w /src -v $(CACHE_VOL):/cache --user $(USER_ID) \
 	-e LDFLAGS="$(LDFLAGS)" -e FUZZTIME=$(FUZZTIME) -e VERSION=$(VERSION) -e SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
 	-e LT_REQUIRE_KERNEL=$(LT_REQUIRE_KERNEL) $(DEV_IMAGE)
 
 .DEFAULT_GOAL := help
-.PHONY: help all dev-image shell build release tools package oui fixtures fmt fmt-check tidy tidy-check mod-verify vet lint vuln \
+.PHONY: help all dev-image shell frontend frontend-check build release tools package oui fixtures fmt fmt-check tidy tidy-check mod-verify vet lint vuln \
 	test coverage coverage-pkg-check cover fuzz chaos soak test-net test-systemd check check-all run-dev clean clean-cache
 
 help: ## This help
@@ -63,11 +68,19 @@ shell: dev-image ## Open a shell in the dev container
 
 # --- build -------------------------------------------------------------------
 
-build: dev-image ## Build bin/lan-tracker for the Docker host's architecture
+frontend: dev-image ## Build the web UI into frontend/dist (embedded by build, release and package)
+	@echo "Building the web UI"
+	@$(NODE_RUN) build/frontend.sh build
+
+frontend-check: dev-image ## Typecheck and test the web UI
+	@echo "Checking the web UI"
+	@$(NODE_RUN) build/frontend.sh check
+
+build: dev-image frontend ## Build bin/lan-tracker for the Docker host's architecture (web UI embedded)
 	@echo "Building bin/$(BIN) ($(VERSION))"
 	@$(RUN) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BIN) ./cmd/$(BIN)
 
-release: dev-image ## Static linux/amd64 and linux/arm64 binaries into dist/ with SHA256SUMS
+release: dev-image frontend ## Static linux/amd64 and linux/arm64 binaries into dist/ with SHA256SUMS
 	@$(RUN) build/release.sh release
 
 tools: dev-image ## capcheck for linux/amd64 and linux/arm64 into dist/tools/ (privilege check)
@@ -125,7 +138,7 @@ test: dev-image ## Unit and golden tests with the race detector
 
 # Coverage of internal/ from every test package; fails below COVER_MIN
 # (build/coverage.sh says what is counted).
-coverage: dev-image ## Tests with race detector and coverage of internal/ (fails below COVER_MIN, default 90%)
+coverage: dev-image ## Tests with race detector and coverage of internal/ (fails below COVER_MIN, default 95%)
 	@echo "Running tests with coverage of internal/ (minimum $(COVER_MIN)%)"
 	@$(RUN) env COVER_MIN=$(COVER_MIN) COVERAGE=$(COVERAGE) build/coverage.sh
 
@@ -161,7 +174,7 @@ test-systemd: dev-image ## The daemon under systemd in a container with the depl
 
 # --- gates -------------------------------------------------------------------
 
-check: fmt-check tidy-check vet lint vuln coverage-pkg-check ## Fast gate: format, tidy, vet, lint, vuln, tests with coverage
+check: fmt-check tidy-check vet lint vuln coverage-pkg-check frontend-check ## Fast gate: format, tidy, vet, lint, vuln, tests with coverage, web UI typecheck and tests
 
 check-all: check test-net test-systemd ## check plus the Docker network and systemd suites
 
@@ -171,9 +184,10 @@ run-dev: dev-image ## Run the daemon in the dev container on the replay dev conf
 	@docker run --rm -it --init -v "$(CURDIR)":/src -w /src -v $(CACHE_VOL):/cache --user $(USER_ID) \
 		$(DEV_IMAGE) go run ./cmd/$(BIN) daemon run --config deploy/config.dev.yaml
 
-clean: ## Remove bin/, dist/, dev/, .build/ and coverage output
+clean: ## Remove bin/, dist/, dev/, .build/, the web UI build and coverage output
 	@echo "Cleaning up"
 	@rm -rf bin dist dev .build $(COVERAGE) coverage.html
+	@find frontend/dist -mindepth 1 ! -name .gitkeep -exec rm -rf {} + 2>/dev/null || true
 
 clean-cache: ## Remove the dev container cache volume
 	@docker volume rm $(CACHE_VOL) >/dev/null 2>&1 || true

@@ -128,6 +128,7 @@ func (n *netlinkNeighbors) convert(ne netlink.Neigh) (Neighbor, bool) {
 		MAC:          append(net.HardwareAddr(nil), ne.HardwareAddr...),
 		State:        nudState(ne.State),
 		ConfirmedAgo: time.Duration(ne.Confirmed) * time.Second / userHZ,
+		UpdatedAgo:   time.Duration(ne.Updated) * time.Second / userHZ,
 	}, true
 }
 

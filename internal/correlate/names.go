@@ -274,7 +274,7 @@ func (c *Correlator) endRecord(ctx context.Context, r *record, t time.Time, reas
 	}
 	delete(h.names, key)
 	touched[h] = true
-	if reason == endEvicted {
+	if reason == endEvicted || reason == endHostEvicted {
 		return
 	}
 	ev.Reason = reason

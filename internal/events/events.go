@@ -29,6 +29,8 @@ const (
 	HostDisappeared     Type = "HOST_DISAPPEARED"
 	HostReappeared      Type = "HOST_REAPPEARED"
 	HostDescribed       Type = "HOST_DESCRIBED"
+	HostEvicted         Type = "HOST_EVICTED"
+	HostCapReached      Type = "HOST_CAP_REACHED"
 	IPAdded             Type = "IP_ADDED"
 	IPRemoved           Type = "IP_REMOVED"
 	MACAlsoObserved     Type = "MAC_ALSO_OBSERVED"
@@ -83,6 +85,8 @@ func init() {
 		{HostDisappeared, "disappeared", Notice},
 		{HostReappeared, "reappeared", Notice},
 		{HostDescribed, "described", Notice},
+		{HostEvicted, "evicted", Notice},
+		{HostCapReached, "host-cap", Warning},
 		{IPAdded, "ip-added", Notice},
 		{IPRemoved, "ip-removed", Notice},
 		{MACAlsoObserved, "mac-also-observed", Notice},

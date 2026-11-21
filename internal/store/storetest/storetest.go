@@ -101,7 +101,11 @@ func Seed(t testing.TB, dir string) (*store.Store, string, Expected) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	rd, err := st.Reader(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rd.Close(); _ = st.Close() })
 	cfg := config.Defaults()
 	cfg.Interfaces = []config.InterfaceConfig{{Name: "eth0"}, {Name: "eth1"}}
 	vendors, err := identify.Embedded()
@@ -109,7 +113,7 @@ func Seed(t testing.TB, dir string) (*store.Store, string, Expected) {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.DiscardHandler)
-	c, err := correlate.New(ctx, correlate.Options{Store: st, Events: events.NewEngine(st, log, func() platform.ClockState { return platform.ClockSynced }), Vendors: vendors,
+	c, err := correlate.New(ctx, correlate.Options{Store: st, Reader: rd, Events: events.NewEngine(st, log, func() platform.ClockState { return platform.ClockSynced }), Vendors: vendors,
 		Clock: sim, Logger: log, Config: cfg, DataDriven: true})
 	if err != nil {
 		t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/otfabric/lan-tracker/internal/api"
+	"github.com/otfabric/lan-tracker/internal/config"
 	"github.com/otfabric/lan-tracker/internal/platform"
 	"github.com/otfabric/lan-tracker/internal/probe/scheduler"
 	"github.com/otfabric/lan-tracker/internal/store"
@@ -70,8 +71,10 @@ func (a *app) statusText(w io.Writer, st api.Status) {
 	active := "enabled"
 	if st.Active.Disabled {
 		active = "DISABLED"
-		if st.Active.Forced {
-			active += " (" + "LAN_TRACKER_ACTIVE_DISABLED=1)"
+		if st.Active.Forced && strings.HasPrefix(st.Active.Reason, config.EnvActiveDisabled+"=") {
+			active += " (" + st.Active.Reason + ")"
+		} else if st.Active.Forced {
+			active += " (" + config.EnvActiveDisabled + " is set)"
 		} else if st.Active.Reason != "" {
 			active += " (" + st.Active.Reason + ")"
 		}
@@ -93,6 +96,11 @@ func (a *app) statusText(w io.Writer, st api.Status) {
 		}
 	}
 	fmt.Fprintf(w, "Last scan:  %s\n", last)
+	ui := "disabled"
+	if st.UI.Enabled {
+		ui = "enabled on " + st.UI.Listen + "   (URL with the token: sudo lan-tracker ui url)"
+	}
+	fmt.Fprintf(w, "Web UI:     %s\n", ui)
 	fmt.Fprintln(w, "Interfaces:")
 	for _, i := range st.Interfaces {
 		fmt.Fprintf(w, "  %-6s %-7s %s\n", i.Name, i.State, strings.Join(i.Prefixes, " "))

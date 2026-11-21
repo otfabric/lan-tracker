@@ -33,7 +33,7 @@ func (a *app) daemonRunCmd() *cobra.Command {
 			var ve *config.ValidationError
 			switch {
 			case errors.As(err, &ve):
-				a.env.Stderr.Write([]byte(ve.Error() + "\n")) //nolint:errcheck // best effort
+				_, _ = a.env.Stderr.Write([]byte(ve.Error() + "\n")) // best effort: the exit code reports the failure
 				return silent(ExitError)
 			case err != nil:
 				return fail(ExitError, err)

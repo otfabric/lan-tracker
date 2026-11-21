@@ -296,7 +296,8 @@ func neighborSolicitation(ifi ifaceInfo, target netip.Addr) ([]byte, error) {
 	}
 	t := target.As16()
 	dst := netip.AddrFrom16([16]byte{0xff, 0x02, 10: 0, 11: 0x01, 12: 0xff, 13: t[13], 14: t[14], 15: t[15]})
-	body := make([]byte, 32) // type, code, csum, reserved, target, SLLA option
+	const bodyLen = 32 // type, code, csum, reserved, target, SLLA option
+	body := make([]byte, bodyLen)
 	body[0] = 135
 	copy(body[8:24], t[:])
 	body[24], body[25] = 1, 1 // source link-layer address option, 8 bytes
@@ -307,7 +308,7 @@ func neighborSolicitation(ifi ifaceInfo, target netip.Addr) ([]byte, error) {
 	ps := make([]byte, 0, 40+len(body))
 	ps = append(ps, src[:]...)
 	ps = append(ps, d[:]...)
-	ps = binary.BigEndian.AppendUint32(ps, uint32(len(body)))
+	ps = binary.BigEndian.AppendUint32(ps, bodyLen)
 	ps = append(ps, 0, 0, 0, 58)
 	ps = append(ps, body...)
 	binary.BigEndian.PutUint16(body[2:], checksum(ps))
@@ -318,7 +319,7 @@ func neighborSolicitation(ifi ifaceInfo, target netip.Addr) ([]byte, error) {
 	binary.BigEndian.PutUint16(f[12:], 0x86dd)
 	ip := f[14:54]
 	ip[0] = 0x60
-	binary.BigEndian.PutUint16(ip[4:], uint16(len(body)))
+	binary.BigEndian.PutUint16(ip[4:], bodyLen)
 	ip[6], ip[7] = 58, 255 // ICMPv6, hop limit 255
 	copy(ip[8:24], src[:])
 	copy(ip[24:40], d[:])

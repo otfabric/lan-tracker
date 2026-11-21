@@ -27,9 +27,12 @@ type harness struct {
 	ctx  context.Context
 	path string
 	st   *store.Store
+	rd   *store.Reader
 	c    *Correlator
 	sim  *clock.Sim
 	ids  int
+	// flushEvery is the store's batch interval; 0 is its default.
+	flushEvery time.Duration
 }
 
 func testConfig() *config.Config {
@@ -49,7 +52,7 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) open() {
 	h.t.Helper()
-	st, err := store.Open(h.ctx, store.Options{Path: h.path, Clock: h.sim})
+	st, err := store.Open(h.ctx, store.Options{Path: h.path, Clock: h.sim, FlushInterval: h.flushEvery})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -57,22 +60,27 @@ func (h *harness) open() {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	rd, err := st.Reader(time.Hour)
+	if err != nil {
+		h.t.Fatal(err)
+	}
 	log := slog.New(slog.DiscardHandler)
 	c, err := New(h.ctx, Options{
-		Store: st, Events: events.NewEngine(st, log, nil), Vendors: vendors, Clock: h.sim, Logger: log,
+		Store: st, Reader: rd, Events: events.NewEngine(st, log, nil), Vendors: vendors, Clock: h.sim, Logger: log,
 		Config: testConfig(), DataDriven: true,
 		NewID: func() string { h.ids++; return fmt.Sprintf("host-%02d", h.ids) },
 	})
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.st, h.c = st, c
-	h.t.Cleanup(func() { _ = st.Close() })
+	h.st, h.rd, h.c = st, rd, c
+	h.t.Cleanup(func() { _ = rd.Close(); _ = st.Close() })
 }
 
 // restart closes the store and builds a new correlator from the database.
 func (h *harness) restart() {
 	h.t.Helper()
+	_ = h.rd.Close()
 	if err := h.st.Close(); err != nil {
 		h.t.Fatal(err)
 	}

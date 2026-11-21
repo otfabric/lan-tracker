@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 16 Oct 2026
 - Specified in: `REQUIREMENTS.md` §1, §4, §5 (Tracker scope, 16 Oct 2026); `ARCHITECTURE.md` §5; `DATA_MODEL.md` §2, §5; AGENTS.md rules 7 and 11
+- Amended: 21 Nov 2026, the UI item of Ruled out superseded by [0012](0012-web-ui-served-by-the-daemon.md)
 - Amends: [0008](0008-active-discovery-safety-envelope.md), whose budgets count probe starts as decided here
 
 ## Context
@@ -29,5 +30,5 @@ Operators of OT sites need an evidence-based history of which MACs, IPs, names a
 - Passive device, OS or vendor classification, and confidence ranking.
 - SYN scanning, generic UDP scanning, register scanning, IPv6 sweeping.
 - A DHCP client, server, leasequery client or packet injector; DHCPv6.
-- A UI, remote API, fleet sync, alerting engine, automatic network repair and continuous packet recording.
+- A remote API, fleet sync, alerting engine, automatic network repair and continuous packet recording. (A UI was ruled out here too; superseded on 21 Nov 2026 by [0012](0012-web-ui-served-by-the-daemon.md): an opt-in web UI on loopback.)
 - Depending on `go-otfp` or running `modbusctl`, `sunspecctl` or `otprobe` from the daemon.

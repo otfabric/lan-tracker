@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 )
@@ -106,46 +107,68 @@ func Encode(entries map[string]string) ([]byte, error) {
 	type entry struct {
 		key  uint64
 		name string
+		n    uint8 // len(name)
 	}
 	var classes [len(PrefixBits)][]entry
 	for prefix, name := range entries {
-		class := -1
-		for i, bits := range PrefixBits {
-			if len(prefix)*4 == bits {
-				class = i
+		class, ok := 0, false
+		for i := range classes {
+			if len(prefix)*4 == PrefixBits[i] {
+				class, ok = i, true
 			}
 		}
-		key, err := strconv.ParseUint(prefix, 16, 64)
-		if class < 0 || err != nil {
+		if !ok {
 			return nil, fmt.Errorf("prefix %q: want 6, 7 or 9 hex digits", prefix)
 		}
-		if name == "" || len(name) > 255 {
-			return nil, fmt.Errorf("prefix %s: the name must be 1 to 255 bytes, got %d", prefix, len(name))
+		// A key has exactly the class's prefix bits, so 24- and 28-bit keys
+		// fit the uint32 they are written as.
+		key, err := strconv.ParseUint(prefix, 16, PrefixBits[class])
+		if err != nil {
+			return nil, fmt.Errorf("prefix %q: want 6, 7 or 9 hex digits", prefix)
 		}
-		classes[class] = append(classes[class], entry{key, name})
+		n := len(name)
+		if n < 1 || n > 255 {
+			return nil, fmt.Errorf("prefix %s: the name must be 1 to 255 bytes, got %d", prefix, n)
+		}
+		classes[class] = append(classes[class], entry{key, name, uint8(n)})
 	}
 	var head, keys, offs, names bytes.Buffer
 	head.Write(tableMagic)
 	nameAt := map[string]uint32{}
 	for i := range classes {
 		sort.Slice(classes[i], func(a, b int) bool { return classes[i][a].key < classes[i][b].key })
-		head.Write(binary.BigEndian.AppendUint32(nil, uint32(len(classes[i])))) //nolint:gosec // fewer than 2^32 entries
+		n, err := u32(len(classes[i]))
+		if err != nil {
+			return nil, err
+		}
+		head.Write(binary.BigEndian.AppendUint32(nil, n))
 		for _, e := range classes[i] {
-			if keyWidth[i] == 8 {
-				keys.Write(binary.BigEndian.AppendUint64(nil, e.key))
-			} else {
-				keys.Write(binary.BigEndian.AppendUint32(nil, uint32(e.key))) //nolint:gosec // 24 or 28 bits
-			}
+			k := binary.BigEndian.AppendUint64(nil, e.key)
+			keys.Write(k[8-keyWidth[i]:])
 			at, ok := nameAt[e.name]
 			if !ok {
-				at = uint32(names.Len()) //nolint:gosec // names stay far below 4 GiB
+				if at, err = u32(names.Len()); err != nil {
+					return nil, err
+				}
 				nameAt[e.name] = at
-				names.WriteByte(byte(len(e.name)))
+				names.WriteByte(e.n)
 				names.WriteString(e.name)
 			}
 			offs.Write(binary.BigEndian.AppendUint32(nil, at))
 		}
 	}
-	head.Write(binary.BigEndian.AppendUint32(nil, uint32(names.Len()))) //nolint:gosec // see above
+	n, err := u32(names.Len())
+	if err != nil {
+		return nil, err
+	}
+	head.Write(binary.BigEndian.AppendUint32(nil, n))
 	return bytes.Join([][]byte{head.Bytes(), keys.Bytes(), offs.Bytes(), names.Bytes()}, nil), nil
+}
+
+// u32 converts a count or offset to the table's uint32 fields.
+func u32(n int) (uint32, error) {
+	if n < 0 || n > math.MaxUint32 {
+		return 0, fmt.Errorf("ouitable: %d does not fit the table's 32-bit fields", n)
+	}
+	return uint32(n), nil
 }
