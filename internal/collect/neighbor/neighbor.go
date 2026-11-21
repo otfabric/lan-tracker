@@ -3,10 +3,18 @@
 // notifications, and a fresh dump after notification loss and every
 // neighbor.resync_interval.
 //
-// Each observation is stamped with the time the kernel last confirmed
-// reachability, not the time it was read. A STALE entry that lingers in the
-// table therefore adds no fresh evidence, so a switched-off device still
-// becomes MISSING, and STALE is never read as offline either.
+// Each observation is stamped with the time of the kernel's evidence, not the
+// time it was read. A binding the collector has not emitted before (a new
+// entry, or a new MAC behind a known address) is stamped with the later of
+// the entry's confirmation (ndm_confirmed) and its last update
+// (ndm_updated): the kernel dates a new entry's confirmation twice
+// base_reachable_time before the entry existed (neigh_alloc), and keeps the
+// old confirmation when a received packet changes the MAC, while every MAC
+// change updates ndm_updated. Afterwards the entry is emitted again only when
+// the kernel confirms it anew, stamped with that confirmation. A STALE entry
+// that lingers in the table therefore adds no fresh evidence, so a
+// switched-off device still becomes MISSING, and STALE is never read as
+// offline either.
 package neighbor
 
 import (
@@ -52,8 +60,8 @@ type key struct {
 }
 
 type emission struct {
-	mac       string
-	confirmed time.Time
+	mac   string
+	stamp time.Time
 }
 
 // New returns a collector.
@@ -154,15 +162,23 @@ func (c *Collector) emit(n platform.Neighbor, now time.Time) {
 	if !c.ifaces[n.Interface] || !usable(n) {
 		return
 	}
-	confirmed := now.Add(-n.ConfirmedAgo).Truncate(time.Millisecond)
+	stamp := now.Add(-n.ConfirmedAgo).Truncate(time.Millisecond)
 	k := key{n.Interface, n.IP}
 	mac := n.MAC.String()
-	if prev, ok := c.emitted[k]; ok && prev.mac == mac && !confirmed.After(prev.confirmed.Add(confirmTolerance)) {
-		return // nothing new since the last observation
+	if prev, ok := c.emitted[k]; !ok || prev.mac != mac {
+		// A binding not emitted before: its confirmation time may predate
+		// it (package comment); it has held this MAC since its last update.
+		if updated := now.Add(-n.UpdatedAgo).Truncate(time.Millisecond); updated.After(stamp) {
+			c.o.Logger.Debug("neighbour entry stamped with its update time", "iface", n.Interface, "ip", n.IP, "mac", mac,
+				"state", n.State, "confirmed_ago", n.ConfirmedAgo, "updated_ago", n.UpdatedAgo)
+			stamp = updated
+		}
+	} else if !stamp.After(prev.stamp.Add(confirmTolerance)) {
+		return // not confirmed anew since the last observation
 	}
-	c.emitted[k] = emission{mac: mac, confirmed: confirmed}
+	c.emitted[k] = emission{mac: mac, stamp: stamp}
 	c.o.Bus.Publish(observation.Observation{
-		Time: confirmed, Source: observation.KernelNeighbor, Interface: n.Interface,
+		Time: stamp, Source: observation.KernelNeighbor, Interface: n.Interface,
 		MAC: append(net.HardwareAddr(nil), n.MAC...), IP: n.IP, NeighborState: n.State,
 	})
 }

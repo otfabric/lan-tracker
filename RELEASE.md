@@ -1,5 +1,20 @@
 # lan-tracker Releases
 
+## v0.4.1
+
+**Date:** 2026-11-21
+**Previous release:** v0.4.0
+
+### Summary
+
+Patch release: kernel neighbour-table entries no longer date a new address binding before it existed.
+
+### Fixed
+
+- A binding first learned from the kernel neighbour table was stamped with the kernel's confirmation time. For an entry the kernel had just created from a received packet, that time is synthetic: twice `base_reachable_time` (60 s by default) before the entry existed. For an entry whose MAC a received packet had changed, it is the previous MAC's last confirmation, possibly hours earlier. `HOST_DISCOVERED`, `IP_ADDED` and `DUPLICATE_IP_DETECTED` from such entries, and the bindings' start times, were dated that much too early, and a second holder of an address could appear to have claimed it first. Such a binding is now stamped no earlier than the entry's last update (`ndm_updated`); re-confirmations keep their confirmation time, so a lingering STALE entry still adds no fresh evidence. Data already recorded is not changed.
+
+---
+
 ## v0.4.0
 
 **Date:** 2026-11-21

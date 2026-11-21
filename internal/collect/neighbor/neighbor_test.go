@@ -15,9 +15,15 @@ import (
 
 var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
 
+// nb is an entry last confirmed and last updated ago.
 func nb(ip, mac, state string, ago time.Duration) platform.Neighbor {
+	return nbu(ip, mac, state, ago, ago)
+}
+
+// nbu is an entry with separate confirmation and update ages.
+func nbu(ip, mac, state string, confirmedAgo, updatedAgo time.Duration) platform.Neighbor {
 	m, _ := net.ParseMAC(mac)
-	return platform.Neighbor{Interface: "eth1", IP: netip.MustParseAddr(ip), MAC: m, State: state, ConfirmedAgo: ago}
+	return platform.Neighbor{Interface: "eth1", IP: netip.MustParseAddr(ip), MAC: m, State: state, ConfirmedAgo: confirmedAgo, UpdatedAgo: updatedAgo}
 }
 
 // drain returns everything on the bus without blocking.
@@ -69,10 +75,76 @@ func TestDuplicatesSkippedUntilReconfirmed(t *testing.T) {
 	}
 	// Reconfirmed: new evidence.
 	c.emit(nb("10.0.0.1", "00:1b:1b:00:00:01", "REACHABLE", 0), t0.Add(2*time.Minute))
-	// Different MAC behind the same IP: new evidence even with an old time.
-	c.emit(nb("10.0.0.1", "00:1b:1b:00:00:09", "STALE", time.Hour), t0.Add(3*time.Minute))
+	// Different MAC behind the same IP: new evidence.
+	c.emit(nbu("10.0.0.1", "00:1b:1b:00:00:09", "STALE", time.Hour, 0), t0.Add(3*time.Minute))
 	if n := len(drain(bus)); n != 2 {
 		t.Fatalf("reconfirmation and MAC change emitted %d observations, want 2", n)
+	}
+	// The entry decays from REACHABLE to STALE: an update, not a confirmation.
+	c.emit(nbu("10.0.0.1", "00:1b:1b:00:00:09", "STALE", time.Hour+time.Minute, 0), t0.Add(4*time.Minute))
+	if n := len(drain(bus)); n != 0 {
+		t.Fatalf("a state change without confirmation emitted %d observations, want 0", n)
+	}
+}
+
+// TestNewEntryNotDatedBeforeItExisted: the kernel dates a new entry's
+// confirmation twice base_reachable_time (60 s by default) before its
+// creation (neigh_alloc). A packet-learned STALE entry created 1 s ago is
+// stamped 1 s ago, not 61 s ago.
+func TestNewEntryNotDatedBeforeItExisted(t *testing.T) {
+	bus := observation.NewBus(16)
+	c := New(Options{Source: &fake.Neighbors{}, Bus: bus, Clock: clock.NewSim(t0), Interfaces: []string{"eth1"}})
+
+	c.emit(nbu("10.0.0.11", "28:d2:44:66:00:08", "STALE", 61*time.Second, time.Second), t0)
+	got := drain(bus)
+	if len(got) != 1 || !got[0].Time.Equal(t0.Add(-time.Second)) {
+		t.Fatalf("new entry = %+v, want one observation at %s", got, t0.Add(-time.Second))
+	}
+	// Read again by a resync a minute later: nothing new.
+	c.emit(nbu("10.0.0.11", "28:d2:44:66:00:08", "STALE", 121*time.Second, 61*time.Second), t0.Add(time.Minute))
+	if n := len(drain(bus)); n != 0 {
+		t.Fatalf("unchanged new entry emitted %d more observations, want 0", n)
+	}
+	// Its first real confirmation is new evidence, stamped with it.
+	c.emit(nbu("10.0.0.11", "28:d2:44:66:00:08", "REACHABLE", 2*time.Second, 2*time.Second), t0.Add(2*time.Minute))
+	got = drain(bus)
+	if len(got) != 1 || !got[0].Time.Equal(t0.Add(2*time.Minute-2*time.Second)) {
+		t.Fatalf("confirmation = %+v", got)
+	}
+}
+
+// TestMACChangeStampedWithTheChange: a received packet that changes an
+// entry's MAC leaves its confirmation time as it was (the old MAC's). The
+// new binding is stamped when the entry changed, not when the old MAC was
+// last confirmed.
+func TestMACChangeStampedWithTheChange(t *testing.T) {
+	bus := observation.NewBus(16)
+	c := New(Options{Source: &fake.Neighbors{}, Bus: bus, Clock: clock.NewSim(t0), Interfaces: []string{"eth1"}})
+
+	c.emit(nb("10.0.0.11", "00:80:f4:22:11:02", "REACHABLE", 0), t0)
+	at := t0.Add(3 * time.Hour)
+	c.emit(nbu("10.0.0.11", "28:d2:44:66:00:08", "STALE", 3*time.Hour, 500*time.Millisecond), at)
+	got := drain(bus)
+	if len(got) != 2 || got[1].MAC.String() != "28:d2:44:66:00:08" || !got[1].Time.Equal(at.Add(-500*time.Millisecond)) {
+		t.Fatalf("MAC change = %+v, want the new MAC at %s", got, at.Add(-500*time.Millisecond))
+	}
+}
+
+// TestFirstSightOfDecayedEntry: at start-up a lingering STALE entry is
+// stamped no earlier than its last update, and a later confirmation is
+// still new evidence.
+func TestFirstSightOfDecayedEntry(t *testing.T) {
+	bus := observation.NewBus(16)
+	c := New(Options{Source: &fake.Neighbors{}, Bus: bus, Clock: clock.NewSim(t0), Interfaces: []string{"eth1"}})
+
+	c.emit(nbu("10.0.0.2", "00:1b:1b:00:00:02", "STALE", 2*time.Hour, 2*time.Hour-30*time.Second), t0)
+	got := drain(bus)
+	if len(got) != 1 || !got[0].Time.Equal(t0.Add(-2*time.Hour+30*time.Second)) {
+		t.Fatalf("decayed entry = %+v", got)
+	}
+	c.emit(nb("10.0.0.2", "00:1b:1b:00:00:02", "REACHABLE", 0), t0.Add(time.Minute))
+	if n := len(drain(bus)); n != 1 {
+		t.Fatalf("reconfirmation emitted %d observations, want 1", n)
 	}
 }
 
