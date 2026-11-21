@@ -64,6 +64,10 @@ type Pass struct {
 	Clock  clock.Clock // nil: the wall clock
 	// ReplyTimeout bounds the wait for an ARP or ICMP reply.
 	ReplyTimeout time.Duration
+	// MaxQueries caps the name queries a pass sends, CNAME follow-ups
+	// included (active.names.max_queries_per_pass); 0: no cap. A pass that
+	// reaches it stops with ErrPassCap.
+	MaxQueries int
 }
 
 // NameQuery is one DNS or mDNS question: Type is a dnsmessage.Type (A,

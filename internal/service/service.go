@@ -3,7 +3,10 @@
 // (systemd.go).
 package service
 
-import "log/slog"
+import (
+	"log/slog"
+	"time"
+)
 
 // Custom slog levels beyond the standard four. Events use Notice; journald
 // maps it to priority 5.
@@ -22,4 +25,7 @@ type Notifier interface {
 	// false if the service manager does not use a watchdog.
 	WatchdogInterval() (interval int64, ok bool)
 	Status(msg string) error
+	// ExtendTimeout asks for at least d more before the current start (or
+	// stop) timeout expires (EXTEND_TIMEOUT_USEC).
+	ExtendTimeout(d time.Duration) error
 }

@@ -59,15 +59,24 @@ func question(q probe.NameQuery) string {
 
 // Run implements probe.Engine: each query of the pass in order, one start
 // each (a CNAME followed is another). A question with a fresh negative
-// answer is skipped without sending.
+// answer is skipped without sending. Every query sent, CNAME follow-ups
+// included, counts against p.MaxQueries; when they are spent the pass
+// stops with probe.ErrPassCap.
 func (e *Engine) Run(ctx context.Context, p probe.Pass) ([]probe.Result, error) {
 	var results []probe.Result
+	sent := 0
 	for _, q := range p.Names {
 		if e.negativeUntil(question(q)).After(p.Now()) {
 			continue
 		}
-		name := q.Name
+		ask := q
 		for hop := 0; ; hop++ {
+			if p.MaxQueries > 0 && sent >= p.MaxQueries {
+				if hop > 0 {
+					e.unresolved(p, q, "")
+				}
+				return results, probe.ErrPassCap
+			}
 			release, err := p.Budget.Acquire(ctx, probe.Name, p.Link.Name, q.Server.Addr())
 			if errors.Is(err, probe.ErrRefused) {
 				results = append(results, probe.Result{Target: q.Server.Addr(), State: probe.Blocked})
@@ -76,21 +85,42 @@ func (e *Engine) Run(ctx context.Context, p probe.Pass) ([]probe.Result, error) 
 			if err != nil {
 				return results, err
 			}
-			ask := q
-			ask.Name = name
+			sent++
 			res, cname, err := e.ask(ctx, p, ask)
 			release()
 			if err != nil {
 				return results, err
 			}
 			results = append(results, probe.Result{Target: q.Server.Addr(), State: res})
-			if cname == "" || q.MDNS || hop >= maxCNAMEs {
+			if cname == "" || q.MDNS {
+				if hop > 0 {
+					e.unresolved(p, q, question(ask))
+				}
 				break
 			}
-			name = cname // a CNAME without the asked record: follow it, bounded
+			if hop >= maxCNAMEs {
+				e.unresolved(p, q, "")
+				break
+			}
+			ask.Name = cname // a CNAME without the asked record: follow it, bounded
 		}
 	}
 	return results, nil
+}
+
+// unresolved keeps q, a question answered with a CNAME only, as negative
+// when its target could not be resolved within the pass: the chain was
+// longer than maxCNAMEs or the pass's queries ran out (target ""), or the
+// last target asked has a negative answer, which q then shares. A chain
+// that ended in the asked record or in silence keeps nothing.
+func (e *Engine) unresolved(p probe.Pass, q probe.NameQuery, target string) {
+	until := p.Now().Add(negativeFloor)
+	if target != "" {
+		if until = e.negativeUntil(target); !until.After(p.Now()) {
+			return
+		}
+	}
+	e.rememberNegative(question(q), until)
 }
 
 func (e *Engine) negativeUntil(q string) time.Time {
@@ -246,7 +276,7 @@ func build(id uint16, q probe.NameQuery) ([]byte, error) {
 		return nil, err
 	}
 	if err := b.Question(dnsmessage.Question{Name: n, Type: dnsmessage.Type(q.Type), Class: dnsmessage.ClassINET}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query %q: %w", q.Name, err)
 	}
 	return b.Finish()
 }

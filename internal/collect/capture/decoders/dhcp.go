@@ -116,9 +116,10 @@ func parseDHCP(b []byte) (*observation.DHCPMessage, bool) {
 	if b[1] == 1 && b[2] == 6 {
 		m.CHAddr = net.HardwareAddr(b[28:34]).String()
 	}
-	bad := func(code int) { m.Malformed = append(m.Malformed, code) }
-	addr := func(code int) netip.Addr {
-		v, ok := opts[byte(code)]
+	// Option codes are one octet (RFC 2132 §2), so the helpers take a byte.
+	bad := func(code byte) { m.Malformed = append(m.Malformed, int(code)) }
+	addr := func(code byte) netip.Addr {
+		v, ok := opts[code]
 		if !ok {
 			return netip.Addr{}
 		}
@@ -128,8 +129,8 @@ func parseDHCP(b []byte) (*observation.DHCPMessage, bool) {
 		}
 		return addr4(v)
 	}
-	seconds := func(code int) *uint32 {
-		v, ok := opts[byte(code)]
+	seconds := func(code byte) *uint32 {
+		v, ok := opts[code]
 		if !ok {
 			return nil
 		}
@@ -140,8 +141,8 @@ func parseDHCP(b []byte) (*observation.DHCPMessage, bool) {
 		s := binary.BigEndian.Uint32(v)
 		return &s
 	}
-	list := func(code int) []netip.Addr {
-		v, ok := opts[byte(code)]
+	list := func(code byte) []netip.Addr {
+		v, ok := opts[code]
 		if !ok {
 			return nil
 		}
@@ -183,10 +184,10 @@ func parseDHCP(b []byte) (*observation.DHCPMessage, bool) {
 		}
 	}
 	for _, rc := range []struct {
-		code int
+		code byte
 		dst  *[]observation.DHCPRoute
 	}{{dhcpOptRoutes, &m.Routes}, {dhcpOptMSRoutes, &m.MSRoutes}} {
-		if v, ok := opts[byte(rc.code)]; ok {
+		if v, ok := opts[rc.code]; ok {
 			var err error
 			if *rc.dst, err = classlessRoutes(v); err != nil {
 				bad(rc.code)

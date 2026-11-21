@@ -45,7 +45,7 @@ sudo systemctl enable lan-tracker
 sudo systemctl restart lan-tracker
 ```
 
-Edit `/etc/lan-tracker/config.yaml` for the site (interfaces, and active discovery only after review, see below), check it with `sudo lan-tracker config validate`, then apply it with `sudo lan-tracker config reload`, which prints what took effect and what needs `sudo systemctl restart lan-tracker` (adding, removing or renaming interfaces, passive capture, storage, API, metrics, log format, `identity.oui_override` and the concurrency caps). The API socket and the database are root's (mode 0660 and 0640): run `lan-tracker` commands with `sudo`.
+Edit `/etc/lan-tracker/config.yaml` for the site (interfaces, and active discovery only after review, see below), check it with `sudo lan-tracker config validate`, then apply it with `sudo lan-tracker config reload`, which prints what took effect and what needs `sudo systemctl restart lan-tracker` (adding, removing or renaming interfaces, passive capture, storage, API, the web UI (`ui`), metrics, log format, `identity.oui_override` and the concurrency caps). The API socket and the database are root's (mode 0660 and 0640): run `lan-tracker` commands with `sudo`.
 
 Then check:
 
@@ -69,7 +69,7 @@ sudo test ! -s /data/lan-tracker/hosts.db-wal || echo "WAL not empty: start and 
 sudo cp -a /data/lan-tracker/hosts.db /data/lan-tracker/hosts.db.pre-$(lan-tracker version --quiet)
 ```
 
-Then run the commands of step 2: they install the new binary and unit, keep the site's config and start the daemon, which migrates the database. `sudo lan-tracker daemon status` shows the running version. New settings appear in the release's `config.yaml`; compare it with the site's (`sudo diff config.yaml /etc/lan-tracker/config.yaml`). [`RELEASE.md`](../RELEASE.md) lists any change to CLI output that scripts read, such as a new column.
+Then run the commands of step 2: they install the new binary and unit, keep the site's config and start the daemon, which migrates the database. `sudo lan-tracker daemon status` shows the running version. New settings appear in the release's `config.yaml`; compare it with the site's (`sudo diff config.yaml /etc/lan-tracker/config.yaml`). [`RELEASE.md`](../RELEASE.md) lists any change to CLI output that scripts read, such as a new column. A setting missing from the site's file keeps its default, so an upgraded box keeps the web UI off until `ui.enabled` is set. Upgrading to v0.3.0 runs migration 0002 (`hosts.evicted_at`, and a rebuild of the `events` table and its indexes for two new event types) in one transaction at the first start. It took about 40 s per million events rows on a fast amd64 workstation without the unit's limits (80 s for 2 million rows, an 864 MB database); expect several times that on the boards under the unit's `CPUQuota=20%`. The daemon extends systemd's start timeout every 10 s while it runs, so the start does not time out, but the API answers only once it has finished. The rebuild temporarily needs free disk about the size of the `events` table with its indexes (the 864 MB database above grew to 1352 MB; the space is reused afterwards, not returned). Check `df -h /data/lan-tracker` against `sudo lan-tracker db info` before upgrading a large database.
 
 To roll back, stop the service, put the previous binary and the copied database back, and start it. `lan-tracker --offline` refuses a database whose schema differs from the binary's until the daemon has migrated it.
 
@@ -104,7 +104,7 @@ Runs are serialised, so two releases never pick the same version. If a run fails
    - `sudo lan-tracker config reload` to start the periodic probes (it lists `interfaces[N].active.enabled` as applied, and the journal says `configuration reloaded; active discovery: arp every 15m on eth0 (…)`); periodic passes are not logged, so check them with `sudo lan-tracker observations list --source arp_scan`;
    - watch `lan_tracker_probe_total` and `lan_tracker_probe_throttled_total`.
 
-   If anything misbehaves: `lan-tracker active disable --reason "..."` stops every probe at once and stays set across restarts (`active enable` clears it). `LAN_TRACKER_ACTIVE_DISABLED=1` in the unit's environment forces it off fleet-wide.
+   If anything misbehaves: `lan-tracker active disable --reason "..."` stops every probe at once and stays set across restarts (`active enable` clears it). `LAN_TRACKER_ACTIVE_DISABLED=1` (or `true`, `yes`) in the unit's environment forces it off fleet-wide; any value other than `0`, `false`, `no` or empty forces it off too, with a warning in the journal.
 
 ## Everyday tasks
 

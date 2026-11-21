@@ -5,9 +5,10 @@ package icmp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/netip"
 	"sync"
 
@@ -61,7 +62,12 @@ func (e Engine) Run(ctx context.Context, p probe.Pass) ([]probe.Result, error) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	id := uint16(rand.Uint32()) //nolint:gosec // an echo identifier, not a secret
+	// An unpredictable identifier per pass, so a host on the link cannot
+	// forge matching replies for a raw socket without seeing the requests.
+	// crypto/rand.Read never fails (it panics instead).
+	var idb [2]byte
+	_, _ = rand.Read(idb[:])
+	id := binary.BigEndian.Uint16(idb[:])
 	seqs := map[uint16]netip.Addr{}
 	var mu sync.Mutex
 	replies := probe.NewReplies(p, nil)

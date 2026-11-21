@@ -26,13 +26,14 @@ Thank you for your interest in contributing to `lan-tracker`! This document cove
 
 ```sh
 make              # list every target
-make check        # format, tidy, vet, lint, vuln, race tests, coverage of internal/ >= 90%
+make check        # format, tidy, vet, lint, vuln, race tests, coverage of internal/ >= 95%, web UI typecheck and tests
 make check-all    # check plus the Docker network tests and the systemd tests
 make test PKGS=./internal/store/...   # one package while iterating
 make fuzz         # every Fuzz* target (FUZZTIME, default 30s)
 make chaos        # chaos and parallel suites at length with the race detector (CHAOS_DURATION=60s by default)
 make soak         # 90 simulated days of a 50-host LAN (several minutes)
-make build        # bin/lan-tracker for the Docker host's architecture
+make build        # bin/lan-tracker for the Docker host's architecture, web UI embedded
+make frontend-check # web UI typecheck and tests only (frontend/, Node container)
 ```
 
 [`AGENTS.md`](AGENTS.md) §8 says which of these to run for which change.
@@ -73,7 +74,7 @@ Examples:
 - Platform backends and probes on the wire: [`test/net`](test/net) (`make test-net`), run as uid 65534 with only `CAP_NET_RAW`
 - Chaos and parallel suites: extend `internal/correlate/chaos_test.go` with new observation kinds and invariants, and `internal/daemon/chaos_test.go` / `parallel_test.go` with new operator actions; a failure prints the seed (`make chaos LT_CHAOS_SEED=<seed>` replays it). Check that a planted bug makes them fail
 - Assert behaviour (rows, events, output, exit codes), not just that the code ran
-- Coverage of `internal/` stays at or above 90% (`make coverage`)
+- Coverage of `internal/` stays at or above 95% (`make coverage`)
 
 ### Documentation
 

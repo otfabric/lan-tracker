@@ -24,6 +24,32 @@ const (
 	EnvActiveDisabled = EnvPrefix + "ACTIVE_DISABLED"
 )
 
+// ActiveDisabledEnv reads EnvActiveDisabled from environ (the last
+// assignment wins, as in a process environment): 1, true or yes (any case)
+// set it; 0, false, no or empty leave it unset. Any other value sets it too,
+// so a mistyped value keeps active discovery off; known reports whether the
+// value was one of those listed. setting is the assignment as given
+// ("LAN_TRACKER_ACTIVE_DISABLED=yes"), recorded as the kill switch's reason.
+func ActiveDisabledEnv(environ []string) (forced, known bool, setting string) {
+	v, found := "", false
+	for _, kv := range environ {
+		if val, ok := strings.CutPrefix(kv, EnvActiveDisabled+"="); ok {
+			v, found = val, true
+		}
+	}
+	if !found {
+		return false, true, ""
+	}
+	setting = EnvActiveDisabled + "=" + v
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true, true, setting
+	case "", "0", "false", "no":
+		return false, true, setting
+	}
+	return true, false, setting
+}
+
 // Override is a value set from a command-line flag.
 type Override struct {
 	Key    string // config key path, e.g. "storage.path"

@@ -2,12 +2,15 @@ package correlate
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/otfabric/lan-tracker/internal/events"
 	"github.com/otfabric/lan-tracker/internal/observation"
+	"github.com/otfabric/lan-tracker/internal/store"
 )
 
 // causeOperator is the cause of kill-switch and scan events.
@@ -41,10 +44,15 @@ func (c *Correlator) operator(ctx context.Context, op observation.Operator) {
 // describe sets or removes a host's description (§5.8). A change emits
 // HOST_DESCRIBED with the old and new text and the operator; the same text
 // again changes nothing. An unknown host is ignored: the API checks that it
-// exists before asking.
+// exists before asking. An evicted host (ADR 0013) is described in the
+// database.
 func (c *Correlator) describe(ctx context.Context, op observation.Operator, ev events.Evidence) {
 	h := c.hostByID(op.HostID)
-	if h == nil || h.description == op.Description {
+	if h == nil {
+		c.describeEvicted(ctx, op, ev)
+		return
+	}
+	if h.description == op.Description {
 		return
 	}
 	old := h.description
@@ -120,4 +128,32 @@ func (c *Correlator) closeOpenScans(ctx context.Context, now time.Time) {
 			Evidence: events.Evidence{TS: now, Interface: n.iface, Reason: abortedScan}})
 	}
 	c.st.openScans = nil
+}
+
+// describeEvicted describes a host the correlator no longer holds: it
+// reads the row (as evictedRow does, without making the writer commit),
+// so the event carries the old text, and keeps the new text in memory
+// until it is committed, for a reinstatement before then.
+func (c *Correlator) describeEvicted(ctx context.Context, op observation.Operator, ev events.Evidence) {
+	c.prunePending()
+	var row store.EvictedHost
+	var err error
+	if p := c.st.pendingByID[op.HostID]; p != nil {
+		row = p.row
+	} else {
+		row, err = c.reader.EvictedHostRow(ctx, op.HostID)
+	}
+	if err != nil || row.Description == op.Description {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+			c.log.Error("correlator: reading an evicted host failed", "err", err)
+		}
+		return
+	}
+	old := row.Description
+	c.exec(ctx, "host description", `UPDATE hosts SET description = ? WHERE host_id = ?`, nullString(op.Description), op.HostID)
+	row.Description = op.Description
+	c.holdPending(ctx, row)
+	ev.Interface, ev.MAC = row.Interface, row.MAC
+	c.emit(ctx, events.Event{TS: op.Time, Type: events.HostDescribed, ContextID: row.ContextID, Interface: row.Interface, HostID: op.HostID,
+		MAC: row.MAC, Old: old, New: op.Description, Cause: causeOperator, Evidence: ev})
 }

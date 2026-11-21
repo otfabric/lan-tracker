@@ -133,8 +133,8 @@ func (r *Reader) DHCPLeases(ctx context.Context, f DHCPLeaseFilter) ([]DHCPLease
 	if f.Open {
 		w.add(`l.ended_at IS NULL`)
 	}
-	if f.Limit <= 0 {
-		f.Limit = DefaultDHCPLimit
+	if f.Limit, err = boundLimit(f.Limit, DefaultDHCPLimit); err != nil {
+		return nil, err
 	}
 	var out []DHCPLease
 	err = r.read(ctx, func(tx *sql.Tx) error {
@@ -198,8 +198,8 @@ func (r *Reader) DHCPExchanges(ctx context.Context, f DHCPExchangeFilter) ([]DHC
 	if !f.Since.IsZero() {
 		w.add(`x.last_seen >= ?`, msOf(f.Since))
 	}
-	if f.Limit <= 0 {
-		f.Limit = DefaultDHCPLimit
+	if f.Limit, err = boundLimit(f.Limit, DefaultDHCPLimit); err != nil {
+		return nil, err
 	}
 	out := []DHCPExchange{}
 	err = r.read(ctx, func(tx *sql.Tx) error {

@@ -22,6 +22,10 @@ func TestCleanDescription(t *testing.T) {
 		{"two\nlines", "", false},
 		{"a\ttab", "", false},
 		{"bad \xff byte", "", false},
+		{"pump \u202eA tes\u202c", "", false},
+		{"pump \u2066B\u2069", "", false},
+		{"pump \u200fC", "", false},
+		{"family \U0001F468\u200d\U0001F469", "family \U0001F468\u200d\U0001F469", true}, // a zero-width joiner is not a bidi control
 	} {
 		got, err := store.CleanDescription(tt.in)
 		if got != tt.want || (err == nil) != tt.ok || err != nil && !errors.Is(err, store.ErrDescription) {

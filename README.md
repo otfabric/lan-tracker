@@ -97,7 +97,7 @@ The [user guide](docs/USER_GUIDE.md) walks through real sessions: finding a devi
 - **Passively, always:** ARP, DHCP, mDNS, DNS answers, LLDP and IPv4 source addresses seen on the interface (IPv6 neighbour discovery when enabled), plus the kernel's own neighbour table. On a switched port that is the box's own traffic plus broadcast and multicast; on a mirror port, everything.
 - **Actively, only when enabled per interface:** ARP sweeps of the networks you list, ping and plain TCP connects (no payload) to known devices, and DNS/mDNS questions about names and addresses already seen. Every probe takes a slot from a budget (by default 5 per second in all), excluded addresses are never touched, and `sudo lan-tracker active disable --reason "..."` stops all probing at once and stays set across restarts. Preview any scan with `lan-tracker scan plan`.
 - **History:** a device is one MAC on one interface; its addresses, names, DHCP leases and TCP results each have first-seen and last-seen times, and every material change is an event. Raw observations are kept 7 days, hourly summaries 90 days and events 2 years, inside a 200 MB database budget.
-- **Local only:** a REST API on a Unix socket, optional Prometheus metrics on loopback, and the CLI. No data leaves the box.
+- **Local only:** a REST API on a Unix socket, optional Prometheus metrics on loopback, the CLI, and an optional web UI on loopback (`ui.enabled`, reached over SSH; see the [user guide](docs/USER_GUIDE.md#16-the-web-ui)). No data leaves the box.
 
 ## Documentation
 
@@ -114,7 +114,7 @@ Everything builds and tests in a Linux dev container, so a development machine (
 
 ```bash
 make check     # format, lint, vulnerability check, tests with the race detector and coverage
-make package   # dist/release/lan-tracker-<version>-linux-{amd64,arm64}.tar.gz
+make package   # dist/release/lan-tracker-<version>-linux-{amd64,arm64}.tar.gz (web UI included)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full list of targets and test suites.

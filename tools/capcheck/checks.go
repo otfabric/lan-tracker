@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"os"
 	"strconv"
@@ -73,11 +74,17 @@ func packetSocket(ifi ifaceInfo) (int, error) {
 }
 
 func attachFilter(fd int, prog []bpf.RawInstruction) error {
-	f := make([]unix.SockFilter, len(prog))
+	// sock_fprog carries the length in 16 bits; the kernel takes 1 to
+	// BPF_MAXINSNS (4096) instructions.
+	n := len(prog)
+	if n == 0 || n > math.MaxUint16 {
+		return fmt.Errorf("bpf: %d instructions", n)
+	}
+	f := make([]unix.SockFilter, n)
 	for i, ins := range prog {
 		f[i] = unix.SockFilter{Code: ins.Op, Jt: ins.Jt, Jf: ins.Jf, K: ins.K}
 	}
-	return unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: uint16(len(f)), Filter: &f[0]})
+	return unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: uint16(n), Filter: &f[0]})
 }
 
 func runChecks(ctx context.Context, o options, ifi ifaceInfo) []result {

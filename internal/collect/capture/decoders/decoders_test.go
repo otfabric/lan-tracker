@@ -418,6 +418,8 @@ func TestText(t *testing.T) {
 		"\xff\xfeok":             "ok",
 		strings.Repeat("x", 300): strings.Repeat("x", maxText),
 		"Läufer-PLC":             "Läufer-PLC",
+		"plc\u202egnp.exe":       "plc gnp.exe",
+		"\u200bplc\u2066-1":      "plc -1",
 	} {
 		if got := text([]byte(in), maxText); got != want {
 			t.Errorf("text(%q) = %q, want %q", in, got, want)

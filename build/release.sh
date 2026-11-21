@@ -9,6 +9,9 @@ targets="linux/amd64 linux/arm64"
 
 case $mode in
 release)
+	# A release always carries the web UI (ADR 0012); without frontend/dist
+	# the binary would serve the placeholder page.
+	[ -f frontend/dist/index.html ] || { echo "frontend/dist is empty: run make frontend" >&2; exit 1; }
 	rm -rf dist/lan-tracker-* dist/SHA256SUMS
 	mkdir -p dist
 	for t in $targets; do

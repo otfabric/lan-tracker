@@ -117,7 +117,7 @@ active:
     service_types: [_http._tcp]        # DNS-SD types to enumerate (format _name._tcp or _name._udp); none by default
     enumerate_services: false          # one _services._dns-sd._udp.local query per pass; its answers are not chased
     resolvers: [192.168.110.1]         # unicast DNS for PTR of known addresses and A/AAAA of known names; none: no unicast DNS
-    max_queries_per_pass: 64           # cap per pass per interface (1 to 1024)
+    max_queries_per_pass: 64           # queries sent per pass per interface, CNAME follow-ups included (1 to 1024)
 
 # ---------------------------------------------------------------------------
 # Named on-demand scan profiles (used by `lan-tracker scan run --profile`).
@@ -151,6 +151,8 @@ identity:
   name_expiry: 168h                    # names without a TTL not confirmed this long read as stale; time never closes them
   proxy_arp_threshold: 16              # flag a MAC answering ARP for more than this many distinct IPs (>= 2)
   oui_override: ""                     # optional path to a PREFIX[/bits] Name override file; restart to change
+  max_hosts_per_interface: 4096        # hosts (and open DHCP leases) held per interface; a new MAC beyond this evicts
+                                       # the host missing the longest, or is refused while none is missing (>= 1, ADR 0013)
 
 # ---------------------------------------------------------------------------
 # SQLite storage and retention. All storage keys need a restart. Over
@@ -172,6 +174,15 @@ storage:
 api:
   socket: /run/lan-tracker/api.sock    # required; <= 107 bytes (Linux sun_path limit)
   listen: ""                           # e.g. 127.0.0.1:9734 (loopback only); empty disables the TCP listener
+
+# ---------------------------------------------------------------------------
+# Web UI (ADR 0012). Needs a restart. Off by default; `lan-tracker ui url`
+# prints the address with its access token (kept in ui.token next to the
+# database). Reach it from another machine through an SSH tunnel.
+# ---------------------------------------------------------------------------
+ui:
+  enabled: false                       # serve the web UI
+  listen: 127.0.0.1:9735               # loopback only; must differ from api.listen
 
 # ---------------------------------------------------------------------------
 # Metrics. Needs a restart (served on api.listen when set).

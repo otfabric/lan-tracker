@@ -37,6 +37,8 @@ jobs:
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
         if: steps.token.outputs.run == 'true'
       - uses: actions/setup-go@v7
         if: steps.token.outputs.run == 'true'

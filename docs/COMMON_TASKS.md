@@ -66,6 +66,7 @@ Which files each task touches: [`AI_REPO_MAP.md`](AI_REPO_MAP.md) (Common tasks:
 | A decision | `REQUIREMENTS.md` §5 (with the date); an ADR if foundational |
 | A roadmap item built, or work deferred | `ROADMAP.md` (remove the item, or add it); the specifications describe only what is built |
 | Operator-visible behaviour | `USER_GUIDE.md` |
+| The web UI (`frontend/`) | `USER_GUIDE.md` §16 for what operators see; `API.md` (Web UI) for the listener; `frontend/src` tests beside the code (`make frontend-check`) |
 | New package or moved responsibility | `ARCHITECTURE.md` §4, `docs/AI_REPO_MAP.md` |
 
 Style used throughout the docs:

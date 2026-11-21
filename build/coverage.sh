@@ -6,7 +6,7 @@
 # Runs in the dev image.
 set -euo pipefail
 out=${COVERAGE:-coverage.out}
-min=${COVER_MIN:-90}
+min=${COVER_MIN:-95}
 pkgs=$(go list ./internal/... | paste -sd, -)
 mapfile -t tests < <(go list ./... | grep -v -e /tools/ -e /cmd/ -e /data/oui/gen)
 
