@@ -78,7 +78,7 @@ Fields: `time` (RFC 3339), `source`, `interface`, `mac`, `ip`, `hostname`, `name
 
 A `hostname` with a `name_type` (the short form used in hand-written replay files and the golden scenarios) stands for the record it describes: an A or AAAA record for an `mdns` or `dns` name with an address, a PTR for a `dns_ptr` name with an address, else a NAME the sender gave itself. A DHCP observation carries its message only in `dhcp`; one straight from the client also carries the client's hostname (option 12) as `hostname` with name type `dhcp`.
 
-An observation's `time` is the time of the evidence, not of its delivery. For `kernel_neighbor` it is when the kernel last confirmed reachability (`nda_cacheinfo.ndm_confirmed`), so an entry that lingers in the table as STALE carries its old time and adds no fresh evidence.
+An observation's `time` is the time of the evidence, not of its delivery. For `kernel_neighbor` it is when the kernel last confirmed reachability (`nda_cacheinfo.ndm_confirmed`), so an entry that lingers in the table as STALE carries its old time and adds no fresh evidence. A binding the collector has not reported before (a new entry, or a new MAC behind a known address) is stamped no earlier than the entry's last update (`ndm_updated`): the kernel dates a new entry's confirmation twice `base_reachable_time` (60 s by default) before the entry existed, and keeps the old MAC's confirmation when a received packet changes the MAC.
 
 Replayed observations (pcap or JSONL) keep their recorded source and time; there is no separate replay source, so the correlator treats them exactly as live ones.
 
