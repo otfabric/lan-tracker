@@ -1,5 +1,26 @@
 # lan-tracker Releases
 
+## v0.4.0
+
+**Date:** 2026-11-21
+**Previous release:** v0.3.0
+
+### Summary
+
+Minor release: the web UI can listen on an address of the box, and `daemon status` says whether the UI is on and where. Nothing changes for a configuration that keeps the default `ui.listen`.
+
+### Added
+
+- `ui.listen` may be `localhost` or any IP address of the box, `0.0.0.0` or `::` for all of them, so the UI can be opened from the LAN without an SSH tunnel (ADR 0012, Amendment). The default stays `127.0.0.1:9735`. Off loopback the UI takes a `Host` that is an IP address or the box's hostname and still refuses other names, and the daemon logs a warning at start: the UI is plain HTTP, so the token and the data travel unencrypted.
+- `sudo lan-tracker ui url` prints one URL per address the UI answers at (loopback first) when it listens on `0.0.0.0` or `::`; `GET /v1/ui` has a new `urls` list.
+- `daemon status` prints a `Web UI:` line (`disabled`, or `enabled on <listen>`), and `/v1/status` has a `ui` object (`enabled`, `listen`; never the token).
+
+### Changed
+
+- `ui.listen` must use another port than `api.listen` (it had to differ only as an address).
+
+---
+
 ## v0.3.0
 
 **Date:** 2026-11-21

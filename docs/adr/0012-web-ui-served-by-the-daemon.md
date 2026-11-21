@@ -24,7 +24,15 @@ The CLI answers every question the tracker can answer, but a site engineer askin
 
 ## Ruled out
 
-- Listening on anything but loopback, or serving the UI without the token.
+- Serving the UI without the token.
+
+## Amendment (21 Nov 2026)
+
+The maintainer asked to open the UI from the LAN without an SSH tunnel. `ui.listen` may now name `localhost` or any IP address of the box, `0.0.0.0` or `::` included; the default stays `127.0.0.1:9735`, and a hostname other than `localhost` is refused (`REQUIREMENTS.md` §5, Web UI listen address).
+
+- **Host check off loopback.** The listener takes a `Host` that is an IP address, `localhost`, or the box's own hostname (also with `.local`). Any other name is refused, which keeps the DNS-rebinding protection: a page under an attacker's name sends that name as `Host`.
+- **No TLS.** Off loopback the token and the data travel as plain HTTP. The daemon logs a warning at start, and `SECURITY.md` says to prefer loopback and an SSH tunnel, or to limit who can reach the port. TLS or another login is not built; it would be a new decision.
+- **Where it answers.** `ui url` prints one URL per address the UI answers at (loopback first), and `daemon status` and `/v1/status` show whether the UI is enabled and where it listens, never the token.
 - Operator actions other than descriptions from the UI (kill switch, scans, reload).
 - A syslog receiver or any other new collector for the UI's sake (a separate decision; `ROADMAP.md`).
 - A Wails desktop shell for now (deferred, `ROADMAP.md`).

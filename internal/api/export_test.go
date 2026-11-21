@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"time"
 )
@@ -43,3 +44,17 @@ func FailUITokenWrite() func() {
 	}
 	return func() { writeUIToken = old }
 }
+
+// SetUIHostname sets the box's name for a test and returns a
+// function that restores it.
+func SetUIHostname(name string) func() {
+	old := uiHostname
+	uiHostname = func() (string, error) { return name, nil }
+	return func() { uiHostname = old }
+}
+
+// UIHostCheck is uiHostCheck with uiHostname, for a test.
+func UIHostCheck(listen string) func(*http.Request) bool { return uiHostCheck(listen, uiHostname) }
+
+// UIAddrs is uiAddrs, for a test.
+var UIAddrs = uiAddrs

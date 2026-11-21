@@ -96,6 +96,11 @@ func (a *app) statusText(w io.Writer, st api.Status) {
 		}
 	}
 	fmt.Fprintf(w, "Last scan:  %s\n", last)
+	ui := "disabled"
+	if st.UI.Enabled {
+		ui = "enabled on " + st.UI.Listen + "   (URL with the token: sudo lan-tracker ui url)"
+	}
+	fmt.Fprintf(w, "Web UI:     %s\n", ui)
 	fmt.Fprintln(w, "Interfaces:")
 	for _, i := range st.Interfaces {
 		fmt.Fprintf(w, "  %-6s %-7s %s\n", i.Name, i.State, strings.Join(i.Prefixes, " "))

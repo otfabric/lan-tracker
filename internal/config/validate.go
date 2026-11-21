@@ -416,8 +416,9 @@ func (v *validator) api(cfg *Config) {
 	}
 }
 
-// ui checks the web UI listener (ADR 0012): loopback only, like
-// api.listen, and not the same address.
+// ui checks the web UI listener (ADR 0012): localhost or an IP address of
+// the box (0.0.0.0 and :: for every address), on a port api.listen does
+// not use.
 func (v *validator) ui(cfg *Config) {
 	u := cfg.UI
 	if !u.Enabled {
@@ -427,8 +428,18 @@ func (v *validator) ui(cfg *Config) {
 		v.add("ui.listen", "is required when ui.enabled is set")
 		return
 	}
-	if v.loopback("ui.listen", u.Listen) && u.Listen == cfg.API.Listen {
-		v.add("ui.listen", "must differ from api.listen (%s)", cfg.API.Listen)
+	host, port, err := net.SplitHostPort(u.Listen)
+	if err != nil {
+		v.add("ui.listen", "must be host:port, got %q", u.Listen)
+		return
+	}
+	if _, err := netip.ParseAddr(host); err != nil && host != "localhost" {
+		v.add("ui.listen", "must listen on localhost or an IP address (127.0.0.1, 0.0.0.0, ::, or an address of the box), got %q", host)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		v.add("ui.listen", "invalid port %q", port)
+	} else if _, apiPort, err := net.SplitHostPort(cfg.API.Listen); err == nil && apiPort == port {
+		v.add("ui.listen", "must use another port than api.listen (%s)", cfg.API.Listen)
 	}
 }
 
@@ -450,4 +461,15 @@ func (v *validator) loopback(key, listen string) bool {
 		ok = false
 	}
 	return ok
+}
+
+// LoopbackListen reports whether a host:port listener is on loopback only
+// (localhost, 127.0.0.0/8 or ::1).
+func LoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	return host == "localhost" || err == nil && ip.IsLoopback()
 }

@@ -2,13 +2,16 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -242,8 +245,9 @@ func TestUIListener(t *testing.T) {
 		{"asset", "GET", "/assets/app.js", "", "", "", 200, "console.log"},
 		{"missing asset", "GET", "/assets/nope.js", "", "", "", 404, ""},
 		{"post page", "POST", "/", "", "", "", 405, ""},
-		{"not loopback", "GET", "/", "", "lan-tracker.example:9735", "", 403, "loopback"},
-		{"api not loopback", "GET", "/v1/status", tok, "evil.example", "", 403, "loopback"},
+		{"not loopback", "GET", "/", "", "lan-tracker.example:9735", "", 403, "Host must be"},
+		{"api not loopback", "GET", "/v1/status", tok, "evil.example", "", 403, "Host must be"},
+		{"address on loopback listener", "GET", "/", "", "192.168.0.106:9735", "", 403, "Host must be"},
 		{"no token", "GET", "/v1/status", "", "", "", 401, "token"},
 		{"wrong token", "GET", "/v1/status", "x" + tok[1:], "", "", 401, "token"},
 		{"status", "GET", "/v1/status", tok, "", "", 200, `"version":"test"`},
@@ -281,7 +285,7 @@ func TestUIListener(t *testing.T) {
 
 	// The socket hands out the URL with the token.
 	u, err := api.NewClient(f.socket, 5*time.Second).UI(context.Background())
-	if err != nil || !u.Enabled || u.URL != f.base+"/#token="+tok || "http://"+u.Listen != f.base {
+	if err != nil || !u.Enabled || u.URL != f.base+"/#token="+tok || "http://"+u.Listen != f.base || len(u.URLs) != 1 || u.URLs[0] != u.URL {
 		t.Errorf("ui info: %v %+v", err, u)
 	}
 }
@@ -451,5 +455,64 @@ func TestActivityEndpoint(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("%s: %d", q, resp.StatusCode)
 		}
+	}
+}
+
+// A UI listener off loopback takes any IP address and the box's own name as
+// Host, and still refuses other names (DNS rebinding).
+func TestUIHostOffLoopback(t *testing.T) {
+	defer api.SetUIHostname("Edge-Box")()
+	for listen, cases := range map[string]map[string]bool{
+		"0.0.0.0:9735": {"192.168.0.106:9735": true, "[2a02:1810::1]:9735": true, "127.0.0.1": true, "localhost:9735": true,
+			"edge-box:9735": true, "EDGE-BOX.local.": true, "evil.example:9735": false, "edge-box.example": false},
+		"192.168.0.106:9735": {"192.168.0.106:9735": true, "edge-box": true, "evil.example": false},
+		"localhost:9735":     {"localhost:9735": true, "127.0.0.1:9735": true, "192.168.0.106:9735": false, "edge-box": false},
+		"[::1]:9735":         {"[::1]:9735": true, "edge-box": false},
+	} {
+		check := api.UIHostCheck(listen)
+		for host, want := range cases {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Host = host
+			if got := check(r); got != want {
+				t.Errorf("listen %s, Host %q: %v, want %v", listen, host, got, want)
+			}
+		}
+	}
+	defer api.SetUIHostname("")()
+	if api.UIHostCheck("0.0.0.0:9735")(httptest.NewRequest(http.MethodGet, "http://.local/", nil)) {
+		t.Error("an empty hostname matched")
+	}
+}
+
+// The URLs of a UI on every address: loopback, then the box's global
+// addresses of the listener's family.
+func TestUIURLsOnEveryAddress(t *testing.T) {
+	addrs := func() ([]net.Addr, error) {
+		var out []net.Addr
+		for _, s := range []string{"127.0.0.1/8", "192.168.0.106/24", "::1/128", "2a02:1810:1e02:5e00::1/64", "fe80::1/64", "bad"} {
+			if ip, n, err := net.ParseCIDR(s); err == nil {
+				out = append(out, &net.IPNet{IP: ip, Mask: n.Mask})
+			} else {
+				out = append(out, &net.IPAddr{IP: nil})
+			}
+		}
+		return out, nil
+	}
+	for listen, want := range map[string][]string{
+		"0.0.0.0:9735":       {"127.0.0.1:9735", "192.168.0.106:9735"},
+		"[::]:9735":          {"127.0.0.1:9735", "[::1]:9735", "192.168.0.106:9735", "[2a02:1810:1e02:5e00::1]:9735"},
+		"192.168.0.106:9735": {"192.168.0.106:9735"},
+		"localhost:9735":     {"localhost:9735"},
+	} {
+		if got := api.UIAddrs(&api.UIOptions{Listen: listen, Addrs: addrs}); !slices.Equal(got, want) {
+			t.Errorf("%s: %v, want %v", listen, got, want)
+		}
+	}
+	failing := func() ([]net.Addr, error) { return nil, errors.New("no netlink") }
+	if got := api.UIAddrs(&api.UIOptions{Listen: "0.0.0.0:1", Addrs: failing}); !slices.Equal(got, []string{"127.0.0.1:1"}) {
+		t.Errorf("without the address list: %v", got)
+	}
+	if got := api.UIAddrs(&api.UIOptions{Listen: "0.0.0.0:1"}); len(got) == 0 || got[0] != "127.0.0.1:1" {
+		t.Errorf("the box's own addresses: %v", got)
 	}
 }
